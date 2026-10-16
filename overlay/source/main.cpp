@@ -100,6 +100,9 @@ public:
 
             // The relay address is derived from this LAN address, so showing
             // it makes it obvious why the two consoles get different ids.
+            // nifm only hands out an address once the LAN session exists, so
+            // before the game creates or joins a room there is nothing to
+            // read -- that is expected, not a failure.
             u32 local_ip = 0;
             if (R_SUCCEEDED(ldnMitmGetRelayLocalIp(&g_ldnConfig, &local_ip)) && local_ip != 0) {
                 char ipbuf[32];
@@ -108,15 +111,15 @@ public:
                          (local_ip >> 8) & 0xff, local_ip & 0xff);
                 list->addItem(new tsl::elm::ListItem("本机 IP", ipbuf));
             } else {
-                list->addItem(new tsl::elm::ListItem("本机 IP", "读取失败"));
+                list->addItem(new tsl::elm::ListItem("本机 IP", "建立房间后显示"));
             }
 
             u32 vaddr = 0;
             const bool addr_ok = R_SUCCEEDED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr));
             if (!addr_ok) {
-                list->addItem(new tsl::elm::ListItem("虚拟地址", "错误"));
+                list->addItem(new tsl::elm::ListItem("虚拟地址", "读取失败"));
             } else if (vaddr == 0) {
-                list->addItem(new tsl::elm::ListItem("虚拟地址", "尚未分配"));
+                list->addItem(new tsl::elm::ListItem("虚拟地址", "建立房间后分配"));
             } else {
                 char buf[48];
                 snprintf(buf, sizeof(buf), "%u.%u.%u.%u  (id=%u)",
@@ -140,7 +143,9 @@ public:
                 } else if (src == 2) {
                     list->addItem(new tsl::elm::ListItem("地址固定", "启动随机"));
                 } else {
-                    list->addItem(new tsl::elm::ListItem("地址固定", "未知"));
+                    // The id either predates hardware derivation or was cached
+                    // before this console's LAN address changed.
+                    list->addItem(new tsl::elm::ListItem("地址固定", "未知来源"));
                 }
             }
             list->addItem(new tsl::elm::ListItem("两台机器的地址必须不同"));

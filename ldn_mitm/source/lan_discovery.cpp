@@ -911,6 +911,7 @@ namespace ams::mitm::ldn {
 
     void LANDiscovery::worker() {
         os::Tick last_beacon = os::GetSystemTick();
+        os::Tick last_ping = last_beacon;
         while (!this->stop) {
 
             int rc = loopPoll();
@@ -948,11 +949,6 @@ namespace ams::mitm::ldn {
                         }
                     }
 
-                    /* Ping independently of the reconnect branch: the overlay's
-                       latency readout would otherwise freeze as soon as a few
-                       echoes are missed, and never recover on its own. */
-                    this->relay->ping();
-
                     if (this->state == CommState::AccessPointCreated) {
                         std::scoped_lock lock(this->dataMutex);
                         bool changed = false;
@@ -982,6 +978,12 @@ namespace ams::mitm::ldn {
                             this->onDisconnectFromHost(DisconnectReason::SignalLost);
                         }
                     }
+                } else if (os::ConvertToTimeSpan(now - last_ping).GetMilliSeconds() >= RelayPingIntervalMs) {
+                    /* Probe on its own cadence, outside the beacon gate, so a
+                       fresh server reports latency within about a second
+                       instead of waiting up to a full beacon interval. */
+                    last_ping = now;
+                    this->relay->ping();
                 }
             }
             /* Brief unlocked window so IPC threads can grab pollMutex. */

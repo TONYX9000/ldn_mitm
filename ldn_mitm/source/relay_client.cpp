@@ -794,9 +794,13 @@ namespace ams::mitm::ldn::relay {
             return -1;
         }
         ++m_ping_misses;
-        /* Remember the send time; the echo computes the round trip. */
-        g_latency.pending_ms = os::ConvertToTimeSpan(os::GetSystemTick()).GetMilliSeconds();
-        g_latency.waiting = 1;
+        /* Only arm a new measurement when no echo is outstanding. Overwriting
+           the timestamp would make the echo of the earlier ping look almost
+           instantaneous, which is how a stale reading used to appear. */
+        if (g_latency.waiting.load() == 0) {
+            g_latency.pending_ms = os::ConvertToTimeSpan(os::GetSystemTick()).GetMilliSeconds();
+            g_latency.waiting = 1;
+        }
         const u8 p[4] = { TypePing, 'l', 'd', 'n' };
         return send(m_fd, p, sizeof(p), 0);
     }
