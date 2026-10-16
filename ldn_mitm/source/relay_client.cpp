@@ -95,6 +95,10 @@ namespace ams::mitm::ldn::relay {
         constexpr int IdSourceRandom   = 2;
         std::atomic_int g_id_source{IdSourceUnknown};
 
+        /* Defined next to EnsureClientId() below. */
+        bool DeriveIdFromHardware(u16 *out);
+        void RefreshIdSource();
+
         /* Relay link latency: PING round-trip time in ms. 0 = not measured yet.
            Only an echo of the ping we are still waiting on updates it. */
         struct LatencyState {
@@ -254,6 +258,11 @@ namespace ams::mitm::ldn::relay {
             }
         }
         LogFormat("relay: loaded %d server(s), selected %d", g_count, g_selected.load());
+
+        /* The id may have been cached in relay.cfg by an earlier boot; work
+           out how it relates to this console's current LAN address so the
+           overlay can report whether the address is stable. */
+        RefreshIdSource();
     }
 
     namespace {
@@ -353,6 +362,26 @@ namespace ams::mitm::ldn::relay {
             return true;
         }
 
+        /* Classify the id we are currently using. Called on every config load,
+           not only when a fresh id is drawn: a cached id that still matches
+           what this console's LAN address derives is just as stable, and the
+           overlay should say so after every reboot. */
+        void RefreshIdSource() {
+            const u16 id = g_client_id.load();
+            if (id == 0) {
+                g_id_source = IdSourceUnknown;
+                return;
+            }
+            u16 hw = 0;
+            if (!DeriveIdFromHardware(std::addressof(hw))) {
+                /* No usable LAN address: the id must have come from the
+                   random fallback (or predates this feature). */
+                g_id_source = IdSourceRandom;
+                return;
+            }
+            g_id_source = (hw == id) ? IdSourceHardware : IdSourceUnknown;
+        }
+
         u16 EnsureClientId() {
             u16 id = g_client_id.load();
             if (id == 0) {
@@ -370,7 +399,7 @@ namespace ams::mitm::ldn::relay {
                        the write is only a cache, so a read-only SD card still
                        yields the same address on every boot. */
                     PersistConfig();
-                    g_id_source = from_hw ? IdSourceHardware : IdSourceRandom;
+                    RefreshIdSource();
                     LogFormat("relay: assigned virtual address 10.13.%u.%u (%s)",
                               (id >> 8) & 0xff, id & 0xff, from_hw ? "hardware" : "random");
                 } else {
@@ -408,6 +437,14 @@ namespace ams::mitm::ldn::relay {
 
     int RelayGetIdSource() {
         return g_id_source.load();
+    }
+
+    u32 RelayGetLocalIp() {
+        u32 ip = 0;
+        if (R_FAILED(nifmGetCurrentIpAddress(&ip))) {
+            return 0;
+        }
+        return ntohl(ip);
     }
 
     bool IsSessionPeer(u32 ip) {

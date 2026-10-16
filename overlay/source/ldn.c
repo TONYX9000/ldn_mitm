@@ -83,6 +83,10 @@ Result ldnMitmGetRelayIdSource(LdnMitmConfigService *s, u32 *source) {
     return serviceDispatchOut(&s->s, 65016, *source);
 }
 
+Result ldnMitmGetRelayLocalIp(LdnMitmConfigService *s, u32 *addr) {
+    return serviceDispatchOut(&s->s, 65017, *addr);
+}
+
 Result ldnMitmGetVersion(LdnMitmConfigService *s, char *version) {
     char version_s[32];
     Result rc = serviceDispatchOut(&s->s, 65001, version_s);

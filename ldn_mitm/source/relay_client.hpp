@@ -43,6 +43,8 @@ namespace ams::mitm::ldn {
         u32  RelayGetVirtualAddress();
         /* How the id was assigned: 0 unknown, 1 hardware-derived, 2 random. */
         int  RelayGetIdSource();
+        /* This console's LAN address, host order; 0 if unavailable. */
+        u32  RelayGetLocalIp();
 
         /* ServerIp is 0 when the server is a hostname; resolve ServerHost then. */
         u32 ServerIp();

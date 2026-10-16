@@ -97,6 +97,20 @@ public:
             // low 16 bits (`id=`), and the plugin assigns one on first use if
             // the line is absent, so this is the only place to read it back.
             list->addItem(new tsl::elm::CategoryHeader("本机身份"));
+
+            // The relay address is derived from this LAN address, so showing
+            // it makes it obvious why the two consoles get different ids.
+            u32 local_ip = 0;
+            if (R_SUCCEEDED(ldnMitmGetRelayLocalIp(&g_ldnConfig, &local_ip)) && local_ip != 0) {
+                char ipbuf[32];
+                snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u",
+                         (local_ip >> 24) & 0xff, (local_ip >> 16) & 0xff,
+                         (local_ip >> 8) & 0xff, local_ip & 0xff);
+                list->addItem(new tsl::elm::ListItem("本机 IP", ipbuf));
+            } else {
+                list->addItem(new tsl::elm::ListItem("本机 IP", "读取失败"));
+            }
+
             u32 vaddr = 0;
             const bool addr_ok = R_SUCCEEDED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr));
             if (!addr_ok) {

@@ -78,4 +78,8 @@ namespace ams::mitm::ldn {
         source.SetValue(static_cast<u32>(relay::RelayGetIdSource()));
         R_SUCCEED();
     }
+    Result LdnConfig::GetRelayLocalIp(sf::Out<u32> addr) {
+        addr.SetValue(relay::RelayGetLocalIp());
+        R_SUCCEED();
+    }
 }

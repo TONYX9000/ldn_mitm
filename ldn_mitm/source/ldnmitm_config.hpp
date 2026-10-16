@@ -42,6 +42,8 @@ namespace ams::mitm::ldn {
             Result GetRelayVirtualAddress(sf::Out<u32> addr);
             /* How the id was assigned: 0 unknown, 1 hardware-derived, 2 random. */
             Result GetRelayIdSource(sf::Out<u32> source);
+            /* This console's LAN address, host order; 0 if unavailable. */
+            Result GetRelayLocalIp(sf::Out<u32> addr);
     };
     static_assert(ams::mitm::ldn::IsILdnConfig<LdnConfig>);
 
