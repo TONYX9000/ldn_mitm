@@ -41,28 +41,30 @@ public:
     MainGui() { }
 
     virtual tsl::elm::Element* createUI() override {
-        auto frame = new tsl::elm::OverlayFrame("ldn_mitm", g_version);
+        // This overlay ships inside a Chinese integration package and the
+        // bundled font has CJK glyphs, so the UI is localised in place.
+        auto frame = new tsl::elm::OverlayFrame("联机插件", g_version);
 
         auto list = new tsl::elm::List();
 
         if (g_state == State::Error) {
-            list->addItem(new tsl::elm::ListItem("ldn_mitm is not loaded."));
+            list->addItem(new tsl::elm::ListItem("插件没有加载"));
         } else if (g_state == State::Uninit) {
-            list->addItem(new tsl::elm::ListItem("wrong state"));
+            list->addItem(new tsl::elm::ListItem("错误的状态"));
         } else {
-            list->addItem(new ConfigToggleListItem("Enabled", ldnMitmGetEnabled, ldnMitmSetEnabled));
-            list->addItem(new ConfigToggleListItem("Broadcast relay", ldnMitmGetBroadcastRelay, ldnMitmSetBroadcastRelay));
-            list->addItem(new ConfigToggleListItem("Logging", ldnMitmGetLogging, ldnMitmSetLogging));
+            list->addItem(new ConfigToggleListItem("启用", ldnMitmGetEnabled, ldnMitmSetEnabled));
+            list->addItem(new ConfigToggleListItem("广播转发", ldnMitmGetBroadcastRelay, ldnMitmSetBroadcastRelay));
+            list->addItem(new ConfigToggleListItem("日志", ldnMitmGetLogging, ldnMitmSetLogging));
 
-            list->addItem(new tsl::elm::CategoryHeader("Internet relay (cross-network play)"));
-            list->addItem(new ConfigToggleListItem("Internet relay", ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
+            list->addItem(new tsl::elm::CategoryHeader("互联网中继（跨网联机）"));
+            list->addItem(new ConfigToggleListItem("互联网中继", ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
 
             g_serverItems.clear();
             u32 count = 0;
             if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count))) {
-                list->addItem(new tsl::elm::ListItem("Failed to read relay servers"));
+                list->addItem(new tsl::elm::ListItem("读取服务器列表失败"));
             } else if (count == 0) {
-                list->addItem(new tsl::elm::ListItem("No servers - edit /config/ldn_mitm/relay.cfg"));
+                list->addItem(new tsl::elm::ListItem("没有服务器，请编辑 relay.cfg"));
             } else {
                 u32 selected = 0;
                 if (R_FAILED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &selected))) {
@@ -76,7 +78,7 @@ public:
                     item->setClickListener([i](u64 keys) {
                         if (keys & HidNpadButton_A) {
                             if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
-                                g_serverItems[i]->setValue("error");
+                                g_serverItems[i]->setValue("错误");
                                 return true;
                             }
                             for (size_t k = 0; k < g_serverItems.size(); k++) {
@@ -94,21 +96,21 @@ public:
             // Show this console's relay identity. relay.cfg only stores the
             // low 16 bits (`id=`), and the plugin assigns one on first use if
             // the line is absent, so this is the only place to read it back.
-            list->addItem(new tsl::elm::CategoryHeader("This console"));
+            list->addItem(new tsl::elm::CategoryHeader("本机身份"));
             u32 vaddr = 0;
             if (R_FAILED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr))) {
-                list->addItem(new tsl::elm::ListItem("Virtual address", "error"));
+                list->addItem(new tsl::elm::ListItem("虚拟地址", "错误"));
             } else if (vaddr == 0) {
-                list->addItem(new tsl::elm::ListItem("Virtual address", "not assigned yet"));
+                list->addItem(new tsl::elm::ListItem("虚拟地址", "尚未分配"));
             } else {
                 char buf[48];
                 snprintf(buf, sizeof(buf), "%u.%u.%u.%u  (id=%u)",
                          (vaddr >> 24) & 0xff, (vaddr >> 16) & 0xff,
                          (vaddr >> 8) & 0xff, vaddr & 0xff, vaddr & 0xffff);
-                list->addItem(new tsl::elm::ListItem("Virtual address", buf));
+                list->addItem(new tsl::elm::ListItem("虚拟地址", buf));
             }
-            list->addItem(new tsl::elm::ListItem("Two consoles must differ"));
-            list->addItem(new tsl::elm::ListItem("To reassign: delete id= line"));
+            list->addItem(new tsl::elm::ListItem("两台机器的地址必须不同"));
+            list->addItem(new tsl::elm::ListItem("重新分配：删掉 id= 那行"));
         }
 
         frame->setContent(list);
@@ -135,17 +137,23 @@ public:
         }
         shown = ms;
 
-        char buf[24];
+        // ListItem::setValue(value, faint): faint=false renders in the
+        // highlight colour, faint=true in the dim description colour. That
+        // gives a green / grey traffic light without a custom element.
+        char buf[48];
+        bool faint = false;
         if (ms == 0) {
-            snprintf(buf, sizeof(buf), "* --");
+            snprintf(buf, sizeof(buf), "* 延迟 --");
+            faint = true;
         } else if (ms > 999) {
-            snprintf(buf, sizeof(buf), "* >999ms");
+            snprintf(buf, sizeof(buf), "* 延迟 >999ms");
+            faint = true;
         } else {
-            snprintf(buf, sizeof(buf), "* %ums", ms);
+            snprintf(buf, sizeof(buf), "* 延迟 %ums", ms);
         }
         for (size_t k = 0; k < g_serverItems.size(); k++) {
             if (!g_serverItems[k]->getValue().empty()) {
-                g_serverItems[k]->setValue(buf);
+                g_serverItems[k]->setValue(buf, faint);
             }
         }
     }
@@ -177,7 +185,7 @@ public:
 
             rc = ldnMitmGetVersion(&g_ldnConfig, g_version);
             if (R_FAILED(rc)) {
-                strcpy(g_version, "Error");
+                strcpy(g_version, "错误");
             }
 
             g_state = State::Loaded;

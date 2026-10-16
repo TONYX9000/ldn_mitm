@@ -946,9 +946,12 @@ namespace ams::mitm::ldn {
                             const Result rc = this->relay->reopen();
                             LogFormat("relay: reconnect %s (%x)", R_SUCCEEDED(rc) ? "ok" : "failed", rc);
                         }
-                    } else {
-                        this->relay->ping();
                     }
+
+                    /* Ping independently of the reconnect branch: the overlay's
+                       latency readout would otherwise freeze as soon as a few
+                       echoes are missed, and never recover on its own. */
+                    this->relay->ping();
 
                     if (this->state == CommState::AccessPointCreated) {
                         std::scoped_lock lock(this->dataMutex);
