@@ -71,6 +71,14 @@ Result ldnMitmSetSelectedRelayServer(LdnMitmConfigService *s, u32 index) {
     return serviceDispatchIn(&s->s, 65013, index);
 }
 
+Result ldnMitmGetRelayLatency(LdnMitmConfigService *s, u32 *ms) {
+    return serviceDispatchOut(&s->s, 65014, *ms);
+}
+
+Result ldnMitmGetRelayVirtualAddress(LdnMitmConfigService *s, u32 *addr) {
+    return serviceDispatchOut(&s->s, 65015, *addr);
+}
+
 Result ldnMitmGetVersion(LdnMitmConfigService *s, char *version) {
     char version_s[32];
     Result rc = serviceDispatchOut(&s->s, 65001, version_s);

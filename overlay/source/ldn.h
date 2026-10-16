@@ -23,6 +23,10 @@ Result ldnMitmGetRelayServerCount(LdnMitmConfigService *s, u32 *count);
 Result ldnMitmGetRelayServerName(LdnMitmConfigService *s, u32 index, char *name);
 Result ldnMitmGetSelectedRelayServer(LdnMitmConfigService *s, u32 *index);
 Result ldnMitmSetSelectedRelayServer(LdnMitmConfigService *s, u32 index);
+/* Last relay PING round-trip time in ms; 0 = not measured yet. */
+Result ldnMitmGetRelayLatency(LdnMitmConfigService *s, u32 *ms);
+/* Our virtual address, host order (0x0A0Dxxxx = 10.13.x.x); 0 if unassigned. */
+Result ldnMitmGetRelayVirtualAddress(LdnMitmConfigService *s, u32 *addr);
 Result ldnMitmGetConfig(LdnMitmConfigService *out);
 Result ldnMitmGetConfigFromService(Service* s, LdnMitmConfigService *out);
 

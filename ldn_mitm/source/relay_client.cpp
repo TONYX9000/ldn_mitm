@@ -88,6 +88,15 @@ namespace ams::mitm::ldn::relay {
         /* Low 16 bits of our virtual address 10.13.x.x; 0 = unassigned. */
         std::atomic<u16> g_client_id{0};
 
+        /* Relay link latency: PING round-trip time in ms. 0 = not measured yet.
+           Only an echo of the ping we are still waiting on updates it. */
+        struct LatencyState {
+            std::atomic<u32> ms{0};
+            std::atomic<int> waiting{0};
+            std::atomic<s64> pending_ms{0};
+        };
+        LatencyState g_latency;
+
         /* Guards relay.cfg I/O and its buffers. */
         constinit os::SdkMutex g_config_mutex;
         constexpr size_t ConfigCap = 4096;
@@ -697,8 +706,23 @@ namespace ams::mitm::ldn::relay {
             return -1;
         }
         ++m_ping_misses;
+        /* Remember the send time; the echo computes the round trip. */
+        g_latency.pending_ms = os::ConvertToTimeSpan(os::GetSystemTick()).GetMilliSeconds();
+        g_latency.waiting = 1;
         const u8 p[4] = { TypePing, 'l', 'd', 'n' };
         return send(m_fd, p, sizeof(p), 0);
+    }
+
+    u32 RelayGetLatencyMs() {
+        return g_latency.ms.load();
+    }
+
+    u32 RelayGetVirtualAddress() {
+        const u16 id = g_client_id.load();
+        if (id == 0) {
+            return 0;
+        }
+        return (10u << 24) | (13u << 16) | static_cast<u32>(id);
     }
 
     bool RelayTransport::PathDead() const {
@@ -928,6 +952,14 @@ namespace ams::mitm::ldn::relay {
         const u8 type = buf[0] & 0x7f;
         if (type == TypePing) {
             m_ping_supported = true;
+            /* The server echoes our PING verbatim: compute the round trip. */
+            if (g_latency.waiting.exchange(0) != 0) {
+                const s64 rtt = os::ConvertToTimeSpan(os::GetSystemTick()).GetMilliSeconds()
+                                - g_latency.pending_ms.load();
+                if (rtt >= 0 && rtt < 10000) {
+                    g_latency.ms = static_cast<u32>(rtt);
+                }
+            }
             return 0;
         }
         if (type == TypeIpv4Frag) {

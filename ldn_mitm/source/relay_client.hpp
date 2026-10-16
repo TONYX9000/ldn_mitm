@@ -37,6 +37,10 @@ namespace ams::mitm::ldn {
         const char *ServerName(int index);
         int  SelectedServer();
         void SelectServer(int index);
+        /* Last relay PING round-trip time in ms; 0 = not measured yet. */
+        u32  RelayGetLatencyMs();
+        /* Our virtual address (10.13.x.x, host order) or 0 if not assigned yet. */
+        u32  RelayGetVirtualAddress();
 
         /* ServerIp is 0 when the server is a hostname; resolve ServerHost then. */
         u32 ServerIp();
@@ -71,6 +75,9 @@ namespace ams::mitm::ldn {
 
                 /* Ping misses count only once the server has echoed a ping. */
                 bool PathDead() const;
+
+                /* Last PING round-trip time in ms; 0 = not measured yet. Thread-safe. */
+                u32 PingMs() const { return m_ping_ms.load(); }
 
                 /* Returns a discovery frame's length; game and TCP frames are
                    dispatched internally (returns 0). <0 on error. */
@@ -125,6 +132,9 @@ namespace ams::mitm::ldn {
                 static constexpr u32 PingMaxMisses = 4;
                 std::atomic<u32> m_ping_misses{0};
                 std::atomic<bool> m_ping_supported{false};
+                /* Last PING round-trip time in ms; 0 = not measured yet.
+                   Only updated by an echo of a ping we are still waiting on. */
+                std::atomic<u32> m_ping_ms{0};
 
                 static constexpr int FragSlots = 4;
                 struct FragSlot {

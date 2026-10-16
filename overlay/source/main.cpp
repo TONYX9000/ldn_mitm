@@ -90,6 +90,25 @@ public:
                     list->addItem(item);
                 }
             }
+
+            // Show this console's relay identity. relay.cfg only stores the
+            // low 16 bits (`id=`), and the plugin assigns one on first use if
+            // the line is absent, so this is the only place to read it back.
+            list->addItem(new tsl::elm::CategoryHeader("This console"));
+            u32 vaddr = 0;
+            if (R_FAILED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr))) {
+                list->addItem(new tsl::elm::ListItem("Virtual address", "error"));
+            } else if (vaddr == 0) {
+                list->addItem(new tsl::elm::ListItem("Virtual address", "not assigned yet"));
+            } else {
+                char buf[48];
+                snprintf(buf, sizeof(buf), "%u.%u.%u.%u  (id=%u)",
+                         (vaddr >> 24) & 0xff, (vaddr >> 16) & 0xff,
+                         (vaddr >> 8) & 0xff, vaddr & 0xff, vaddr & 0xffff);
+                list->addItem(new tsl::elm::ListItem("Virtual address", buf));
+            }
+            list->addItem(new tsl::elm::ListItem("Two consoles must differ"));
+            list->addItem(new tsl::elm::ListItem("To reassign: delete id= line"));
         }
 
         frame->setContent(list);
@@ -99,7 +118,36 @@ public:
 
     // Called once every frame to update values
     virtual void update() override {
+        // Show the live relay latency next to the selected server.
+        // Only the selected server is connected, so it is the only one
+        // whose round-trip time we can actually know.
+        if (g_state != State::Loaded || g_serverItems.empty()) {
+            return;
+        }
+        u32 ms = 0;
+        if (R_FAILED(ldnMitmGetRelayLatency(&g_ldnConfig, &ms))) {
+            return;
+        }
+        // Rebuild the label only when the measurement actually changes.
+        static u32 shown = 0xFFFFFFFFu;
+        if (ms == shown) {
+            return;
+        }
+        shown = ms;
 
+        char buf[24];
+        if (ms == 0) {
+            snprintf(buf, sizeof(buf), "* --");
+        } else if (ms > 999) {
+            snprintf(buf, sizeof(buf), "* >999ms");
+        } else {
+            snprintf(buf, sizeof(buf), "* %ums", ms);
+        }
+        for (size_t k = 0; k < g_serverItems.size(); k++) {
+            if (!g_serverItems[k]->getValue().empty()) {
+                g_serverItems[k]->setValue(buf);
+            }
+        }
     }
 
     // Called once every frame to handle inputs not handled by other UI elements
