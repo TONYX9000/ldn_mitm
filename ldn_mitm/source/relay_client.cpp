@@ -794,11 +794,16 @@ namespace ams::mitm::ldn::relay {
             return -1;
         }
         ++m_ping_misses;
-        /* Only arm a new measurement when no echo is outstanding. Overwriting
-           the timestamp would make the echo of the earlier ping look almost
-           instantaneous, which is how a stale reading used to appear. */
-        if (g_latency.waiting.load() == 0) {
-            g_latency.pending_ms = os::ConvertToTimeSpan(os::GetSystemTick()).GetMilliSeconds();
+        const s64 now_ms = os::ConvertToTimeSpan(os::GetSystemTick()).GetMilliSeconds();
+        /* Arm a fresh measurement when nothing is outstanding, OR when the
+           outstanding one has waited far too long. Without that timeout a
+           single dropped echo -- the server is often still wiring its side up
+           when the first probe goes out -- would leave waiting set forever,
+           and every later ping would only bump the miss counter. The reading
+           then stayed blank until the transport happened to be rebuilt. */
+        if (g_latency.waiting.load() == 0 ||
+            now_ms - g_latency.pending_ms.load() > PingEchoTimeoutMs) {
+            g_latency.pending_ms = now_ms;
             g_latency.waiting = 1;
         }
         const u8 p[4] = { TypePing, 'l', 'd', 'n' };

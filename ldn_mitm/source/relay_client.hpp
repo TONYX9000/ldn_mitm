@@ -134,6 +134,9 @@ namespace ams::mitm::ldn {
                 u32 LookupVsrc(u32 real_ip) const;
 
                 static constexpr u32 PingMaxMisses = 4;
+                /* Give up on an unreturned echo after this long so one lost
+                   probe cannot stall the latency readout indefinitely. */
+                static constexpr s64 PingEchoTimeoutMs = 3000;
                 std::atomic<u32> m_ping_misses{0};
                 std::atomic<bool> m_ping_supported{false};
                 /* Last PING round-trip time in ms; 0 = not measured yet.
