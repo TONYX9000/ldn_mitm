@@ -801,11 +801,17 @@ namespace ams::mitm::ldn::relay {
            when the first probe goes out -- would leave waiting set forever,
            and every later ping would only bump the miss counter. The reading
            then stayed blank until the transport happened to be rebuilt. */
-        if (g_latency.waiting.load() == 0 ||
-            now_ms - g_latency.pending_ms.load() > PingEchoTimeoutMs) {
+        const int was_waiting = g_latency.waiting.load();
+        const s64 since = now_ms - g_latency.pending_ms.load();
+        if (was_waiting == 0 || since > PingEchoTimeoutMs) {
             g_latency.pending_ms = now_ms;
             g_latency.waiting = 1;
+            if (was_waiting != 0) {
+                LogFormat("relay: ping echo timed out after %lldms, re-arming", since);
+            }
         }
+        LogFormat("relay: ping tx fd=%d armed=%d waiting=%d since=%lldms",
+                  m_fd, was_waiting == 0, g_latency.waiting.load(), since);
         const u8 p[4] = { TypePing, 'l', 'd', 'n' };
         return send(m_fd, p, sizeof(p), 0);
     }
@@ -1050,12 +1056,14 @@ namespace ams::mitm::ldn::relay {
         if (type == TypePing) {
             m_ping_supported = true;
             /* The server echoes our PING verbatim: compute the round trip. */
-            if (g_latency.waiting.exchange(0) != 0) {
-                const s64 rtt = os::ConvertToTimeSpan(os::GetSystemTick()).GetMilliSeconds()
-                                - g_latency.pending_ms.load();
-                if (rtt >= 0 && rtt < 10000) {
-                    g_latency.ms = static_cast<u32>(rtt);
-                }
+            const int was_waiting = g_latency.waiting.exchange(0);
+            const s64 rtt = os::ConvertToTimeSpan(os::GetSystemTick()).GetMilliSeconds()
+                            - g_latency.pending_ms.load();
+            if (was_waiting != 0 && rtt >= 0 && rtt < 10000) {
+                g_latency.ms = static_cast<u32>(rtt);
+                LogFormat("relay: ping echo rtt=%lldms -> %ums", rtt, g_latency.ms.load());
+            } else {
+                LogFormat("relay: ping echo dropped (waiting=%d rtt=%lldms)", was_waiting, rtt);
             }
             return 0;
         }
