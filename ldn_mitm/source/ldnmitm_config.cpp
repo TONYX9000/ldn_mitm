@@ -74,4 +74,8 @@ namespace ams::mitm::ldn {
         addr.SetValue(relay::RelayGetVirtualAddress());
         R_SUCCEED();
     }
+    Result LdnConfig::GetRelayIdSource(sf::Out<u32> source) {
+        source.SetValue(static_cast<u32>(relay::RelayGetIdSource()));
+        R_SUCCEED();
+    }
 }

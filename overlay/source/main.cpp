@@ -98,7 +98,8 @@ public:
             // the line is absent, so this is the only place to read it back.
             list->addItem(new tsl::elm::CategoryHeader("本机身份"));
             u32 vaddr = 0;
-            if (R_FAILED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr))) {
+            const bool addr_ok = R_SUCCEEDED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr));
+            if (!addr_ok) {
                 list->addItem(new tsl::elm::ListItem("虚拟地址", "错误"));
             } else if (vaddr == 0) {
                 list->addItem(new tsl::elm::ListItem("虚拟地址", "尚未分配"));
@@ -109,8 +110,27 @@ public:
                          (vaddr >> 8) & 0xff, vaddr & 0xff, vaddr & 0xffff);
                 list->addItem(new tsl::elm::ListItem("虚拟地址", buf));
             }
+
+            // Tell the user whether the address is stable. "硬件派生" is
+            // derived from this console's LAN address, so it is the same on
+            // every boot even when the SD card is write-protected. "启动随机"
+            // still gets written to relay.cfg, so check it again after a
+            // reboot -- if the number changes, the write is failing.
+            if (addr_ok && vaddr != 0) {
+                u32 src = 0;
+                if (R_FAILED(ldnMitmGetRelayIdSource(&g_ldnConfig, &src))) {
+                    src = 0;
+                }
+                if (src == 1) {
+                    list->addItem(new tsl::elm::ListItem("地址固定", "硬件派生"));
+                } else if (src == 2) {
+                    list->addItem(new tsl::elm::ListItem("地址固定", "启动随机"));
+                } else {
+                    list->addItem(new tsl::elm::ListItem("地址固定", "未知"));
+                }
+            }
             list->addItem(new tsl::elm::ListItem("两台机器的地址必须不同"));
-            list->addItem(new tsl::elm::ListItem("重新分配：删掉 id= 那行"));
+            list->addItem(new tsl::elm::ListItem("重启后地址不变即正常"));
         }
 
         frame->setContent(list);

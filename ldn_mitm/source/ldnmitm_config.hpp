@@ -40,6 +40,8 @@ namespace ams::mitm::ldn {
             Result GetRelayLatency(sf::Out<u32> ms);
             /* Our virtual address, host order (0x0A0Dxxxx = 10.13.x.x); 0 if unassigned. */
             Result GetRelayVirtualAddress(sf::Out<u32> addr);
+            /* How the id was assigned: 0 unknown, 1 hardware-derived, 2 random. */
+            Result GetRelayIdSource(sf::Out<u32> source);
     };
     static_assert(ams::mitm::ldn::IsILdnConfig<LdnConfig>);
 

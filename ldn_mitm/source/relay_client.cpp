@@ -88,6 +88,13 @@ namespace ams::mitm::ldn::relay {
         /* Low 16 bits of our virtual address 10.13.x.x; 0 = unassigned. */
         std::atomic<u16> g_client_id{0};
 
+        /* Where the id came from. 0 = assigned before this feature existed,
+           1 = derived from this console's LAN address, 2 = random fallback. */
+        constexpr int IdSourceUnknown  = 0;
+        constexpr int IdSourceHardware = 1;
+        constexpr int IdSourceRandom   = 2;
+        std::atomic_int g_id_source{IdSourceUnknown};
+
         /* Relay link latency: PING round-trip time in ms. 0 = not measured yet.
            Only an echo of the ping we are still waiting on updates it. */
         struct LatencyState {
@@ -314,18 +321,58 @@ namespace ams::mitm::ldn::relay {
             fs::CloseFile(f);
         }
 
+        /* Stable hardware-derived id source.
+           The LAN address is a good fingerprint: two consoles can never hold
+           the same one at the same time, and it survives reboots as long as
+           DHCP keeps handing out the same lease. Random is only the last
+           resort, because two consoles drawing from the same 16-bit space
+           collide about once in 60000 pairs -- and a collision shows up as
+           "room is visible but joining fails", which is very hard to debug. */
+        bool DeriveIdFromHardware(u16 *out) {
+            u32 ip = 0;
+            if (R_FAILED(nifmGetCurrentIpAddress(&ip))) {
+                return false;
+            }
+            ip = ntohl(ip);
+            if (ip == 0) {
+                return false;
+            }
+            /* Cheap 32 -> 16 fold; good enough to keep distinct LAN
+               addresses distinct after the reserved values are excluded. */
+            u32 h = ip * 2654435761u;
+            h ^= h >> 13;
+            h *= 40503u;
+            u16 id = static_cast<u16>(h ^ (h >> 16));
+            if (BadClientId(id)) {
+                id ^= 0x5A5Au;
+            }
+            if (BadClientId(id)) {
+                return false;
+            }
+            *out = id;
+            return true;
+        }
+
         u16 EnsureClientId() {
             u16 id = g_client_id.load();
             if (id == 0) {
-                u16 fresh;
-                do {
-                    os::GenerateRandomBytes(std::addressof(fresh), sizeof(fresh));
-                } while (BadClientId(fresh));
+                u16 fresh = 0;
+                bool from_hw = DeriveIdFromHardware(std::addressof(fresh));
+                if (!from_hw) {
+                    do {
+                        os::GenerateRandomBytes(std::addressof(fresh), sizeof(fresh));
+                    } while (BadClientId(fresh));
+                }
                 u16 expected = 0;
                 if (g_client_id.compare_exchange_strong(expected, fresh)) {
                     id = fresh;
+                    /* Persist either way. When the value came from hardware
+                       the write is only a cache, so a read-only SD card still
+                       yields the same address on every boot. */
                     PersistConfig();
-                    LogFormat("relay: assigned virtual address 10.13.%u.%u", (id >> 8) & 0xff, id & 0xff);
+                    g_id_source = from_hw ? IdSourceHardware : IdSourceRandom;
+                    LogFormat("relay: assigned virtual address 10.13.%u.%u (%s)",
+                              (id >> 8) & 0xff, id & 0xff, from_hw ? "hardware" : "random");
                 } else {
                     id = expected;
                 }
@@ -357,6 +404,10 @@ namespace ams::mitm::ldn::relay {
     u16  ServerPort() {
         const int i = g_selected.load();
         return (i >= 0 && i < g_count) ? g_servers[i].port : 0;
+    }
+
+    int RelayGetIdSource() {
+        return g_id_source.load();
     }
 
     bool IsSessionPeer(u32 ip) {

@@ -41,6 +41,8 @@ namespace ams::mitm::ldn {
         u32  RelayGetLatencyMs();
         /* Our virtual address (10.13.x.x, host order) or 0 if not assigned yet. */
         u32  RelayGetVirtualAddress();
+        /* How the id was assigned: 0 unknown, 1 hardware-derived, 2 random. */
+        int  RelayGetIdSource();
 
         /* ServerIp is 0 when the server is a hostname; resolve ServerHost then. */
         u32 ServerIp();
