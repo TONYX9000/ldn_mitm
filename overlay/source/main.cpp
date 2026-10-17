@@ -90,6 +90,12 @@ public:
                             for (size_t k = 0; k < g_serverItems.size(); k++) {
                                 g_serverItems[k]->setValue(k == i ? "*" : "");
                             }
+                            // The loop above just wiped every latency label back
+                            // to a bare "*". Invalidate the cache so the next
+                            // update() repaints, otherwise the rows would sit
+                            // there with only a star until the overlay is
+                            // reopened.
+                            g_shown_latency = 0xFFFFFFFFu;
                             return true;
                         }
                         return false;
