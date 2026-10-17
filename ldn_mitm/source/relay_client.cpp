@@ -98,6 +98,11 @@ namespace ams::mitm::ldn::relay {
         constexpr int IdSourceRotated  = 3;
         std::atomic_int g_id_source{IdSourceUnknown};
 
+        /* Index of the server the currently open transport is connected to;
+           -1 until a transport opens. Compared against g_selected so the
+           overlay never shows one server's reading under another's name. */
+        std::atomic_int g_active_server{-1};
+
         /* Defined next to EnsureClientId() below. */
         bool DeriveIdFromHardware(u16 *out);
         void RefreshIdSource();
@@ -436,6 +441,12 @@ namespace ams::mitm::ldn::relay {
         PersistConfig();
     }
 
+    /* Which server the open transport is actually talking to. Selecting a
+       different server only rewrites the config; the socket keeps talking to
+       the old host until it is reopened, so this is what the latency reading
+       must be validated against. -1 = no transport open yet. */
+    int  ActiveServer()       { return g_active_server.load(); }
+
     u32  ServerIp() {
         const int i = g_selected.load();
         return (i >= 0 && i < g_count) ? g_servers[i].ip : 0;
@@ -721,6 +732,9 @@ namespace ams::mitm::ldn::relay {
             m_vsrc = vsrc;
             m_rsrc = rsrc;
         }
+        /* Record what we actually connected to, so the latency readout can
+           refuse to show it under a different server's name. */
+        g_active_server = g_selected.load();
         R_SUCCEED();
     }
 
@@ -731,6 +745,7 @@ namespace ams::mitm::ldn::relay {
             fd = m_fd;
             m_fd = -1;
         }
+        g_active_server = -1;
         if (fd >= 0) {
             if (m_have_req) {
                 nifmRequestUnregisterSocketDescriptor(&m_req, fd);
@@ -846,6 +861,14 @@ namespace ams::mitm::ldn::relay {
     }
 
     u32 RelayGetLatencyMs() {
+        /* Only trust the reading when the open transport is talking to the
+           server the menu is showing. Selecting a different server rewrites
+           the config immediately but the socket keeps talking to the old host
+           until the worker reopens it, and field screenshots showed one
+           server's latency displayed under every other server's name. */
+        if (g_active_server.load() != g_selected.load()) {
+            return 0;
+        }
         return g_latency.ms.load();
     }
 

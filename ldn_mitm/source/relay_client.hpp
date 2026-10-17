@@ -37,6 +37,10 @@ namespace ams::mitm::ldn {
         const char *ServerName(int index);
         int  SelectedServer();
         void SelectServer(int index);
+        /* Server the open transport is connected to; -1 when none is open.
+           SelectServer only rewrites the config, so the worker compares the
+           two and reopens when they differ. */
+        int  ActiveServer();
         /* Last relay PING round-trip time in ms; 0 = not measured yet. */
         u32  RelayGetLatencyMs();
         /* Our virtual address (10.13.x.x, host order) or 0 if not assigned yet. */

@@ -990,6 +990,15 @@ namespace ams::mitm::ldn {
                         const Result rc = this->relay->reopen();
                         LogFormat("relay: reconnect %s (%x)", R_SUCCEEDED(rc) ? "ok" : "failed", rc);
                     }
+                } else if (relay::ActiveServer() != relay::SelectedServer()) {
+                    /* The user picked a different server. Selecting only
+                       rewrites the config, so without this the socket would
+                       keep talking to the old host while the menu already
+                       showed the new name -- and its latency with it. */
+                    LogFormat("relay: server selection changed (%d -> %d), reconnecting",
+                              relay::ActiveServer(), relay::SelectedServer());
+                    const Result rc = this->relay->reopen();
+                    LogFormat("relay: switch %s (%x)", R_SUCCEEDED(rc) ? "ok" : "failed", rc);
                 }
             }
             /* Brief unlocked window so IPC threads can grab pollMutex. */
