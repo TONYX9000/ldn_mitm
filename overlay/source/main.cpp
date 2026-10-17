@@ -14,6 +14,10 @@ LdnMitmConfigService g_ldnConfig;
 State g_state;
 char g_version[32];
 
+/* Brand string shown in the frame header. Must outlive createUI(), because
+   OverlayFrame keeps the pointer instead of copying it. */
+char g_brand[64] = "阿东版";
+
 std::vector<tsl::elm::ListItem*> g_serverItems;
 
 /* Latency value currently painted on the server rows. Lives at file scope
@@ -49,7 +53,9 @@ public:
     virtual tsl::elm::Element* createUI() override {
         // This overlay ships inside a Chinese integration package and the
         // bundled font has CJK glyphs, so the UI is localised in place.
-        auto frame = new tsl::elm::OverlayFrame("联机插件", g_version);
+        // The header subtitle carries the release brand; the full version
+        // string is repeated in the "关于" block at the bottom.
+        auto frame = new tsl::elm::OverlayFrame("联机插件", g_brand);
 
         auto list = new tsl::elm::List();
 
@@ -164,6 +170,13 @@ public:
             }
             list->addItem(new tsl::elm::ListItem("两台机器的地址必须不同"));
             list->addItem(new tsl::elm::ListItem("重启后地址不变即正常"));
+
+            // Release signature. Kept at the very bottom so it never gets in
+            // the way of the settings, but every user scrolling down sees it.
+            list->addItem(new tsl::elm::CategoryHeader("关于"));
+            list->addItem(new tsl::elm::ListItem("制作", "阿东 & 大肥鱼"));
+            list->addItem(new tsl::elm::ListItem("版本", g_version));
+            list->addItem(new tsl::elm::ListItem("声明", "免费分享 禁止倒卖"));
         }
 
         frame->setContent(list);
