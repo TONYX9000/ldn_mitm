@@ -940,15 +940,6 @@ namespace ams::mitm::ldn {
 
                     this->sendRelayScope();
 
-                    if (this->relay->pathDead()) {
-                        if (os::ConvertToTimeSpan(now - this->lastRelayReconnect).GetMilliSeconds() >= RelayReconnectMinIntervalMs) {
-                            this->lastRelayReconnect = now;
-                            LogFormat("relay: server path dead, reconnecting transport");
-                            const Result rc = this->relay->reopen();
-                            LogFormat("relay: reconnect %s (%x)", R_SUCCEEDED(rc) ? "ok" : "failed", rc);
-                        }
-                    }
-
                     if (this->state == CommState::AccessPointCreated) {
                         std::scoped_lock lock(this->dataMutex);
                         bool changed = false;
@@ -984,6 +975,21 @@ namespace ams::mitm::ldn {
                        instead of waiting up to a full beacon interval. */
                     last_ping = now;
                     this->relay->ping();
+                }
+
+                /* Checked every iteration, not only on beacon ticks: a
+                   connection that never answers a ping is now treated as
+                   suspect after a few probes, and waiting up to a whole beacon
+                   interval on top of that would keep the overlay blank for
+                   seconds longer than necessary. The reconnect itself is
+                   throttled by RelayReconnectMinIntervalMs. */
+                if (this->relay->pathDead()) {
+                    if (os::ConvertToTimeSpan(now - this->lastRelayReconnect).GetMilliSeconds() >= RelayReconnectMinIntervalMs) {
+                        this->lastRelayReconnect = now;
+                        LogFormat("relay: server path dead, reconnecting transport");
+                        const Result rc = this->relay->reopen();
+                        LogFormat("relay: reconnect %s (%x)", R_SUCCEEDED(rc) ? "ok" : "failed", rc);
+                    }
                 }
             }
             /* Brief unlocked window so IPC threads can grab pollMutex. */

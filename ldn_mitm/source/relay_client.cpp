@@ -738,6 +738,8 @@ namespace ams::mitm::ldn::relay {
         if (m_published) {
             return this->Reopen();
         }
+        /* A brand new session gets its one retry back. */
+        m_ping_retry_done = false;
         const Result rc = this->OpenSocket();
         if (R_FAILED(rc)) {
             return rc;
@@ -761,9 +763,20 @@ namespace ams::mitm::ldn::relay {
     }
 
     Result RelayTransport::Reopen() {
+        /* Remember whether the outgoing connection ever answered a ping, so a
+           server that simply does not implement PING is not reconnected for
+           ever. Only the "never answered" case spends the single retry. */
+        if (!m_ping_supported.load()) {
+            m_ping_retry_done = true;
+        }
         if (!m_published) {
             this->CloseSocket();
-            return this->Open();
+            /* Open() hands the retry back for a fresh session; a reconnect
+               must not, otherwise a PING-less server would loop forever. */
+            const bool spent = m_ping_retry_done.load();
+            const Result rc = this->Open();
+            m_ping_retry_done = spent;
+            return rc;
         }
         this->CloseSocket();
         const Result rc = this->OpenSocket();
@@ -829,7 +842,21 @@ namespace ams::mitm::ldn::relay {
     }
 
     bool RelayTransport::PathDead() const {
-        return m_fd < 0 || (m_ping_supported.load() && m_ping_misses.load() >= PingMaxMisses);
+        if (m_fd < 0) {
+            return true;
+        }
+        const u32 misses = m_ping_misses.load();
+        if (m_ping_supported.load()) {
+            /* Echoes have come back before, so a run of misses means trouble. */
+            return misses >= PingMaxMisses;
+        }
+        /* Not a single echo on this connection. That is either a server with
+           no PING support, or a connection that never came up properly --
+           observed logs show the very first connection answering nothing for
+           107s while inbound frames still flowed, then a reconnect settling at
+           68ms straight away. Treat silence after a few probes as suspect, but
+           spend only one retry so a PING-less server is left alone after. */
+        return !m_ping_retry_done.load() && misses >= PingUnsupportedMisses;
     }
 
     int RelayTransport::SendWrapped(u32 src, u32 dst, u16 sport, u16 dport, u16 ip_id, const void *payload, size_t len) {
