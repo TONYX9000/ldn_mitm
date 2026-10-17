@@ -16,6 +16,12 @@ char g_version[32];
 
 std::vector<tsl::elm::ListItem*> g_serverItems;
 
+/* Latency value currently painted on the server rows. Lives at file scope
+   rather than as a function-local static so createUI() can invalidate it:
+   rebuilt rows start with a bare "*", and a stale cache made update() skip
+   painting them entirely. */
+u32 g_shown_latency = 0xFFFFFFFFu;
+
 class ConfigToggleListItem : public tsl::elm::ToggleListItem {
 public:
     ConfigToggleListItem(const char *label,
@@ -156,6 +162,13 @@ public:
 
         frame->setContent(list);
 
+        // Every item was just created with a bare "*". Force the first
+        // update() to paint the latency text even if the reading has not
+        // changed since the last time the overlay was open -- otherwise the
+        // cached value made update() return early and the label stayed at
+        // just "*" with no "--" and no number.
+        g_shown_latency = 0xFFFFFFFFu;
+
         return frame;
     }
 
@@ -172,11 +185,10 @@ public:
             return;
         }
         // Rebuild the label only when the measurement actually changes.
-        static u32 shown = 0xFFFFFFFFu;
-        if (ms == shown) {
+        if (ms == g_shown_latency) {
             return;
         }
-        shown = ms;
+        g_shown_latency = ms;
 
         // ListItem::setValue(value, faint): faint=false renders in the
         // highlight colour, faint=true in the dim description colour. That
