@@ -779,6 +779,15 @@ namespace ams::mitm::ldn::relay {
             return rc;
         }
         this->CloseSocket();
+        /* A plain socket swap was not enough. Logs showed the first
+           connection answering no ping at all for 75s while inbound frames
+           kept flowing; only closing the room fixed it, which is the one
+           action that also drops ICommunicationService's nifm reference and
+           therefore really tears the network session down. Do that here. */
+        const Result rr = NifmSessionManager::ForceReinit();
+        if (R_FAILED(rr)) {
+            LogFormat("relay xport: nifm force reinit failed %x", rr);
+        }
         const Result rc = this->OpenSocket();
         if (R_SUCCEEDED(rc)) {
             this->SendKeepalive();
@@ -823,10 +832,15 @@ namespace ams::mitm::ldn::relay {
                 LogFormat("relay: ping echo timed out after %lldms, re-arming", since);
             }
         }
-        LogFormat("relay: ping tx fd=%d armed=%d waiting=%d since=%lldms",
-                  m_fd, was_waiting == 0, g_latency.waiting.load(), since);
+        LogFormat("relay: ping tx fd=%d armed=%d waiting=%d since=%lldms misses=%u",
+                  m_fd, was_waiting == 0, g_latency.waiting.load(), since,
+                  m_ping_misses.load());
         const u8 p[4] = { TypePing, 'l', 'd', 'n' };
-        return send(m_fd, p, sizeof(p), 0);
+        const int sent = send(m_fd, p, sizeof(p), 0);
+        if (sent != static_cast<int>(sizeof(p))) {
+            LogFormat("relay: ping send failed rc=%d errno=%d", sent, errno);
+        }
+        return sent;
     }
 
     u32 RelayGetLatencyMs() {
@@ -1078,10 +1092,13 @@ namespace ams::mitm::ldn::relay {
         if (n <= 0) {
             return (n == 0) ? 0 : -1;
         }
-        m_ping_misses = 0;
         const u8 type = buf[0] & 0x7f;
         if (type == TypePing) {
+            /* Only an actual echo clears the miss counter. Clearing it on any
+               inbound frame let relayed Scan broadcasts reset the streak, so
+               the "never answered" detection below rarely tripped. */
             m_ping_supported = true;
+            m_ping_misses = 0;
             /* The server echoes our PING verbatim: compute the round trip. */
             const int was_waiting = g_latency.waiting.exchange(0);
             const s64 rtt = os::ConvertToTimeSpan(os::GetSystemTick()).GetMilliSeconds()
