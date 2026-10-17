@@ -142,6 +142,8 @@ public:
                     list->addItem(new tsl::elm::ListItem("地址固定", "硬件派生"));
                 } else if (src == 2) {
                     list->addItem(new tsl::elm::ListItem("地址固定", "启动随机"));
+                } else if (src == 3) {
+                    list->addItem(new tsl::elm::ListItem("地址固定", "已自动更换"));
                 } else {
                     // The id either predates hardware derivation or was cached
                     // before this console's LAN address changed.

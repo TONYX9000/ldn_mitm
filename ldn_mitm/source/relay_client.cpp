@@ -89,15 +89,19 @@ namespace ams::mitm::ldn::relay {
         std::atomic<u16> g_client_id{0};
 
         /* Where the id came from. 0 = assigned before this feature existed,
-           1 = derived from this console's LAN address, 2 = random fallback. */
+           1 = derived from this console's LAN address, 2 = random fallback,
+           3 = rotated away from the derived value to dodge a stale relay
+           session that kept swallowing the echo. */
         constexpr int IdSourceUnknown  = 0;
         constexpr int IdSourceHardware = 1;
         constexpr int IdSourceRandom   = 2;
+        constexpr int IdSourceRotated  = 3;
         std::atomic_int g_id_source{IdSourceUnknown};
 
         /* Defined next to EnsureClientId() below. */
         bool DeriveIdFromHardware(u16 *out);
         void RefreshIdSource();
+        void RotateClientId();
 
         /* Relay link latency: PING round-trip time in ms. 0 = not measured yet.
            Only an echo of the ping we are still waiting on updates it. */
@@ -380,6 +384,25 @@ namespace ams::mitm::ldn::relay {
                 return;
             }
             g_id_source = (hw == id) ? IdSourceHardware : IdSourceUnknown;
+        }
+
+        /* Give up on the current virtual address and take a fresh one.
+           Observed logs: every transport to one server answered no ping at
+           all -- send() never failed, so the probes left the console -- while
+           the same build answered instantly after switching servers. A fixed
+           id keeps the relay's per-vsrc session alive across reconnects, so
+           echoes get sent to a UDP port we closed long ago. A new id looks
+           like a new node and gets a clean session. */
+        void RotateClientId() {
+            u16 fresh = 0;
+            do {
+                os::GenerateRandomBytes(std::addressof(fresh), sizeof(fresh));
+            } while (BadClientId(fresh) || fresh == g_client_id.load());
+            g_client_id = fresh;
+            g_id_source = IdSourceRotated;
+            PersistConfig();
+            LogFormat("relay: rotated virtual address to 10.13.%u.%u",
+                      (fresh >> 8) & 0xff, fresh & 0xff);
         }
 
         u16 EnsureClientId() {
@@ -748,7 +771,8 @@ namespace ams::mitm::ldn::relay {
         m_published = true;
         this->SendKeepalive();
         tcprelay::Start();
-        LogFormat("relay xport: open, vsrc=%08x rsrc=%08x fd=%d", m_vsrc, m_rsrc, m_fd);
+        LogFormat("relay xport: open, %s:%u vsrc=%08x rsrc=%08x fd=%d",
+                  ServerHost(), ServerPort(), m_vsrc, m_rsrc, m_fd);
         R_SUCCEED();
     }
 
@@ -762,12 +786,17 @@ namespace ams::mitm::ldn::relay {
         this->CloseSocket();
     }
 
-    Result RelayTransport::Reopen() {
+        Result RelayTransport::Reopen() {
         /* Remember whether the outgoing connection ever answered a ping, so a
            server that simply does not implement PING is not reconnected for
            ever. Only the "never answered" case spends the single retry. */
         if (!m_ping_supported.load()) {
             m_ping_retry_done = true;
+            /* The relay most likely still maps our fixed virtual address to
+               the UDP port of a previous connection, so it posts the echo
+               somewhere we are no longer listening. Take a new address; this
+               is the one change that reliably cleared it in the field. */
+            RotateClientId();
         }
         if (!m_published) {
             this->CloseSocket();
