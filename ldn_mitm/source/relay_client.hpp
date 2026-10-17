@@ -134,18 +134,11 @@ namespace ams::mitm::ldn {
                 u32 LookupVsrc(u32 real_ip) const;
 
                 static constexpr u32 PingMaxMisses = 4;
-                /* Probes to burn before treating a never-answered connection as
-                   suspect. Kept at 3 so the automatic reconnect lands within a
-                   couple of seconds of the first probe. */
-                static constexpr u32 PingUnsupportedMisses = 3;
                 /* Give up on an unreturned echo after this long so one lost
                    probe cannot stall the latency readout indefinitely. */
                 static constexpr s64 PingEchoTimeoutMs = 3000;
                 std::atomic<u32> m_ping_misses{0};
                 std::atomic<bool> m_ping_supported{false};
-                /* Set once a reconnect has been spent on a connection that
-                   never answered a ping; Open() clears it for a new session. */
-                std::atomic<bool> m_ping_retry_done{false};
                 /* Last PING round-trip time in ms; 0 = not measured yet.
                    Only updated by an echo of a ping we are still waiting on. */
                 std::atomic<u32> m_ping_ms{0};

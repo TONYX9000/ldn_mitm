@@ -101,7 +101,6 @@ namespace ams::mitm::ldn::relay {
         /* Defined next to EnsureClientId() below. */
         bool DeriveIdFromHardware(u16 *out);
         void RefreshIdSource();
-        void RotateClientId();
 
         /* Relay link latency: PING round-trip time in ms. 0 = not measured yet.
            Only an echo of the ping we are still waiting on updates it. */
@@ -386,25 +385,6 @@ namespace ams::mitm::ldn::relay {
             g_id_source = (hw == id) ? IdSourceHardware : IdSourceUnknown;
         }
 
-        /* Give up on the current virtual address and take a fresh one.
-           Observed logs: every transport to one server answered no ping at
-           all -- send() never failed, so the probes left the console -- while
-           the same build answered instantly after switching servers. A fixed
-           id keeps the relay's per-vsrc session alive across reconnects, so
-           echoes get sent to a UDP port we closed long ago. A new id looks
-           like a new node and gets a clean session. */
-        void RotateClientId() {
-            u16 fresh = 0;
-            do {
-                os::GenerateRandomBytes(std::addressof(fresh), sizeof(fresh));
-            } while (BadClientId(fresh) || fresh == g_client_id.load());
-            g_client_id = fresh;
-            g_id_source = IdSourceRotated;
-            PersistConfig();
-            LogFormat("relay: rotated virtual address to 10.13.%u.%u",
-                      (fresh >> 8) & 0xff, fresh & 0xff);
-        }
-
         u16 EnsureClientId() {
             u16 id = g_client_id.load();
             if (id == 0) {
@@ -443,7 +423,18 @@ namespace ams::mitm::ldn::relay {
     const char *ServerName(int i) { return (i >= 0 && i < g_count) ? g_servers[i].name : ""; }
 
     int  SelectedServer()     { return g_selected.load(); }
-    void SelectServer(int i)  { if (i >= 0 && i < g_count) { g_selected = i; PersistConfig(); } }
+    void SelectServer(int i)  {
+        if (i < 0 || i >= g_count) {
+            return;
+        }
+        g_selected = i;
+        /* The reading belonged to the previous server. Field logs showed a
+           server that never answered a ping still displaying the previous
+           server's 81ms, which is worse than showing nothing. */
+        g_latency.ms = 0;
+        g_latency.waiting = 0;
+        PersistConfig();
+    }
 
     u32  ServerIp() {
         const int i = g_selected.load();
@@ -761,8 +752,6 @@ namespace ams::mitm::ldn::relay {
         if (m_published) {
             return this->Reopen();
         }
-        /* A brand new session gets its one retry back. */
-        m_ping_retry_done = false;
         const Result rc = this->OpenSocket();
         if (R_FAILED(rc)) {
             return rc;
@@ -787,25 +776,9 @@ namespace ams::mitm::ldn::relay {
     }
 
         Result RelayTransport::Reopen() {
-        /* Remember whether the outgoing connection ever answered a ping, so a
-           server that simply does not implement PING is not reconnected for
-           ever. Only the "never answered" case spends the single retry. */
-        if (!m_ping_supported.load()) {
-            m_ping_retry_done = true;
-            /* The relay most likely still maps our fixed virtual address to
-               the UDP port of a previous connection, so it posts the echo
-               somewhere we are no longer listening. Take a new address; this
-               is the one change that reliably cleared it in the field. */
-            RotateClientId();
-        }
         if (!m_published) {
             this->CloseSocket();
-            /* Open() hands the retry back for a fresh session; a reconnect
-               must not, otherwise a PING-less server would loop forever. */
-            const bool spent = m_ping_retry_done.load();
-            const Result rc = this->Open();
-            m_ping_retry_done = spent;
-            return rc;
+            return this->Open();
         }
         this->CloseSocket();
         /* A plain socket swap was not enough. Logs showed the first
@@ -888,18 +861,15 @@ namespace ams::mitm::ldn::relay {
         if (m_fd < 0) {
             return true;
         }
-        const u32 misses = m_ping_misses.load();
-        if (m_ping_supported.load()) {
-            /* Echoes have come back before, so a run of misses means trouble. */
-            return misses >= PingMaxMisses;
-        }
-        /* Not a single echo on this connection. That is either a server with
-           no PING support, or a connection that never came up properly --
-           observed logs show the very first connection answering nothing for
-           107s while inbound frames still flowed, then a reconnect settling at
-           68ms straight away. Treat silence after a few probes as suspect, but
-           spend only one retry so a PING-less server is left alone after. */
-        return !m_ping_retry_done.load() && misses >= PingUnsupportedMisses;
+        /* Only judge on misses once this server has echoed at least once.
+           Seven of the eight shipped relays now answer no ping at all, and a
+           reconnect did not help -- three different virtual addresses to the
+           same server all stayed silent, while the same address answered
+           instantly on the one server that does echo. Reconnecting on
+           "never answered" would therefore buy nothing and cost a tunnel
+           rebuild on every room, so a non-echoing server is simply left
+           alone and the overlay keeps showing "--". */
+        return m_ping_supported.load() && m_ping_misses.load() >= PingMaxMisses;
     }
 
     int RelayTransport::SendWrapped(u32 src, u32 dst, u16 sport, u16 dport, u16 ip_id, const void *payload, size_t len) {
