@@ -16,7 +16,7 @@ char g_version[32];
 
 /* Brand string shown in the frame header. Must outlive createUI(), because
    OverlayFrame keeps the pointer instead of copying it. */
-char g_brand[64] = "阿东版";
+char g_brand[64] = "阿东版";   // overwritten by detectLanguage() at startup
 
 std::vector<tsl::elm::ListItem*> g_serverItems;
 
@@ -25,6 +25,14 @@ std::vector<tsl::elm::ListItem*> g_serverItems;
    rebuilt rows start with a bare "*", and a stale cache made update() skip
    painting them entirely. */
 u32 g_shown_latency = 0xFFFFFFFFu;
+
+/* Traditional / Simplified Chinese switch. The overlay used to hardcode
+   Simplified strings, which left Traditional Chinese consoles with the
+   wrong glyphs. libtesla already loads both CJK shared fonts, so all we
+   need is the console's system language. */
+static bool g_isTraditional = false;
+
+#define T(hans, hant) (g_isTraditional ? (hant) : (hans))
 
 class ConfigToggleListItem : public tsl::elm::ToggleListItem {
 public:
@@ -46,6 +54,22 @@ public:
     }
 };
 
+static void detectLanguage()
+{
+    /* setGetSystemLanguage returns the language as an 8-byte ASCII code
+       (e.g. "zh-Hans" / "zh-Hant" / "en-US") packed into a u64. */
+    u64 langCode = 0;
+    if (R_SUCCEEDED(setInitialize())) {
+        setGetSystemLanguage(&langCode);
+        setExit();
+    }
+    char code[9] = {};
+    memcpy(code, &langCode, 8);
+    g_isTraditional = (strncmp(code, "zh-Hant", 7) == 0);
+
+    strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
+}
+
 class MainGui : public tsl::Gui {
 public:
     MainGui() { }
@@ -54,29 +78,29 @@ public:
         // This overlay ships inside a Chinese integration package and the
         // bundled font has CJK glyphs, so the UI is localised in place.
         // The header subtitle carries the release brand; the full version
-        // string is repeated in the "关于" block at the bottom.
-        auto frame = new tsl::elm::OverlayFrame("联机插件", g_brand);
+        // string is repeated in the T("关于", "關於") block at the bottom.
+        auto frame = new tsl::elm::OverlayFrame(T("联机插件", "連線插件"), g_brand);
 
         auto list = new tsl::elm::List();
 
         if (g_state == State::Error) {
-            list->addItem(new tsl::elm::ListItem("插件没有加载"));
+            list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
         } else if (g_state == State::Uninit) {
-            list->addItem(new tsl::elm::ListItem("错误的状态"));
+            list->addItem(new tsl::elm::ListItem(T("错误的状态", "錯誤的狀態")));
         } else {
-            list->addItem(new ConfigToggleListItem("启用", ldnMitmGetEnabled, ldnMitmSetEnabled));
-            list->addItem(new ConfigToggleListItem("广播转发", ldnMitmGetBroadcastRelay, ldnMitmSetBroadcastRelay));
-            list->addItem(new ConfigToggleListItem("日志", ldnMitmGetLogging, ldnMitmSetLogging));
+            list->addItem(new ConfigToggleListItem(T("启用", "啟用"), ldnMitmGetEnabled, ldnMitmSetEnabled));
+            list->addItem(new ConfigToggleListItem(T("广播转发", "廣播轉發"), ldnMitmGetBroadcastRelay, ldnMitmSetBroadcastRelay));
+            list->addItem(new ConfigToggleListItem(T("日志", "日誌"), ldnMitmGetLogging, ldnMitmSetLogging));
 
-            list->addItem(new tsl::elm::CategoryHeader("互联网中继（跨网联机）"));
-            list->addItem(new ConfigToggleListItem("互联网中继", ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
+            list->addItem(new tsl::elm::CategoryHeader(T("互联网中继（跨网联机）", "網際網路中繼（跨網連線）")));
+            list->addItem(new ConfigToggleListItem(T("互联网中继", "網際網路中繼"), ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
 
             g_serverItems.clear();
             u32 count = 0;
             if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count))) {
-                list->addItem(new tsl::elm::ListItem("读取服务器列表失败"));
+                list->addItem(new tsl::elm::ListItem(T("读取服务器列表失败", "讀取伺服器清單失敗")));
             } else if (count == 0) {
-                list->addItem(new tsl::elm::ListItem("没有服务器，请编辑 relay.cfg"));
+                list->addItem(new tsl::elm::ListItem(T("没有服务器，请编辑 relay.cfg", "沒有伺服器，請編輯 relay.cfg")));
             } else {
                 u32 selected = 0;
                 if (R_FAILED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &selected))) {
@@ -90,7 +114,7 @@ public:
                     item->setClickListener([i](u64 keys) {
                         if (keys & HidNpadButton_A) {
                             if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
-                                g_serverItems[i]->setValue("错误");
+                                g_serverItems[i]->setValue(T("错误", "錯誤"));
                                 return true;
                             }
                             for (size_t k = 0; k < g_serverItems.size(); k++) {
@@ -114,7 +138,7 @@ public:
             // Show this console's relay identity. relay.cfg only stores the
             // low 16 bits (`id=`), and the plugin assigns one on first use if
             // the line is absent, so this is the only place to read it back.
-            list->addItem(new tsl::elm::CategoryHeader("本机身份"));
+            list->addItem(new tsl::elm::CategoryHeader(T("本机身份", "本機身分")));
 
             // The relay address is derived from this LAN address, so showing
             // it makes it obvious why the two consoles get different ids.
@@ -127,28 +151,28 @@ public:
                 snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u",
                          (local_ip >> 24) & 0xff, (local_ip >> 16) & 0xff,
                          (local_ip >> 8) & 0xff, local_ip & 0xff);
-                list->addItem(new tsl::elm::ListItem("本机 IP", ipbuf));
+                list->addItem(new tsl::elm::ListItem(T("本机 IP", "本機 IP"), ipbuf));
             } else {
-                list->addItem(new tsl::elm::ListItem("本机 IP", "建立房间后显示"));
+                list->addItem(new tsl::elm::ListItem(T("本机 IP", "本機 IP"), T("建立房间后显示", "建立房間後顯示")));
             }
 
             u32 vaddr = 0;
             const bool addr_ok = R_SUCCEEDED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr));
             if (!addr_ok) {
-                list->addItem(new tsl::elm::ListItem("虚拟地址", "读取失败"));
+                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), T("读取失败", "讀取失敗")));
             } else if (vaddr == 0) {
-                list->addItem(new tsl::elm::ListItem("虚拟地址", "建立房间后分配"));
+                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), T("建立房间后分配", "建立房間後分配")));
             } else {
                 char buf[48];
                 snprintf(buf, sizeof(buf), "%u.%u.%u.%u  (id=%u)",
                          (vaddr >> 24) & 0xff, (vaddr >> 16) & 0xff,
                          (vaddr >> 8) & 0xff, vaddr & 0xff, vaddr & 0xffff);
-                list->addItem(new tsl::elm::ListItem("虚拟地址", buf));
+                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), buf));
             }
 
-            // Tell the user whether the address is stable. "硬件派生" is
+            // Tell the user whether the address is stable. T("硬件派生", "硬體衍生") is
             // derived from this console's LAN address, so it is the same on
-            // every boot even when the SD card is write-protected. "启动随机"
+            // every boot even when the SD card is write-protected. T("启动随机", "啟動隨機")
             // still gets written to relay.cfg, so check it again after a
             // reboot -- if the number changes, the write is failing.
             if (addr_ok && vaddr != 0) {
@@ -157,26 +181,26 @@ public:
                     src = 0;
                 }
                 if (src == 1) {
-                    list->addItem(new tsl::elm::ListItem("地址固定", "硬件派生"));
+                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("硬件派生", "硬體衍生")));
                 } else if (src == 2) {
-                    list->addItem(new tsl::elm::ListItem("地址固定", "启动随机"));
+                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("启动随机", "啟動隨機")));
                 } else if (src == 3) {
-                    list->addItem(new tsl::elm::ListItem("地址固定", "已自动更换"));
+                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("已自动更换", "已自動更換")));
                 } else {
                     // The id either predates hardware derivation or was cached
                     // before this console's LAN address changed.
-                    list->addItem(new tsl::elm::ListItem("地址固定", "未知来源"));
+                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("未知来源", "未知來源")));
                 }
             }
-            list->addItem(new tsl::elm::ListItem("两台机器的地址必须不同"));
-            list->addItem(new tsl::elm::ListItem("重启后地址不变即正常"));
+            list->addItem(new tsl::elm::ListItem(T("两台机器的地址必须不同", "兩台機器的位址必須不同")));
+            list->addItem(new tsl::elm::ListItem(T("重启后地址不变即正常", "重新啟動後位址不變即正常")));
 
             // Release signature. Kept at the very bottom so it never gets in
             // the way of the settings, but every user scrolling down sees it.
-            list->addItem(new tsl::elm::CategoryHeader("关于"));
-            list->addItem(new tsl::elm::ListItem("制作", "阿东 & 大肥鱼"));
-            list->addItem(new tsl::elm::ListItem("版本", g_version));
-            list->addItem(new tsl::elm::ListItem("声明", "免费分享 禁止倒卖"));
+            list->addItem(new tsl::elm::CategoryHeader(T("关于", "關於")));
+            list->addItem(new tsl::elm::ListItem(T("制作", "製作"), T("阿东 & 大肥鱼", "阿東 & 大肥魚")));
+            list->addItem(new tsl::elm::ListItem(T("版本", "版本"), g_version));
+            list->addItem(new tsl::elm::ListItem(T("声明", "聲明"), T("免费分享 禁止倒卖", "免費分享 禁止轉賣")));
         }
 
         frame->setContent(list);
@@ -215,13 +239,13 @@ public:
         char buf[48];
         bool faint = false;
         if (ms == 0) {
-            snprintf(buf, sizeof(buf), "* 延迟 --");
+            snprintf(buf, sizeof(buf), T("* 延迟 --", "* 延遲 --"));
             faint = true;
         } else if (ms > 999) {
-            snprintf(buf, sizeof(buf), "* 延迟 >999ms");
+            snprintf(buf, sizeof(buf), T("* 延迟 >999ms", "* 延遲 >999ms"));
             faint = true;
         } else {
-            snprintf(buf, sizeof(buf), "* 延迟 %ums", ms);
+            snprintf(buf, sizeof(buf), T("* 延迟 %ums", "* 延遲 %ums"), ms);
         }
         for (size_t k = 0; k < g_serverItems.size(); k++) {
             if (!g_serverItems[k]->getValue().empty()) {
@@ -240,6 +264,7 @@ class Overlay : public tsl::Overlay {
 public:
     virtual void initServices() override {
         g_state = State::Uninit;
+        detectLanguage();
         tsl::hlp::doWithSmSession([&] {
             Result rc;
 
@@ -257,7 +282,7 @@ public:
 
             rc = ldnMitmGetVersion(&g_ldnConfig, g_version);
             if (R_FAILED(rc)) {
-                strcpy(g_version, "错误");
+                strcpy(g_version, T("错误", "錯誤"));
             }
 
             g_state = State::Loaded;
