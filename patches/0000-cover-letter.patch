@@ -44,6 +44,7 @@ ldn_mitm.ovl 更名等)见随附的 移植说明.md。
 
 补注(2026-10-18/19):系列交付后追加 0010 联机监视器补丁
 (overlay: 显示所选服务器的在线人数/房间数量与游戏房间列表,
-内含 CI 适配最新系统的修复:构建前 Atmosphere-libs 顶到 master +
-libnx master 配套),新增内容,非本移植系列的上游提交,
-作者 Patch Port。应用时将 0010-*.patch 一并 git am 即可,共 10 个补丁。
+内含 CI 适配最新系统修复:构建前 Atmosphere-libs 顶到 master +
+libnx master 配套;及内存优化:修复 ovlloader 0x559 OutOfMemory),
+新增内容,非本移植系列的上游提交,作者 Patch Port。
+应用时将 0010-*.patch 一并 git am 即可,共 10 个补丁。

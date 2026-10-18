@@ -1,4 +1,4 @@
-From 3785818c49f7f4945d017e1b7080da44b1553af5 Mon Sep 17 00:00:00 2001
+From 43555394acb3cf389ccd038c776c7b650856f38c Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
 Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
@@ -22,6 +22,10 @@ Content-Transfer-Encoding: 8bit
 - 每次点开 overlay(Overlay::onShow)与切换服务器时重新下载订阅并刷新
 - 后台线程刷新(libnx thread,不阻塞 UI),UI 按快照 version 重建列表
 - 域名解析用 getaddrinfo(libnx/newlib 无 gethostbyname);INADDR_NONE 兼容定义
+- 内存优化(修复 ovlloader 堆溢出 0x559):标题表(哈希 16384 桶 + 288KB
+  名称池,约 512KB)延迟到首次解析订阅时才分配,不再挤占渲染器
+  frameBuffer(约 1.3MB)的分配;HTTP 响应体原地裁剪不再二次拷贝;
+  overlay 启用 --gc-sections/-fno-rtti/-fdata-sections 减小镜像
 - CI 修复(适配最新系统):构建前把 Atmosphere-libs 顶到 master(与上游
   nightly.yml 相同,跟踪 23.0.1+ 固件适配,否则插件在新系统启动报错),
   并安装 libnx master 与其配套(新 pgl 命名);三个工作流统一此流程,
@@ -33,10 +37,11 @@ Reference: https://github.com/jieluojun/LanPlayMonitor
  .github/workflows/build.yml   |   14 +-
  .github/workflows/nightly.yml |   17 +-
  .github/workflows/release.yml |   24 +-
+ overlay/Makefile              |    6 +-
  overlay/source/main.cpp       |  149 +++-
- overlay/source/monitor.cpp    | 1397 +++++++++++++++++++++++++++++++++
+ overlay/source/monitor.cpp    | 1414 +++++++++++++++++++++++++++++++++
  overlay/source/monitor.hpp    |   48 ++
- 6 files changed, 1628 insertions(+), 21 deletions(-)
+ 7 files changed, 1648 insertions(+), 24 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
@@ -144,6 +149,29 @@ index 7f34343..b34daa5 100644
  
      - name: Pack
        run: |
+diff --git a/overlay/Makefile b/overlay/Makefile
+index e2cdc19..ea651ae 100644
+--- a/overlay/Makefile
++++ b/overlay/Makefile
+@@ -57,15 +57,15 @@ NO_ICON		:=  1
+ #---------------------------------------------------------------------------------
+ ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
+ 
+-CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
++CFLAGS	:=	-g -Wall -O2 -ffunction-sections -fdata-sections \
+ 			$(ARCH) $(DEFINES) $(VERSION_DEFINES)
+ 
+ CFLAGS	+=	$(INCLUDE) -D__SWITCH__
+ 
+-CXXFLAGS	:= $(CFLAGS) -fno-exceptions -std=c++20
++CXXFLAGS	:= $(CFLAGS) -fno-exceptions -fno-rtti -std=c++20
+ 
+ ASFLAGS	:=	-g $(ARCH)
+-LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
++LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sections
+ 
+ LIBS	:= -lnx
+ 
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
 index 8e07c19..52a7130 100644
 --- a/overlay/source/main.cpp
@@ -395,10 +423,10 @@ index 8e07c19..52a7130 100644
      virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..0a29ea0
+index 0000000..4b23cc7
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,1397 @@
+@@ -0,0 +1,1414 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -458,8 +486,8 @@ index 0000000..0a29ea0
 +
 +static constexpr size_t kMaxDownload  = 3u * 1024 * 1024;  /* 订阅文件上限 */
 +static constexpr size_t kMaxHttpBody  = 512u * 1024;       /* 查询响应上限 */
-+static constexpr u32   kTitleHashSize = 16384;             /* 标题映射哈希桶(2 的幂) */
-+static constexpr size_t kTitleArena   = 768u * 1024;       /* 标题名字符串池 */
++static constexpr u32   kTitleHashSize = 16384;             /* 标题映射哈希桶(2 的幂;须 ≥ 条目数,10521 条) */
++static constexpr size_t kTitleArena   = 288u * 1024;       /* 标题名字符串池(实测 10521 条约 216KB) */
 +static constexpr u32   kMaxScanRooms  = 24;
 +
 +/* ------------------------------------------------------------------ */
@@ -495,6 +523,7 @@ index 0000000..0a29ea0
 +static u16  *g_titleLen   = nullptr;
 +static char *g_titleArena = nullptr;
 +static u32  g_titleArenaUsed = 0;
++static void EnsureTitleTables();
 +
 +/* ------------------------------------------------------------------ */
 +/* 小工具                                                              */
@@ -914,7 +943,7 @@ index 0000000..0a29ea0
 +}
 +
 +/* 解析响应:状态码 + body(chunked 已解码;Content-Length 已截断)。 */
-+static bool HttpParseResponse(const std::string &raw, int *outStatus, std::string *outBody) {
++static bool HttpParseResponse(std::string &raw, int *outStatus, std::string *outBody) {
 +    size_t pos = raw.find("\r\n\r\n");
 +    if (pos == std::string::npos)
 +        return false;
@@ -944,13 +973,17 @@ index 0000000..0a29ea0
 +            p += chunk + 2;
 +        }
 +    } else {
-+        body.assign(raw, p, std::string::npos);
++        /* 原地截掉响应头并搬走,避免 body 再复制一份
++         * (overlay 堆只有几 MB,少一次订阅文件大小的峰值拷贝)。 */
++        raw.erase(0, p);
 +        size_t cl = headersLower.find("content-length:");
 +        if (cl != std::string::npos) {
 +            long n = atol(headersLower.c_str() + cl + 15);
-+            if (n >= 0 && (size_t)n < body.size())
-+                body.resize((size_t)n);
++            if (n >= 0 && (size_t)n < raw.size())
++                raw.resize((size_t)n);
 +        }
++        *outBody = std::move(raw);
++        return true;
 +    }
 +    *outBody = std::move(body);
 +    return true;
@@ -1668,10 +1701,13 @@ index 0000000..0a29ea0
 +        ParseServersJson(serversJson.c_str());
 +    else
 +        g_serverN = 0;
-+    if (gotChinese && g_titleKey) {
-+        g_titleArenaUsed = 0;
-+        memset(g_titleKey, 0, kTitleHashSize * sizeof(u64));
-+        ParseChineseDbJson(chineseJson.c_str());
++    if (gotChinese) {
++        EnsureTitleTables();
++        if (g_titleKey) {
++            g_titleArenaUsed = 0;
++            memset(g_titleKey, 0, kTitleHashSize * sizeof(u64));
++            ParseChineseDbJson(chineseJson.c_str());
++        }
 +    }
 +
 +    if (!haveServer) {
@@ -1755,19 +1791,28 @@ index 0000000..0a29ea0
 +    g_traditional.store(traditional);
 +}
 +
++/* 标题表延迟到首次解析时才分配(约 0.5MB),避免在 overlay 刚打开、
++ * 渲染器 frameBuffer(约 1.3MB)分配之前就把 ovlloader 仅几 MB 的堆挤爆。 */
++static void EnsureTitleTables() {
++    if (g_titleKey)
++        return;
++    g_titleKey   = (u64 *)calloc(kTitleHashSize, sizeof(u64));
++    g_titleOff   = (u32 *)calloc(kTitleHashSize, sizeof(u32));
++    g_titleLen   = (u16 *)calloc(kTitleHashSize, sizeof(u16));
++    g_titleArena = (char *)calloc(kTitleArena, 1);
++    if (!g_titleKey || !g_titleOff || !g_titleLen || !g_titleArena) {
++        free(g_titleKey); free(g_titleOff); free(g_titleLen); free(g_titleArena);
++        g_titleKey = nullptr; g_titleOff = nullptr;
++        g_titleLen = nullptr; g_titleArena = nullptr;
++    }
++}
++
 +void MonitorInit() {
 +    if (g_inited)
 +        return;
 +    g_inited = true;
 +    g_exit.store(false);
 +    g_pendingName[0] = 0;
-+
-+    if (!g_titleKey) {
-+        g_titleKey   = (u64 *)calloc(kTitleHashSize, sizeof(u64));
-+        g_titleOff   = (u32 *)calloc(kTitleHashSize, sizeof(u32));
-+        g_titleLen   = (u16 *)calloc(kTitleHashSize, sizeof(u16));
-+        g_titleArena = (char *)calloc(kTitleArena, 1);
-+    }
 +
 +    Result rc = threadCreate(&g_thread, MonitorWorker, nullptr, g_workerStack,
 +                             sizeof(g_workerStack), 0x2C, -2);
