@@ -1,4 +1,4 @@
-From d49aed6d93e95281481dd1756fb2c369333c9982 Mon Sep 17 00:00:00 2001
+From 8948c19c300a45215e5cfad89063af41d7c969d7 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
 Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
@@ -26,9 +26,9 @@ Content-Transfer-Encoding: 8bit
 Reference: https://github.com/jieluojun/LanPlayMonitor
 ---
  overlay/source/main.cpp    |  149 +++-
- overlay/source/monitor.cpp | 1386 ++++++++++++++++++++++++++++++++++++
+ overlay/source/monitor.cpp | 1397 ++++++++++++++++++++++++++++++++++++
  overlay/source/monitor.hpp |   48 ++
- 3 files changed, 1580 insertions(+), 3 deletions(-)
+ 3 files changed, 1591 insertions(+), 3 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
@@ -283,10 +283,10 @@ index 8e07c19..52a7130 100644
      virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..0ee6329
+index 0000000..0a29ea0
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,1386 @@
+@@ -0,0 +1,1397 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -639,18 +639,29 @@ index 0000000..0ee6329
 +    return true;
 +}
 +
++/* libnx/newlib 的 netinet/in.h 不定义 INADDR_NONE,补一个 */
++#ifndef INADDR_NONE
++#define INADDR_NONE ((in_addr_t)0xFFFFFFFFu)
++#endif
++
 +static bool HttpResolve(const char *host, struct sockaddr_in *sa) {
 +    memset(sa, 0, sizeof(*sa));
 +    sa->sin_family = AF_INET;
 +    u32 ip = inet_addr(host);
-+    if (ip != INADDR_NONE && ip != 0) {
++    if (ip != (u32)INADDR_NONE && ip != 0) {
 +        sa->sin_addr.s_addr = ip;
 +        return true;
 +    }
-+    struct hostent *he = gethostbyname(host);
-+    if (!he || !he->h_addr_list || !he->h_addr_list[0] || he->h_addrtype != AF_INET)
++    /* libnx/newlib 没有 gethostbyname,域名解析用 getaddrinfo */
++    struct addrinfo hints, *res = nullptr;
++    memset(&hints, 0, sizeof(hints));
++    hints.ai_family = AF_INET;
++    hints.ai_socktype = SOCK_STREAM;
++    if (getaddrinfo(host, nullptr, &hints, &res) != 0 || !res)
 +        return false;
-+    memcpy(&sa->sin_addr, he->h_addr_list[0], sizeof(sa->sin_addr));
++    memcpy(&sa->sin_addr, &((struct sockaddr_in *)res->ai_addr)->sin_addr,
++           sizeof(sa->sin_addr));
++    freeaddrinfo(res);
 +    return true;
 +}
 +
