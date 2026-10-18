@@ -37,7 +37,19 @@ static bool g_isTraditional = false;
 /* The list currently on screen, plus the "restore defaults" row. Both are
    needed after a server is added/removed: libtesla has no per-item refresh,
    so the whole list is rebuilt in place (see rebuildUi()). */
-static tsl::elm::List *g_list = nullptr;
+class RebuildList : public tsl::elm::List {
+public:
+    /* List::clear() resets the scroll position to the top on the frame it
+       rebuilds, which made the menu visibly bounce back to the first entry
+       before re-focusing the deleted row. Snap straight to the row that is
+       about to be focused instead, so the rebuilt list appears in place. */
+    void snapToFocus() {
+        this->m_offset = this->m_nextOffset;
+        this->invalidate();
+    }
+};
+
+static RebuildList *g_list = nullptr;
 static tsl::elm::ListItem *g_restoreItem = nullptr;
 static bool g_restoreArmed = false;
 
@@ -103,7 +115,7 @@ public:
         // string is repeated in the T("关于", "關於") block at the bottom.
         auto frame = new tsl::elm::OverlayFrame(T("联机插件", "連線插件"), g_brand);
 
-        g_list = new tsl::elm::List();
+        g_list = new RebuildList();
         buildList(g_list);
 
         frame->setContent(g_list);
@@ -128,6 +140,7 @@ public:
                 const s32 idx = g_list->getIndexInList(g_focus_after_rebuild);
                 if (idx >= 0) {
                     g_list->setFocusedIndex(static_cast<u32>(idx));
+                    g_list->snapToFocus();
                     this->requestFocus(g_focus_after_rebuild, tsl::FocusDirection::None);
                     g_focus_after_rebuild = nullptr;
                 } else if (--g_focus_retries <= 0) {
