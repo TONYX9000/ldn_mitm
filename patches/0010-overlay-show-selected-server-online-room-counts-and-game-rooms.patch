@@ -1,4 +1,4 @@
-From 173beb884d6d848de06183464b85d9461860eef3 Mon Sep 17 00:00:00 2001
+From 809459a12500c4866c94d82f455a2d24109b0be9 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
 Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
@@ -45,9 +45,9 @@ Reference: https://github.com/jieluojun/LanPlayMonitor
  .github/workflows/release.yml |   24 +-
  overlay/Makefile              |    5 +-
  overlay/source/main.cpp       |  151 +++-
- overlay/source/monitor.cpp    | 1499 +++++++++++++++++++++++++++++++++
+ overlay/source/monitor.cpp    | 1516 +++++++++++++++++++++++++++++++++
  overlay/source/monitor.hpp    |   51 ++
- 7 files changed, 1738 insertions(+), 23 deletions(-)
+ 7 files changed, 1755 insertions(+), 23 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
@@ -431,10 +431,10 @@ index 8e07c19..8bc36f6 100644
      virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..96e17f7
+index 0000000..cd6ff91
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,1499 @@
+@@ -0,0 +1,1516 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -495,7 +495,18 @@ index 0000000..96e17f7
 +
 +/* 诊断日志:记录各阶段,便于定位 ovlloader 堆不足时的爆点。
 + * 每次 MonitorInit 截断重写。 */
++static bool g_sdMounted = false;
++static void EnsureSd() {
++    /* tesla 覆盖了 __appInit,libnx 默认实现里的 fsdevMountSdmc() 不会执行,
++     * 必须自行挂载,否则 sdmc: 的 fopen 全部失败(曾导致 fclose(NULL) 崩溃)。 */
++    if (!g_sdMounted) {
++        fsdevMountSdmc();
++        g_sdMounted = true;
++    }
++}
++
 +static void MonLog(const char *msg) {
++    EnsureSd();
 +    FILE *f = fopen(kLogPath, "a");
 +    if (!f)
 +        return;
@@ -1076,6 +1087,7 @@ index 0000000..96e17f7
 +}
 +
 +static void SaveFile(const char *path, const std::string &data) {
++    EnsureSd();
 +    mkdir("sdmc:/config", 0777);
 +    mkdir(kSaveDir, 0777);
 +    FILE *f = fopen(path, "wb");
@@ -1086,6 +1098,7 @@ index 0000000..96e17f7
 +}
 +
 +static bool LoadFile(const char *path, std::string *out) {
++    EnsureSd();
 +    FILE *f = fopen(path, "rb");
 +    if (!f)
 +        return false;
@@ -1203,6 +1216,7 @@ index 0000000..96e17f7
 + * 峰值内存 = 标题表(约 512KB) + 窗口,避免与订阅字符串叠加把
 + * ovlloader 仅几 MB 的堆挤爆(0x559 OutOfMemory)。 */
 +static bool ParseChineseDbFile(const char *path) {
++    EnsureSd();
 +    FILE *f = fopen(path, "rb");
 +    if (!f)
 +        return false;
@@ -1902,9 +1916,12 @@ index 0000000..96e17f7
 +    g_inited = true;
 +    g_exit.store(false);
 +    g_pendingName[0] = 0;
++    EnsureSd();
 +    mkdir("sdmc:/config", 0777);
 +    mkdir(kSaveDir, 0777);
-+    fclose(fopen(kLogPath, "w"));   /* 截断上一轮日志 */
++    FILE *lf = fopen(kLogPath, "w");    /* 截断上一轮日志(禁止 fclose(NULL)) */
++    if (lf)
++        fclose(lf);
 +    MonLog("worker-init");
 +
 +    Result rc = threadCreate(&g_thread, MonitorWorker, nullptr, g_workerStack,
