@@ -852,7 +852,20 @@ namespace ams::mitm::ldn::relay {
         LogFormat("relay: ping tx fd=%d armed=%d waiting=%d since=%lldms misses=%u",
                   m_fd, was_waiting == 0, g_latency.waiting.load(), since,
                   m_ping_misses.load());
-        const u8 p[4] = { TypePing, 'l', 'd', 'n' };
+        /* The ping payload must be EXACTLY 4 bytes, not 3. Server versions
+           disagree on how strict they are:
+             - 1.0.x (switch-lan-play/server, e.g. olunira.fun) just echoes
+               msg.slice(0, 4) and never inspects the length.
+             - 2.0.x/3.0.x (slp-server-rust) parse the frame strictly:
+               Ping::MIN_LENGTH == MAX_LENGTH == 4, and anything else is
+               dropped as NotParseable, so no echo comes back.
+           Four bytes is the only payload that both accept: 1.0 truncates
+           the reply to its first 4 bytes (still type 0x02, which is all we
+           check) and 2.0/3.0 echo all 5 bytes back verbatim. Sending only 3
+           bytes used to work against 1.0 servers and silently failed against
+           every 2.0/3.0 one -- which is why only China-Beijing ever showed a
+           latency reading. */
+        const u8 p[5] = { TypePing, 'l', 'd', 'n', 'p' };
         const int sent = send(m_fd, p, sizeof(p), 0);
         if (sent != static_cast<int>(sizeof(p))) {
             LogFormat("relay: ping send failed rc=%d errno=%d", sent, errno);
