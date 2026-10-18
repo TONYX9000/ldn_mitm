@@ -1,0 +1,1732 @@
+From d49aed6d93e95281481dd1756fb2c369333c9982 Mon Sep 17 00:00:00 2001
+From: Patch Port <port@local>
+Date: Sun, 18 Oct 2026 14:28:50 +0000
+Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
+ =?UTF-8?q?=E6=9C=8D=E5=8A=A1=E5=99=A8=E7=9A=84=E5=9C=A8=E7=BA=BF=E4=BA=BA?=
+ =?UTF-8?q?=E6=95=B0/=E6=88=BF=E9=97=B4=E6=95=B0=E9=87=8F=E4=B8=8E?=
+ =?UTF-8?q?=E6=B8=B8=E6=88=8F=E6=88=BF=E9=97=B4=E5=88=97=E8=A1=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 标题下方常驻显示当前选择服务器的在线人数、房间数量
+  (标签「在线/房间」,数字在下;繁体「線上/房間」,简繁自适应)
+- 新增「游戏房间」区块:列出所选服务器的房间,标题ID 经
+  chinese_db.json 映射为中文游戏名,人数显示 N/M
+- 订阅文件 servers.json / chinese_db.json 每次点开 overlay 从远程下载,
+  保存到 sdmc:/config/ldn_mitm/,失败退回本地缓存;直连
+  raw.githubusercontent.com,v6.gh-proxy.org / gh-proxy.com / ghfast.top 镜像兜底
+- graphql 服务器 POST / 取 serverInfo+room;rest(1.0)服务器 GET /info 取在线数;
+  /info 不含房间时用 lan-play 中继协议 UDP LDN 主动扫描补房间
+  (11452 广播,1.5s 收集,type 0x01/0x03 分片重组,RLE 解压 NetworkInfo)
+- 每次点开 overlay(Overlay::onShow)与切换服务器时重新下载订阅并刷新
+- 后台线程刷新(libnx thread,不阻塞 UI),UI 按快照 version 重建列表
+- 参考 jieluojun/LanPlayMonitor 的服务器 API 口径(main.py)
+
+Reference: https://github.com/jieluojun/LanPlayMonitor
+---
+ overlay/source/main.cpp    |  149 +++-
+ overlay/source/monitor.cpp | 1386 ++++++++++++++++++++++++++++++++++++
+ overlay/source/monitor.hpp |   48 ++
+ 3 files changed, 1580 insertions(+), 3 deletions(-)
+ create mode 100644 overlay/source/monitor.cpp
+ create mode 100644 overlay/source/monitor.hpp
+
+diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
+index 8e07c19..52a7130 100644
+--- a/overlay/source/main.cpp
++++ b/overlay/source/main.cpp
+@@ -1,6 +1,7 @@
+ #define TESLA_INIT_IMPL // If you have more than one file using the tesla header, only define this in the main one
+ #include <tesla.hpp>    // The Tesla Header
+ #include "ldn.h"
++#include "monitor.hpp"
+ #include <vector>
+ 
+ enum class State {
+@@ -34,6 +35,70 @@ static bool g_isTraditional = false;
+ 
+ #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
+ 
++/* ---- 联机监视器(在线/房间/游戏房间)UI 状态 ---- */
++
++/* 当前选中的服务器名,监视器按它查询(切换时立即刷新)。 */
++static char g_selectedName[48] = {};
++
++/* 游戏房间区块:标题 + 动态行。行都不可聚焦,重建(删除)时安全。 */
++static tsl::elm::List *g_list = nullptr;
++static tsl::elm::CategoryHeader *g_roomHeader = nullptr;
++static std::vector<tsl::elm::Element*> g_roomItems;
++static u32 g_monitorVersion = 0xFFFFFFFFu;   /* 强制首次重建 */
++
++/* 不可聚焦的列表行:游戏房间行会被整体删除重建,
++   保持不可聚焦可避免焦点悬挂在已删除元素上。 */
++class PlainListItem : public tsl::elm::ListItem {
++public:
++    PlainListItem(const std::string &text, const std::string &value = "")
++        : tsl::elm::ListItem(text, value) {}
++
++    virtual tsl::elm::Element *requestFocus(tsl::elm::Element *oldFocus,
++                                            tsl::FocusDirection direction) override {
++        return nullptr;
++    }
++};
++
++/* 帧:在标题下方常驻显示当前服务器的在线人数与房间数量。
++   标签“在线/房间”在上,对应数量在下。 */
++class MonitorFrame : public tsl::elm::OverlayFrame {
++public:
++    MonitorFrame(const std::string &title, const std::string &subtitle)
++        : tsl::elm::OverlayFrame(title, subtitle) {}
++
++    virtual void draw(tsl::gfx::Renderer *renderer) override {
++        tsl::elm::OverlayFrame::draw(renderer);
++
++        MonitorSnapshot snap;
++        MonitorCopySnapshot(&snap);
++
++        char online[16], rooms[16];
++        if (snap.online >= 0)
++            snprintf(online, sizeof(online), "%d", snap.online);
++        else
++            snprintf(online, sizeof(online), "--");
++        if (snap.roomCount >= 0)
++            snprintf(rooms, sizeof(rooms), "%d", snap.roomCount);
++        else
++            snprintf(rooms, sizeof(rooms), "--");
++
++        renderer->enableScissoring(0, 0, tsl::cfg::FramebufferWidth, 125);
++
++        /* 联机插件标题正下方:两列统计,标签(在线 / 房间)在上,数字在下 */
++        constexpr s32 colX[2] = { 20, 115 };
++        renderer->drawString(T("在线", "線上"), false, colX[0], 88, 15,
++                             tsl::gfx::Renderer::a(tsl::style::color::ColorDescription));
++        renderer->drawString(T("房间", "房間"), false, colX[1], 88, 15,
++                             tsl::gfx::Renderer::a(tsl::style::color::ColorDescription));
++        renderer->drawString(online, false, colX[0], 103, 20,
++                             tsl::gfx::Renderer::a(tsl::style::color::ColorText));
++        renderer->drawString(rooms, false, colX[1], 103, 20,
++                             tsl::gfx::Renderer::a(tsl::style::color::ColorText));
++
++        renderer->disableScissoring();
++    }
++};
++
+ class ConfigToggleListItem : public tsl::elm::ToggleListItem {
+ public:
+     ConfigToggleListItem(const char *label,
+@@ -70,6 +135,51 @@ static void detectLanguage()
+     strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
+ }
+ 
++/* (重)建“游戏房间”区块的动态行。快照 version 变化时由 update() 调用。 */
++static void rebuildRoomSection(const MonitorSnapshot &snap)
++{
++    if (!g_list || !g_roomHeader)
++        return;
++
++    for (auto *e : g_roomItems)
++        g_list->removeItem(e);
++    g_roomItems.clear();
++
++    /* 区块标题带上服务器名;空闲时给状态提示 */
++    char header[80];
++    if (snap.server[0])
++        snprintf(header, sizeof(header), "%s · %s", T("游戏房间", "遊戲房間"), snap.server);
++    else
++        snprintf(header, sizeof(header), "%s", T("游戏房间", "遊戲房間"));
++    g_roomHeader->setText(header);
++
++    if (snap.roomN == 0) {
++        const char *msg;
++        if (snap.busy)
++            msg = T("正在查询…", "正在查詢…");
++        else if (snap.status[0])
++            msg = snap.status;
++        else
++            msg = T("暂无房间", "暫無房間");
++        auto *item = new PlainListItem(msg);
++        g_list->addItem(item);
++        g_roomItems.push_back(item);
++        return;
++    }
++
++    for (u32 i = 0; i < snap.roomN; i++) {
++        char value[24];
++        if (snap.rooms[i].playersMax > 0)
++            snprintf(value, sizeof(value), "%u/%u",
++                     snap.rooms[i].players, snap.rooms[i].playersMax);
++        else
++            snprintf(value, sizeof(value), "%u", snap.rooms[i].players);
++        auto *item = new PlainListItem(snap.rooms[i].game, value);
++        g_list->addItem(item);
++        g_roomItems.push_back(item);
++    }
++}
++
+ class MainGui : public tsl::Gui {
+ public:
+     MainGui() { }
+@@ -79,9 +189,10 @@ public:
+         // bundled font has CJK glyphs, so the UI is localised in place.
+         // The header subtitle carries the release brand; the full version
+         // string is repeated in the T("关于", "關於") block at the bottom.
+-        auto frame = new tsl::elm::OverlayFrame(T("联机插件", "連線插件"), g_brand);
++        auto frame = new MonitorFrame(T("联机插件", "連線插件"), g_brand);
+ 
+         auto list = new tsl::elm::List();
++        g_list = list;
+ 
+         if (g_state == State::Error) {
+             list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
+@@ -96,6 +207,7 @@ public:
+             list->addItem(new ConfigToggleListItem(T("互联网中继", "網際網路中繼"), ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
+ 
+             g_serverItems.clear();
++            g_selectedName[0] = 0;
+             u32 count = 0;
+             if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count))) {
+                 list->addItem(new tsl::elm::ListItem(T("读取服务器列表失败", "讀取伺服器清單失敗")));
+@@ -109,9 +221,11 @@ public:
+                 for (u32 i = 0; i < count; i++) {
+                     char name[32] = {};
+                     ldnMitmGetRelayServerName(&g_ldnConfig, i, name);
++                    if (i == selected)
++                        snprintf(g_selectedName, sizeof(g_selectedName), "%s", name);
+                     auto *item = new tsl::elm::ListItem(name);
+                     item->setValue(i == selected ? "*" : "");
+-                    item->setClickListener([i](u64 keys) {
++                    item->setClickListener([i, name](u64 keys) {
+                         if (keys & HidNpadButton_A) {
+                             if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
+                                 g_serverItems[i]->setValue(T("错误", "錯誤"));
+@@ -126,6 +240,9 @@ public:
+                             // there with only a star until the overlay is
+                             // reopened.
+                             g_shown_latency = 0xFFFFFFFFu;
++                            // 切换服务器:同步监视器目标并立即刷新在线/房间。
++                            snprintf(g_selectedName, sizeof(g_selectedName), "%s", name);
++                            MonitorRequestRefresh(g_selectedName);
+                             return true;
+                         }
+                         return false;
+@@ -135,6 +252,11 @@ public:
+                 }
+             }
+ 
++            // 游戏房间:当前选择的服务器上的房间列表。
++            // 行由 update() 按监视器快照版本动态重建。
++            g_roomHeader = new tsl::elm::CategoryHeader(T("游戏房间", "遊戲房間"));
++            list->addItem(g_roomHeader);
++
+             // Show this console's relay identity. relay.cfg only stores the
+             // low 16 bits (`id=`), and the plugin assigns one on first use if
+             // the line is absent, so this is the only place to read it back.
+@@ -211,12 +333,22 @@ public:
+         // cached value made update() return early and the label stayed at
+         // just "*" with no "--" and no number.
+         g_shown_latency = 0xFFFFFFFFu;
++        // 同理:强制首次重建游戏房间区块。
++        g_monitorVersion = 0xFFFFFFFFu;
+ 
+         return frame;
+     }
+ 
+     // Called once every frame to update values
+     virtual void update() override {
++        // 游戏房间区块:监视器快照 version 变化时重建行。
++        MonitorSnapshot snap;
++        MonitorCopySnapshot(&snap);
++        if (snap.version != g_monitorVersion) {
++            g_monitorVersion = snap.version;
++            rebuildRoomSection(snap);
++        }
++
+         // Show the live relay latency next to the selected server.
+         // Only the selected server is connected, so it is the only one
+         // whose round-trip time we can actually know.
+@@ -265,9 +397,14 @@ public:
+     virtual void initServices() override {
+         g_state = State::Uninit;
+         detectLanguage();
++        MonitorSetTraditional(g_isTraditional);
+         tsl::hlp::doWithSmSession([&] {
+             Result rc;
+ 
++            /* 监视器的 HTTP/UDP 需要 bsd socket;失败(无网络)时
++               MonitorWorker 会在查询阶段报错,不影响本地设置功能。 */
++            socketInitializeDefault();
++
+             rc = smGetService(&g_ldnSrv, "ldn:u");
+             if (R_FAILED(rc)) {
+                 g_state = State::Error;
+@@ -288,13 +425,19 @@ public:
+             g_state = State::Loaded;
+         });
+ 
++        MonitorInit();
+     }
+     virtual void exitServices() override {
++        MonitorExit();
++        socketExit();
+         serviceClose(&g_ldnConfig.s);
+         serviceClose(&g_ldnSrv);
+     }
+ 
+-    virtual void onShow() override {}    // Called before overlay wants to change from invisible to visible state
++    virtual void onShow() override {
++        // 每次点开 Tesla 插件就从远程重新下载订阅并刷新在线/房间。
++        MonitorRequestRefresh(g_selectedName[0] ? g_selectedName : nullptr);
++    }
+     virtual void onHide() override {}    // Called before overlay wants to change from visible to invisible state
+ 
+     virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
+diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
+new file mode 100644
+index 0000000..0ee6329
+--- /dev/null
++++ b/overlay/source/monitor.cpp
+@@ -0,0 +1,1386 @@
++/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
++ *
++ * 数据口径与 LanPlayMonitor 一致:
++ *   graphql 服务器  POST http://host:port/  {"query": PublicRoomSnapshot}
++ *   rest 服务器     GET  http://host:port/info
++ *   1.0(rest)服务器 /info 不给房间列表,用 lan-play 中继协议的
++ *   LDN 主动扫描补房间(对应 LanPlayMonitor 的 active-udp-scan)。
++ */
++#include "monitor.hpp"
++
++#include <switch.h>
++
++#include <arpa/inet.h>
++#include <netdb.h>
++#include <netinet/in.h>
++#include <sys/select.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/time.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <ctype.h>
++#include <strings.h>
++
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++#include <string>
++
++/* ------------------------------------------------------------------ */
++/* 常量                                                                */
++/* ------------------------------------------------------------------ */
++
++static const char *kSubServersPath = "jieluojun/LanPlayMonitor/refs/heads/main/servers.json";
++static const char *kSubChinesePath = "jieluojun/LanPlayMonitor/refs/heads/main/chinese_db.json";
++
++/* 下载通道:直连 + GitHub 加速镜像(raw.githubusercontent.com 纯 HTTP 可直连,
++ * 部分网络需要镜像兜底)。 */
++static const char *kUrlPrefixes[] = {
++    "http://raw.githubusercontent.com/",
++    "http://v6.gh-proxy.org/https://raw.githubusercontent.com/",
++    "http://gh-proxy.com/https://raw.githubusercontent.com/",
++    "http://ghfast.top/https://raw.githubusercontent.com/",
++};
++
++static const char *kGraphqlQuery =
++    "query PublicRoomSnapshot { serverInfo { online idle } room {"
++    " sessionId contentId hostPlayerName nodeCount nodeCountMax nodes { playerName } } }";
++
++static const char *kSaveDir         = "sdmc:/config/ldn_mitm";
++static const char *kSaveServersPath = "sdmc:/config/ldn_mitm/servers.json";
++static const char *kSaveChinesePath = "sdmc:/config/ldn_mitm/chinese_db.json";
++static const char *kRelayCfgPath    = "sdmc:/config/ldn_mitm/relay.cfg";
++
++static constexpr size_t kMaxDownload  = 3u * 1024 * 1024;  /* 订阅文件上限 */
++static constexpr size_t kMaxHttpBody  = 512u * 1024;       /* 查询响应上限 */
++static constexpr u32   kTitleHashSize = 16384;             /* 标题映射哈希桶(2 的幂) */
++static constexpr size_t kTitleArena   = 768u * 1024;       /* 标题名字符串池 */
++static constexpr u32   kMaxScanRooms  = 24;
++
++/* ------------------------------------------------------------------ */
++/* 全局状态                                                            */
++/* ------------------------------------------------------------------ */
++
++static std::mutex g_mutex;
++static MonitorSnapshot g_snap;
++
++static std::atomic<u32>  g_reqGen{0};
++static std::atomic<bool> g_exit{false};
++static std::atomic<bool> g_traditional{false};
++static u32   g_doneGen = 0;
++static Thread g_thread;
++static bool  g_inited = false;
++static char  g_pendingName[48];      /* 切换服务器时指定;空 = 读 relay.cfg */
++
++#define T_STR(hans, hant) (g_traditional.load() ? (hant) : (hans))
++
++/* 服务器列表(servers.json 订阅) */
++struct ServerEntry {
++    char name[32];
++    char host[64];
++    u16  port;
++    char type[12];      /* "graphql" / "rest" / "" */
++};
++static ServerEntry g_servers[MONITOR_MAX_SERVERS];
++static u32 g_serverN = 0;
++
++/* 标题映射(chinese_db.json 订阅):开放寻址哈希 + 字符串池 */
++static u64  *g_titleKey   = nullptr;    /* 存 key+1,0 = 空槽 */
++static u32  *g_titleOff   = nullptr;
++static u16  *g_titleLen   = nullptr;
++static char *g_titleArena = nullptr;
++static u32  g_titleArenaUsed = 0;
++
++/* ------------------------------------------------------------------ */
++/* 小工具                                                              */
++/* ------------------------------------------------------------------ */
++
++static bool StrIsSpace(char c) {
++    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
++}
++
++static const char *JsWs(const char *p) {
++    while (p && *p && StrIsSpace(*p))
++        p++;
++    return p;
++}
++
++/* 跳过 UTF-8 BOM */
++static const char *SkipBom(const char *p) {
++    if ((unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB &&
++        (unsigned char)p[2] == 0xBF)
++        return p + 3;
++    return p;
++}
++
++static int HexVal(char c) {
++    if (c >= '0' && c <= '9') return c - '0';
++    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
++    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
++    return -1;
++}
++
++/* ------------------------------------------------------------------ */
++/* 迷你 JSON 解析(容错、有界,覆盖本场景所需)                        */
++/* ------------------------------------------------------------------ */
++
++static void JsonPut(char *out, size_t n, size_t *o, char c) {
++    if (out && *o + 1 < n)
++        out[*o] = c;
++    (*o)++;
++}
++
++/* 解析 JSON 字符串(支持转义与 \uXXXX,含代理对)。*pp 指向起始引号。 */
++static bool JsonString(const char **pp, char *out, size_t n) {
++    const char *p = *pp;
++    if (!p || *p != '"')
++        return false;
++    p++;
++    size_t o = 0;
++    while (*p && *p != '"') {
++        unsigned char c = (unsigned char)*p++;
++        if (c == '\\') {
++            char e = *p++;
++            switch (e) {
++                case 'n': JsonPut(out, n, &o, '\n'); break;
++                case 'r': JsonPut(out, n, &o, '\r'); break;
++                case 't': JsonPut(out, n, &o, '\t'); break;
++                case 'b': JsonPut(out, n, &o, '\b'); break;
++                case 'f': JsonPut(out, n, &o, '\f'); break;
++                case '/': JsonPut(out, n, &o, '/');  break;
++                case '"': JsonPut(out, n, &o, '"');  break;
++                case '\\': JsonPut(out, n, &o, '\\'); break;
++                case 'u': {
++                    if (HexVal(p[0]) < 0 || HexVal(p[1]) < 0 || HexVal(p[2]) < 0 || HexVal(p[3]) < 0)
++                        return false;
++                    u32 cp = (u32)((HexVal(p[0]) << 12) | (HexVal(p[1]) << 8) |
++                                   (HexVal(p[2]) << 4) | HexVal(p[3]));
++                    p += 4;
++                    if (cp >= 0xD800 && cp <= 0xDBFF && p[0] == '\\' && p[1] == 'u' &&
++                        HexVal(p[2]) >= 0 && HexVal(p[3]) >= 0 &&
++                        HexVal(p[4]) >= 0 && HexVal(p[5]) >= 0) {
++                        u32 lo = (u32)((HexVal(p[2]) << 12) | (HexVal(p[3]) << 8) |
++                                       (HexVal(p[4]) << 4) | HexVal(p[5]));
++                        if (lo >= 0xDC00 && lo <= 0xDFFF) {
++                            cp = 0x10000u + ((cp - 0xD800u) << 10) + (lo - 0xDC00u);
++                            p += 6;
++                        }
++                    }
++                    if (cp < 0x80) {
++                        JsonPut(out, n, &o, (char)cp);
++                    } else if (cp < 0x800) {
++                        JsonPut(out, n, &o, (char)(0xC0 | (cp >> 6)));
++                        JsonPut(out, n, &o, (char)(0x80 | (cp & 0x3F)));
++                    } else if (cp < 0x10000) {
++                        JsonPut(out, n, &o, (char)(0xE0 | (cp >> 12)));
++                        JsonPut(out, n, &o, (char)(0x80 | ((cp >> 6) & 0x3F)));
++                        JsonPut(out, n, &o, (char)(0x80 | (cp & 0x3F)));
++                    } else {
++                        JsonPut(out, n, &o, (char)(0xF0 | (cp >> 18)));
++                        JsonPut(out, n, &o, (char)(0x80 | ((cp >> 12) & 0x3F)));
++                        JsonPut(out, n, &o, (char)(0x80 | ((cp >> 6) & 0x3F)));
++                        JsonPut(out, n, &o, (char)(0x80 | (cp & 0x3F)));
++                    }
++                    break;
++                }
++                default: JsonPut(out, n, &o, e); break;
++            }
++        } else {
++            JsonPut(out, n, &o, (char)c);
++        }
++    }
++    if (*p != '"')
++        return false;
++    p++;
++    if (out && n > 0)
++        out[o < n ? o : n - 1] = 0;
++    *pp = p;
++    return true;
++}
++
++/* 跳过一个完整 JSON 值,返回其后位置;失败返回 nullptr。 */
++static const char *JsonSkip(const char *p, int depth) {
++    if (!p || depth > 24)
++        return nullptr;
++    p = JsWs(p);
++    switch (*p) {
++        case '"':
++            return JsonString(&p, nullptr, 0) ? p : nullptr;
++        case '{':
++        case '[': {
++            char close = (*p == '{') ? '}' : ']';
++            p = JsWs(p + 1);
++            if (*p == close)
++                return p + 1;
++            for (;;) {
++                if (close == '}') {
++                    p = JsonSkip(p, depth + 1);          /* key */
++                    if (!p) return nullptr;
++                    p = JsWs(p);
++                    if (*p != ':') return nullptr;
++                    p = JsonSkip(p + 1, depth + 1);      /* value */
++                } else {
++                    p = JsonSkip(p, depth + 1);
++                }
++                if (!p) return nullptr;
++                p = JsWs(p);
++                if (*p == ',') { p = JsWs(p + 1); continue; }
++                if (*p == close) return p + 1;
++                return nullptr;
++            }
++        }
++        case 't': return (strncmp(p, "true", 4) == 0) ? p + 4 : nullptr;
++        case 'f': return (strncmp(p, "false", 5) == 0) ? p + 5 : nullptr;
++        case 'n': return (strncmp(p, "null", 4) == 0) ? p + 4 : nullptr;
++        default: {
++            const char *s = p;
++            if (*p == '-' || *p == '+') p++;
++            bool any = false;
++            while ((*p >= '0' && *p <= '9') || *p == '.' || *p == 'e' ||
++                   *p == 'E' || *p == '-' || *p == '+') {
++                p++;
++                any = true;
++            }
++            return (any && p != s) ? p : nullptr;
++        }
++    }
++}
++
++/* 在 obj(指向 '{')中取 key 对应值的起始位置;没有则 nullptr。 */
++static const char *JsonGet(const char *obj, const char *key) {
++    if (!obj || *obj != '{')
++        return nullptr;
++    const char *p = JsWs(obj + 1);
++    if (*p == '}')
++        return nullptr;
++    for (;;) {
++        char k[64];
++        if (*p != '"' || !JsonString(&p, k, sizeof(k)))
++            return nullptr;
++        p = JsWs(p);
++        if (*p != ':')
++            return nullptr;
++        p = JsWs(p + 1);
++        if (strcmp(k, key) == 0)
++            return p;
++        p = JsonSkip(p, 1);
++        if (!p)
++            return nullptr;
++        p = JsWs(p);
++        if (*p == ',') { p = JsWs(p + 1); continue; }
++        return nullptr;
++    }
++}
++
++static bool JsonGetStr(const char *obj, const char *key, char *out, size_t n) {
++    const char *v = JsonGet(obj, key);
++    return v && *v == '"' && JsonString(&v, out, n);
++}
++
++static bool JsonGetU32(const char *obj, const char *key, u32 *out) {
++    const char *v = JsonGet(obj, key);
++    if (!v)
++        return false;
++    v = JsWs(v);
++    if (*v < '0' || *v > '9')
++        return false;
++    u32 acc = 0;
++    while (*v >= '0' && *v <= '9') {
++        if (acc < 0x0CCCCCCC)
++            acc = acc * 10 + (u32)(*v - '0');
++        v++;
++    }
++    *out = acc;
++    return true;
++}
++
++/* 同义 key 依次尝试(如 contentId/content_id) */
++static bool JsonGetStrAny(const char *obj, const char *k1, const char *k2,
++                          char *out, size_t n) {
++    if (JsonGetStr(obj, k1, out, n))
++        return true;
++    return k2 && JsonGetStr(obj, k2, out, n);
++}
++
++/* ------------------------------------------------------------------ */
++/* HTTP 客户端(纯 HTTP;Content-Length / chunked / 连接关闭三种定界)   */
++/* ------------------------------------------------------------------ */
++
++struct HttpUrl {
++    char host[96];
++    u16  port;
++    char path[320];
++};
++
++static bool HttpParseUrl(const char *url, HttpUrl *out) {
++    if (strncmp(url, "http://", 7) != 0)
++        return false;
++    const char *p = url + 7;
++    const char *slash = strchr(p, '/');
++    const char *hostEnd = slash ? slash : p + strlen(p);
++    const char *colon = (const char *)memchr(p, ':', (size_t)(hostEnd - p));
++    size_t hostLen = (size_t)((colon ? colon : hostEnd) - p);
++    if (hostLen == 0 || hostLen >= sizeof(out->host))
++        return false;
++    memcpy(out->host, p, hostLen);
++    out->host[hostLen] = 0;
++    out->port = 80;
++    if (colon) {
++        u32 port = 0;
++        const char *q = colon + 1;
++        while (q < hostEnd && *q >= '0' && *q <= '9')
++            port = port * 10 + (u32)(*q++ - '0');
++        if (port == 0 || port > 65535)
++            return false;
++        out->port = (u16)port;
++    }
++    if (!slash) {
++        out->path[0] = '/';
++        out->path[1] = 0;
++    } else {
++        size_t plen = strlen(slash);
++        if (plen >= sizeof(out->path))
++            return false;
++        memcpy(out->path, slash, plen + 1);
++    }
++    return true;
++}
++
++static bool HttpResolve(const char *host, struct sockaddr_in *sa) {
++    memset(sa, 0, sizeof(*sa));
++    sa->sin_family = AF_INET;
++    u32 ip = inet_addr(host);
++    if (ip != INADDR_NONE && ip != 0) {
++        sa->sin_addr.s_addr = ip;
++        return true;
++    }
++    struct hostent *he = gethostbyname(host);
++    if (!he || !he->h_addr_list || !he->h_addr_list[0] || he->h_addrtype != AF_INET)
++        return false;
++    memcpy(&sa->sin_addr, he->h_addr_list[0], sizeof(sa->sin_addr));
++    return true;
++}
++
++static void HttpSetNonBlock(int fd, bool nb) {
++    int fl = fcntl(fd, F_GETFL, 0);
++    if (fl < 0)
++        return;
++    fcntl(fd, F_SETFL, nb ? (fl | O_NONBLOCK) : (fl & ~O_NONBLOCK));
++}
++
++using Deadline = std::chrono::steady_clock::time_point;
++
++static bool HttpSendAll(int fd, const char *buf, size_t len, const Deadline &deadline) {
++    size_t off = 0;
++    while (off < len) {
++        if (std::chrono::steady_clock::now() >= deadline)
++            return false;
++        ssize_t n = send(fd, buf + off, len - off, 0);
++        if (n < 0)
++            return false;
++        off += (size_t)n;
++    }
++    return true;
++}
++
++static bool HttpIsChunked(const std::string &headersLower) {
++    size_t te = headersLower.find("transfer-encoding:");
++    if (te == std::string::npos)
++        return false;
++    size_t lineEnd = headersLower.find("\r\n", te);
++    size_t ck = headersLower.find("chunked", te);
++    return ck != std::string::npos && (lineEnd == std::string::npos || ck < lineEnd);
++}
++
++/* 发起请求,响应(头+体)收进 raw。 */
++static bool HttpExchange(const char *host, u16 port, const char *req, size_t reqLen,
++                         std::string &raw, size_t maxBody, int timeoutMs) {
++    struct sockaddr_in sa;
++    if (!HttpResolve(host, &sa))
++        return false;
++    sa.sin_port = htons(port);
++
++    int fd = socket(AF_INET, SOCK_STREAM, 0);
++    if (fd < 0)
++        return false;
++
++    Deadline deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
++
++    /* 非阻塞 connect + select,避免不可达主机长时间挂起 */
++    HttpSetNonBlock(fd, true);
++    int rc = connect(fd, (struct sockaddr *)&sa, sizeof(sa));
++    if (rc != 0) {
++        fd_set wset;
++        FD_ZERO(&wset);
++        FD_SET(fd, &wset);
++        long left = (long)std::chrono::duration_cast<std::chrono::milliseconds>(
++            deadline - std::chrono::steady_clock::now()).count();
++        if (left <= 0) { close(fd); return false; }
++        struct timeval tv;
++        tv.tv_sec = left / 1000;
++        tv.tv_usec = (left % 1000) * 1000;
++        rc = select(fd + 1, nullptr, &wset, nullptr, &tv);
++        if (rc <= 0) { close(fd); return false; }
++        int err = 0;
++        socklen_t elen = sizeof(err);
++        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen) != 0 || err != 0) {
++            close(fd);
++            return false;
++        }
++    }
++    HttpSetNonBlock(fd, false);
++
++    struct timeval rtv;
++    rtv.tv_sec = timeoutMs / 1000;
++    rtv.tv_usec = (timeoutMs % 1000) * 1000;
++    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
++    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &rtv, sizeof(rtv));
++
++    if (!HttpSendAll(fd, req, reqLen, deadline)) {
++        close(fd);
++        return false;
++    }
++
++    raw.clear();
++    char buf[2048];
++    bool haveHeaders = false;
++    bool chunked = false;
++    long contentLength = -1;
++    size_t headerEnd = 0;
++
++    for (;;) {
++        if (std::chrono::steady_clock::now() >= deadline) {
++            /* 超时:已有完整响应体则接受,否则失败 */
++            if (haveHeaders)
++                break;
++            close(fd);
++            return false;
++        }
++        ssize_t n = recv(fd, buf, sizeof(buf), 0);
++        if (n == 0)
++            break;                                   /* 对端关闭:EOF 定界 */
++        if (n < 0) {
++            if (haveHeaders)
++                break;
++            close(fd);
++            return false;
++        }
++        if (raw.size() + (size_t)n > maxBody + 8192) {
++            close(fd);
++            return false;
++        }
++        raw.append(buf, (size_t)n);
++
++        if (!haveHeaders) {
++            size_t pos = raw.find("\r\n\r\n");
++            if (pos == std::string::npos)
++                continue;
++            headerEnd = pos + 4;
++            haveHeaders = true;
++
++            std::string headersLower = raw.substr(0, pos);
++            for (auto &ch : headersLower)
++                ch = (char)tolower((unsigned char)ch);
++            chunked = HttpIsChunked(headersLower);
++            size_t cl = headersLower.find("content-length:");
++            if (cl != std::string::npos) {
++                contentLength = atol(headersLower.c_str() + cl + 15);
++                if (contentLength < 0)
++                    contentLength = 0;
++            }
++        }
++        if (haveHeaders && contentLength >= 0 && !chunked &&
++            raw.size() >= headerEnd + (size_t)contentLength)
++            break;
++    }
++    close(fd);
++    return haveHeaders;
++}
++
++/* 解析响应:状态码 + body(chunked 已解码;Content-Length 已截断)。 */
++static bool HttpParseResponse(const std::string &raw, int *outStatus, std::string *outBody) {
++    size_t pos = raw.find("\r\n\r\n");
++    if (pos == std::string::npos)
++        return false;
++    const char *sp = strchr(raw.c_str(), ' ');
++    if (!sp)
++        return false;
++    *outStatus = atoi(sp + 1);
++
++    std::string headersLower = raw.substr(0, pos);
++    for (auto &ch : headersLower)
++        ch = (char)tolower((unsigned char)ch);
++
++    std::string body;
++    size_t p = pos + 4;
++    if (HttpIsChunked(headersLower)) {
++        for (;;) {
++            size_t eol = raw.find("\r\n", p);
++            if (eol == std::string::npos)
++                return false;
++            unsigned long chunk = strtoul(raw.c_str() + p, nullptr, 16);
++            if (chunk == 0)
++                break;                    /* 尾块:忽略 trailer */
++            p = eol + 2;
++            if (chunk > raw.size() || p + chunk + 2 > raw.size())
++                return false;
++            body.append(raw, p, chunk);
++            p += chunk + 2;
++        }
++    } else {
++        body.assign(raw, p, std::string::npos);
++        size_t cl = headersLower.find("content-length:");
++        if (cl != std::string::npos) {
++            long n = atol(headersLower.c_str() + cl + 15);
++            if (n >= 0 && (size_t)n < body.size())
++                body.resize((size_t)n);
++        }
++    }
++    *outBody = std::move(body);
++    return true;
++}
++
++static bool HttpGet(const char *url, std::string *outBody, int timeoutMs, size_t maxBody) {
++    HttpUrl u;
++    if (!HttpParseUrl(url, &u))
++        return false;
++    char req[768];
++    int n = snprintf(req, sizeof(req),
++                     "GET %s HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: ldn_mitm-overlay\r\n"
++                     "Accept: */*\r\nConnection: close\r\n\r\n",
++                     u.path, u.host, (unsigned)u.port);
++    if (n <= 0 || n >= (int)sizeof(req))
++        return false;
++    std::string raw;
++    if (!HttpExchange(u.host, u.port, req, (size_t)n, raw, maxBody, timeoutMs))
++        return false;
++    int status = 0;
++    if (!HttpParseResponse(raw, &status, outBody))
++        return false;
++    return status >= 200 && status < 300;
++}
++
++static bool HttpPostJson(const char *url, const char *json,
++                         std::string *outBody, int timeoutMs, size_t maxBody) {
++    HttpUrl u;
++    if (!HttpParseUrl(url, &u))
++        return false;
++    size_t jlen = strlen(json);
++    char req[512];
++    int n = snprintf(req, sizeof(req),
++                     "POST %s HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: ldn_mitm-overlay\r\n"
++                     "Content-Type: application/json\r\nAccept: application/json\r\n"
++                     "Connection: close\r\nContent-Length: %u\r\n\r\n",
++                     u.path, u.host, (unsigned)u.port, (unsigned)jlen);
++    if (n <= 0 || n >= (int)sizeof(req))
++        return false;
++    std::string full;
++    full.assign(req, (size_t)n);
++    full.append(json, jlen);
++    std::string raw;
++    if (!HttpExchange(u.host, u.port, full.c_str(), full.size(), raw, maxBody, timeoutMs))
++        return false;
++    int status = 0;
++    if (!HttpParseResponse(raw, &status, outBody))
++        return false;
++    return status >= 200 && status < 300;
++}
++
++/* 按镜像链下载订阅文件 */
++static bool DownloadSubscription(const char *relPath, std::string *out) {
++    for (size_t i = 0; i < sizeof(kUrlPrefixes) / sizeof(kUrlPrefixes[0]); i++) {
++        char url[512];
++        snprintf(url, sizeof(url), "%s%s", kUrlPrefixes[i], relPath);
++        if (HttpGet(url, out, 8000, kMaxDownload))
++            return true;
++    }
++    return false;
++}
++
++static void SaveFile(const char *path, const std::string &data) {
++    mkdir("sdmc:/config", 0777);
++    mkdir(kSaveDir, 0777);
++    FILE *f = fopen(path, "wb");
++    if (!f)
++        return;
++    fwrite(data.data(), 1, data.size(), f);
++    fclose(f);
++}
++
++static bool LoadFile(const char *path, std::string *out) {
++    FILE *f = fopen(path, "rb");
++    if (!f)
++        return false;
++    char buf[4096];
++    out->clear();
++    for (;;) {
++        size_t n = fread(buf, 1, sizeof(buf), f);
++        if (n == 0)
++            break;
++        if (out->size() + n > kMaxDownload) {
++            fclose(f);
++            return false;
++        }
++        out->append(buf, n);
++    }
++    fclose(f);
++    return !out->empty();
++}
++
++/* ------------------------------------------------------------------ */
++/* 订阅解析:servers.json / chinese_db.json                             */
++/* ------------------------------------------------------------------ */
++
++static void ParseServersJson(const char *json) {
++    g_serverN = 0;
++    const char *p = JsWs(SkipBom(json));
++    if (*p != '[')
++        return;
++    p = JsWs(p + 1);
++    while (g_serverN < MONITOR_MAX_SERVERS && *p == '{') {
++        ServerEntry &e = g_servers[g_serverN];
++        memset(&e, 0, sizeof(e));
++        JsonGetStr(p, "name", e.name, sizeof(e.name));
++        if (!JsonGetStr(p, "host", e.host, sizeof(e.host)))
++            e.host[0] = 0;
++        u32 port = 11451;
++        JsonGetU32(p, "port", &port);
++        e.port = (u16)(port ? port : 11451);
++        if (!JsonGetStr(p, "type", e.type, sizeof(e.type)))
++            e.type[0] = 0;
++        if (e.host[0])
++            g_serverN++;
++        const char *next = JsonSkip(p, 0);
++        if (!next)
++            break;
++        next = JsWs(next);
++        if (*next != ',')
++            break;
++        p = JsWs(next + 1);
++    }
++}
++
++static u64 TitleKeyPack(const char *hex16) {
++    u64 key = 0;
++    for (int i = 0; i < 16; i++) {
++        int v = HexVal(hex16[i]);
++        if (v < 0)
++            return 0;
++        key = (key << 4) | (u64)v;
++    }
++    return key;
++}
++
++static u32 TitleHash(u64 key) {
++    key ^= key >> 33;
++    key *= 0xFF51AFD7ED558CCDull;
++    key ^= key >> 33;
++    return (u32)key & (kTitleHashSize - 1);
++}
++
++static void TitleInsert(u64 key, const char *name, size_t nameLen) {
++    if (!g_titleKey || key == 0)
++        return;
++    u32 idx = TitleHash(key);
++    for (u32 probe = 0; probe < kTitleHashSize; probe++) {
++        u32 i = (idx + probe) & (kTitleHashSize - 1);
++        if (g_titleKey[i] == 0) {
++            if (g_titleArenaUsed + nameLen + 1 > kTitleArena)
++                return;
++            u32 off = g_titleArenaUsed;
++            memcpy(g_titleArena + off, name, nameLen);
++            g_titleArena[off + nameLen] = 0;
++            g_titleArenaUsed = off + (u32)nameLen + 1;
++            g_titleOff[i] = off;
++            g_titleLen[i] = (u16)nameLen;
++            g_titleKey[i] = key + 1;
++            return;
++        }
++        if (g_titleKey[i] == key + 1)
++            return;                      /* 重复 key:保留先到的 */
++    }
++}
++
++static const char *TitleLookup(u64 key, size_t *outLen) {
++    if (!g_titleKey || key == 0)
++        return nullptr;
++    u32 idx = TitleHash(key);
++    for (u32 probe = 0; probe < kTitleHashSize; probe++) {
++        u32 i = (idx + probe) & (kTitleHashSize - 1);
++        if (g_titleKey[i] == 0)
++            return nullptr;
++        if (g_titleKey[i] == key + 1) {
++            if (outLen)
++                *outLen = g_titleLen[i];
++            return g_titleArena + g_titleOff[i];
++        }
++    }
++    return nullptr;
++}
++
++static void ParseChineseDbJson(const char *json) {
++    const char *p = JsWs(SkipBom(json));
++    if (*p != '{')
++        return;
++    p = JsWs(p + 1);
++    for (;;) {
++        char key[24];
++        if (*p != '"' || !JsonString(&p, key, sizeof(key)))
++            break;
++        p = JsWs(p);
++        if (*p != ':')
++            break;
++        p = JsWs(p + 1);
++        char name[128];
++        if (*p != '"' || !JsonString(&p, name, sizeof(name)))
++            break;
++        u64 k = TitleKeyPack(key);
++        if (k != 0 && name[0])
++            TitleInsert(k, name, strlen(name));
++        p = JsWs(p);
++        if (*p != ',')
++            break;
++        p = JsWs(p + 1);
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* relay.cfg:当前选择的服务器 -> host:port                              */
++/* ------------------------------------------------------------------ */
++
++static bool ParseHostPort(const char *tok, char *host, size_t hostN, u16 *port) {
++    const char *colon = strrchr(tok, ':');
++    size_t hl = colon ? (size_t)(colon - tok) : strlen(tok);
++    if (hl == 0 || hl >= hostN)
++        return false;
++    memcpy(host, tok, hl);
++    host[hl] = 0;
++    u32 p = 11451;
++    if (colon) {
++        p = 0;
++        for (const char *q = colon + 1; *q >= '0' && *q <= '9'; q++)
++            p = p * 10 + (u32)(*q - '0');
++    }
++    if (p == 0 || p > 65535)
++        p = 11451;
++    *port = (u16)p;
++    return true;
++}
++
++static bool ResolveSelectedServer(const char *nameOverride,
++                                  char *nameOut, size_t nameN,
++                                  char *hostOut, size_t hostN, u16 *portOut) {
++    std::string cfg;
++    if (!LoadFile(kRelayCfgPath, &cfg))
++        return false;
++
++    char want[64] = {};
++    if (nameOverride && nameOverride[0])
++        snprintf(want, sizeof(want), "%s", nameOverride);
++    if (!want[0]) {
++        size_t pos = cfg.find("selected=");
++        if (pos != std::string::npos) {
++            size_t e = cfg.find_first_of("\r\n", pos);
++            std::string line = cfg.substr(pos, e == std::string::npos ? std::string::npos : e - pos);
++            if (line.size() > 9)
++                snprintf(want, sizeof(want), "%s", line.c_str() + 9);
++        }
++    }
++    if (!want[0])
++        return false;
++
++    size_t i = 0;
++    while (i < cfg.size()) {
++        size_t e = cfg.find_first_of("\r\n", i);
++        std::string line = cfg.substr(i, e == std::string::npos ? std::string::npos : e - i);
++        i = (e == std::string::npos) ? cfg.size() : e + 1;
++
++        size_t s = line.find_first_not_of(" \t");
++        if (s == std::string::npos || line[s] == '#')
++            continue;
++        size_t sp = line.find_first_of(" \t", s);
++        if (sp == std::string::npos)
++            continue;
++        if (line.substr(s, sp - s) != want)
++            continue;
++        size_t t = line.find_first_not_of(" \t", sp);
++        if (t == std::string::npos)
++            continue;
++        size_t te = line.find_first_of(" \t", t);
++        std::string hp = line.substr(t, te == std::string::npos ? std::string::npos : te - t);
++        snprintf(nameOut, nameN, "%s", want);
++        return ParseHostPort(hp.c_str(), hostOut, hostN, portOut);
++    }
++    snprintf(nameOut, nameN, "%s", want);
++    return false;
++}
++
++/* ------------------------------------------------------------------ */
++/* 服务器查询:graphql / rest                                          */
++/* ------------------------------------------------------------------ */
++
++struct QueryResult {
++    s32 online = -1;
++    u32 roomN = 0;
++    MonitorRoom rooms[MONITOR_MAX_ROOMS];
++};
++
++static void FormatGameName(const char *contentId, char *out, size_t n) {
++    char up[20] = {};
++    size_t len = 0;
++    for (const char *p = contentId; *p && len < 16; p++) {
++        char c = *p;
++        if (c >= 'a' && c <= 'f') c = (char)(c - 'a' + 'A');
++        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'))
++            up[len++] = c;
++    }
++    up[len] = 0;
++    if (len != 16) {
++        snprintf(out, n, "%s", T_STR("未知游戏", "未知遊戲"));
++        return;
++    }
++    u64 key = TitleKeyPack(up);
++    size_t nameLen = 0;
++    const char *name = TitleLookup(key, &nameLen);
++    if (name && name[0])
++        snprintf(out, n, "%s", name);
++    else
++        snprintf(out, n, "%s", up);      /* 未映射:直接显示标题 ID */
++}
++
++/* room 对象数组 -> rooms[](graphql 与 rest 共用字段口径) */
++static void ParseRoomArray(const char *arr, QueryResult *qr) {
++    const char *p = JsWs(arr);
++    if (*p != '[')
++        return;
++    p = JsWs(p + 1);
++    while (qr->roomN < MONITOR_MAX_ROOMS && *p == '{') {
++        MonitorRoom &r = qr->rooms[qr->roomN];
++        memset(&r, 0, sizeof(r));
++        char cid[24] = {};
++        JsonGetStrAny(p, "contentId", "content_id", cid, sizeof(cid));
++        FormatGameName(cid, r.game, sizeof(r.game));
++
++        u32 v = 0;
++        if (JsonGetU32(p, "nodeCount", &v) || JsonGetU32(p, "node_count", &v))
++            r.players = v;
++        if (JsonGetU32(p, "nodeCountMax", &v) || JsonGetU32(p, "node_count_max", &v))
++            r.playersMax = v;
++        if (r.players == 0) {
++            const char *nodes = JsonGet(p, "nodes");
++            if (nodes && *nodes == '[') {
++                u32 cnt = 0;
++                const char *q = JsWs(nodes + 1);
++                while (*q && *q != ']') {
++                    const char *next = JsonSkip(q, 1);
++                    if (!next)
++                        break;
++                    cnt++;
++                    q = JsWs(next);
++                    if (*q == ',') q = JsWs(q + 1);
++                }
++                r.players = cnt;
++            }
++        }
++        if (r.playersMax == 0)
++            r.playersMax = r.players;
++        if (r.game[0])
++            qr->roomN++;
++
++        const char *next = JsonSkip(p, 0);
++        if (!next)
++            break;
++        next = JsWs(next);
++        if (*next != ',')
++            break;
++        p = JsWs(next + 1);
++    }
++}
++
++static bool QueryGraphql(const char *host, u16 port, QueryResult *qr) {
++    char url[160];
++    snprintf(url, sizeof(url), "http://%s:%u/", host, (unsigned)port);
++    std::string payload = "{\"query\":\"";
++    payload += kGraphqlQuery;            /* 查询串无引号/反斜杠,可直接拼接 */
++    payload += "\"}";
++    std::string resp;
++    if (!HttpPostJson(url, payload.c_str(), &resp, 6000, kMaxHttpBody))
++        return false;
++    const char *data = JsonGet(resp.c_str(), "data");
++    if (!data)
++        return false;
++    u32 v = 0;
++    const char *info = JsonGet(data, "serverInfo");
++    if (info && JsonGetU32(info, "online", &v))
++        qr->online = (s32)v;
++    const char *rooms = JsonGet(data, "room");
++    if (rooms)
++        ParseRoomArray(rooms, qr);
++    return qr->online >= 0;
++}
++
++static bool QueryRest(const char *host, u16 port, QueryResult *qr) {
++    char url[160];
++    snprintf(url, sizeof(url), "http://%s:%u/info", host, (unsigned)port);
++    std::string resp;
++    if (!HttpGet(url, &resp, 6000, kMaxHttpBody))
++        return false;
++    const char *root = JsWs(SkipBom(resp.c_str()));
++    u32 v = 0;
++    if (JsonGetU32(root, "online", &v) || JsonGetU32(root, "clientCount", &v))
++        qr->online = (s32)v;
++    const char *rooms = JsonGet(root, "rooms");
++    if (rooms)
++        ParseRoomArray(rooms, qr);
++    return qr->online >= 0;
++}
++
++/* ------------------------------------------------------------------ */
++/* UDP 主动房间扫描(lan-play 中继协议的 LDN 扫描)                     */
++/* ------------------------------------------------------------------ */
++
++/* LanPlayMonitor 的 LDN_SCAN_FRAME 预生成常量:
++ *   0x01                              lan-play 原始包 chunk
++ *   IPv4(10.13.37.0 -> 10.13.255.255, UDP 11452)
++ *   LDN 头 {00 14 45 11} + type=0     扫描请求
++ * 校验和已预计算,勿手改。 */
++static const u8 kScanFrame[] = {
++    0x01, 0x45, 0x00, 0x00, 0x28, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11, 0x01,
++    0xAC, 0x0A, 0x0D, 0x25, 0x00, 0x0A, 0x0D, 0xFF, 0xFF, 0x2C, 0xBC, 0x2C,
++    0xBC, 0x00, 0x14, 0x28, 0x0F, 0x00, 0x14, 0x45, 0x11, 0x00, 0x00, 0x00,
++    0x00, 0x00, 0x00, 0x00, 0x00,
++};
++
++/* ldn_mitm RLE 解压:字面字节;0x00 + count = count 个 0 */
++static bool LdnDecompress(const u8 *in, size_t inLen, u8 *out, size_t expect) {
++    if (expect == 0 || expect > 8192 || inLen > 8192)
++        return false;
++    size_t o = 0, i = 0;
++    while (i < inLen && o < expect) {
++        u8 v = in[i++];
++        out[o++] = v;
++        if (v == 0) {
++            if (i >= inLen)
++                return false;
++            u8 rep = in[i++];
++            if (o + rep > expect)
++                return false;
++            memset(out + o, 0, rep);
++            o += rep;
++        }
++    }
++    return i == inLen && o == expect;
++}
++
++/* NetworkInfo(≥0x480)-> 房间条目 + 会话标识(去重用) */
++static bool ParseNetworkInfo(const u8 *p, size_t len, MonitorRoom *out,
++                             char *sessionTag, size_t tagN) {
++    if (len < 0x480)
++        return false;
++    char cid[20];
++    for (int i = 0; i < 8; i++)
++        snprintf(cid + i * 2, 3, "%02X", p[7 - i]);   /* 小端 8 字节 -> 标题ID */
++    FormatGameName(cid, out->game, sizeof(out->game));
++    u32 maxN = p[0x66];
++    u32 cnt = p[0x67];
++    if (maxN > 8) maxN = 8;
++    if (cnt > 8) cnt = 8;
++    out->players = cnt;
++    out->playersMax = maxN ? maxN : cnt;
++    if (sessionTag && tagN > 0) {
++        /* 与 lpm_main.py 一致:sessionId = payload[16:32] 的 hex;
++           全零时退回标题ID 做标识。 */
++        bool allZero = true;
++        for (int i = 0; i < 16; i++) {
++            if (p[16 + i]) {
++                allZero = false;
++                break;
++            }
++        }
++        if (allZero) {
++            snprintf(sessionTag, tagN, "%s", cid);
++        } else {
++            char tag[33];
++            for (int i = 0; i < 16; i++)
++                snprintf(tag + i * 2, 3, "%02x", p[16 + i]);
++            snprintf(sessionTag, tagN, "%s", tag);
++        }
++    }
++    return out->game[0] != 0;
++}
++
++/* IPv4 + UDP(11452) + LDN 响应 */
++static bool ParseLdnResponse(const u8 *pkt, size_t len, MonitorRoom *room,
++                             char *sessionTag, size_t tagN) {
++    if (len < 20 || (pkt[0] >> 4) != 4)
++        return false;
++    size_t ihl = (size_t)(pkt[0] & 0x0F) * 4;
++    if (ihl < 20 || len < ihl + 8)
++        return false;
++    if (pkt[9] != 17)                      /* UDP */
++        return false;
++    const u8 *udp = pkt + ihl;
++    u32 sport = ((u32)udp[0] << 8) | udp[1];
++    u32 dport = ((u32)udp[2] << 8) | udp[3];
++    if (sport != 11452 || dport != 11452)
++        return false;
++    size_t udpLen = ((size_t)udp[4] << 8) | udp[5];
++    if (udpLen < 8)
++        return false;
++    size_t body = udpLen - 8;
++    if (body > len - ihl - 8)
++        body = len - ihl - 8;
++    const u8 *ldn = udp + 8;
++    if (body < 12)
++        return false;
++    if (ldn[0] != 0x00 || ldn[1] != 0x14 || ldn[2] != 0x45 || ldn[3] != 0x11)
++        return false;
++    if (ldn[4] != 1)                       /* type 1 = NetworkInfo 响应 */
++        return false;
++    size_t bodyLen   = (size_t)ldn[6] | ((size_t)ldn[7] << 8);
++    size_t decompLen = (size_t)ldn[8] | ((size_t)ldn[9] << 8);
++    if (bodyLen > body - 12)
++        return false;
++
++    u8 tmp[8192];
++    const u8 *info = ldn + 12;
++    size_t infoLen = bodyLen;
++    if (ldn[5] == 1) {                     /* 压缩 */
++        if (!LdnDecompress(info, bodyLen, tmp, decompLen))
++            return false;
++        info = tmp;
++        infoLen = decompLen;
++    }
++    return ParseNetworkInfo(info, infoLen, room, sessionTag, tagN);
++}
++
++/* type=3 分片重组:同 src+ident 的分片按 pmtu 偏移拼接 */
++struct FragSlot {
++    bool used;
++    u32 srcIp;
++    u16 ident;
++    u8  total;
++    u16 pmtu;
++    u16 dataLen;
++    u64 partsMask;                  /* 已收分片位图(total ≤ 64) */
++    u8  data[8192];
++};
++static FragSlot g_frags[4];
++
++static bool FragAdd(const u8 *frame, size_t len, const u8 **outPkt, size_t *outLen) {
++    if (len < 16)
++        return false;
++    u32 srcIp;
++    memcpy(&srcIp, frame, 4);
++    u16 ident = (u16)(((u32)frame[8] << 8) | frame[9]);
++    u8 part = frame[10];
++    u8 total = frame[11];
++    u16 partLen = (u16)((u32)frame[12] | ((u32)frame[13] << 8));
++    u16 pmtu = (u16)(((u32)frame[14] << 8) | frame[15]);
++    if (total == 0 || total > 64 || part >= total || pmtu == 0)
++        return false;
++    if ((size_t)partLen > len - 16)
++        return false;
++    size_t end = (size_t)part * pmtu + partLen;
++    if (end == 0 || end > 8192)
++        return false;
++
++    FragSlot *slot = nullptr;
++    for (auto &f : g_frags) {
++        if (f.used && f.srcIp == srcIp && f.ident == ident) {
++            slot = &f;
++            break;
++        }
++    }
++    if (!slot) {
++        for (auto &f : g_frags) {
++            if (!f.used) {
++                slot = &f;
++                break;
++            }
++        }
++        if (!slot)
++            return false;
++        memset(slot, 0, sizeof(*slot));
++        slot->used = true;
++        slot->srcIp = srcIp;
++        slot->ident = ident;
++        slot->total = total;
++        slot->pmtu = pmtu;
++    }
++    if (slot->total != total || slot->pmtu != pmtu) {
++        slot->used = false;
++        return false;
++    }
++    memcpy(slot->data + (size_t)part * pmtu, frame + 16, partLen);
++    if ((size_t)part * pmtu + partLen > slot->dataLen)
++        slot->dataLen = (u16)end;
++    slot->partsMask |= 1ull << part;
++
++    u64 need = (total == 64) ? ~0ull : ((1ull << total) - 1);
++    if (slot->partsMask != need)
++        return false;
++    *outPkt = slot->data;
++    *outLen = slot->dataLen;
++    slot->used = false;
++    return true;
++}
++
++static void UdpRoomScan(const char *host, u16 port, QueryResult *qr) {
++    struct sockaddr_in sa;
++    if (!HttpResolve(host, &sa))
++        return;
++    sa.sin_port = htons(port);
++
++    int fd = socket(AF_INET, SOCK_DGRAM, 0);
++    if (fd < 0)
++        return;
++    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
++        close(fd);
++        return;
++    }
++
++    /* 排空积压 */
++    HttpSetNonBlock(fd, true);
++    u8 drain[2048];
++    while (recv(fd, drain, sizeof(drain), 0) > 0) {}
++    HttpSetNonBlock(fd, false);
++
++    struct timeval rtv;
++    rtv.tv_sec = 0;
++    rtv.tv_usec = 200 * 1000;
++    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
++
++    memset(g_frags, 0, sizeof(g_frags));
++
++    Deadline start = std::chrono::steady_clock::now();
++    Deadline deadline = start + std::chrono::milliseconds(1500);
++    Deadline nextSend = start;
++
++    char seen[kMaxScanRooms][36];
++    u32 seenN = 0;
++
++    u8 frame[2048];
++    while (std::chrono::steady_clock::now() < deadline && qr->roomN < MONITOR_MAX_ROOMS) {
++        Deadline now = std::chrono::steady_clock::now();
++        if (now >= nextSend) {
++            send(fd, kScanFrame, sizeof(kScanFrame), 0);
++            nextSend = now + std::chrono::milliseconds(700);
++        }
++        ssize_t n = recv(fd, frame, sizeof(frame), 0);
++        if (n <= 0)
++            continue;
++        const u8 *pkt = nullptr;
++        size_t pktLen = 0;
++        if (frame[0] == 1) {
++            pkt = frame + 1;
++            pktLen = (size_t)n - 1;
++        } else if (frame[0] == 3) {
++            if (!FragAdd(frame + 1, (size_t)n - 1, &pkt, &pktLen))
++                continue;
++        } else {
++            continue;
++        }
++
++        MonitorRoom room;
++        memset(&room, 0, sizeof(room));
++        char tag[36] = {};
++        if (!ParseLdnResponse(pkt, pktLen, &room, tag, sizeof(tag)))
++            continue;
++
++        bool dup = false;
++        for (u32 i = 0; i < seenN; i++) {
++            if (strcmp(seen[i], tag) == 0) {
++                dup = true;
++                break;
++            }
++        }
++        if (dup)
++            continue;
++        if (seenN < kMaxScanRooms)
++            snprintf(seen[seenN++], sizeof(seen[0]), "%s", tag);
++
++        qr->rooms[qr->roomN++] = room;
++    }
++    close(fd);
++}
++
++/* ------------------------------------------------------------------ */
++/* 刷新流程                                                            */
++/* ------------------------------------------------------------------ */
++
++static void DoRefresh(const char *nameOverride) {
++    {
++        std::scoped_lock lk(g_mutex);
++        g_snap.busy = true;
++        g_snap.online = -1;
++        g_snap.roomCount = -1;
++        g_snap.roomN = 0;
++        snprintf(g_snap.status, sizeof(g_snap.status), "%s",
++                 T_STR("正在查询…", "正在查詢…"));
++    }
++
++    QueryResult qr;
++
++    /* 1. 当前选择的服务器 */
++    char name[48] = {}, host[64] = {};
++    u16 port = 11451;
++    bool haveServer = ResolveSelectedServer(nameOverride, name, sizeof(name),
++                                            host, sizeof(host), &port);
++    {
++        std::scoped_lock lk(g_mutex);
++        snprintf(g_snap.server, sizeof(g_snap.server), "%.47s",
++                 name[0] ? name : (host[0] ? host : "?"));
++    }
++
++    /* 2. 两个订阅:每次打开都从远程下载,失败退回本地缓存 */
++    std::string serversJson, chineseJson;
++    bool gotServers = DownloadSubscription(kSubServersPath, &serversJson);
++    if (gotServers)
++        SaveFile(kSaveServersPath, serversJson);
++    else
++        gotServers = LoadFile(kSaveServersPath, &serversJson);
++
++    bool gotChinese = DownloadSubscription(kSubChinesePath, &chineseJson);
++    if (gotChinese)
++        SaveFile(kSaveChinesePath, chineseJson);
++    else
++        gotChinese = LoadFile(kSaveChinesePath, &chineseJson);
++
++    /* 3. 解析订阅 */
++    if (gotServers)
++        ParseServersJson(serversJson.c_str());
++    else
++        g_serverN = 0;
++    if (gotChinese && g_titleKey) {
++        g_titleArenaUsed = 0;
++        memset(g_titleKey, 0, kTitleHashSize * sizeof(u64));
++        ParseChineseDbJson(chineseJson.c_str());
++    }
++
++    if (!haveServer) {
++        std::scoped_lock lk(g_mutex);
++        snprintf(g_snap.status, sizeof(g_snap.status), "%s",
++                 T_STR("找不到选中的服务器", "找不到選中的伺服器"));
++        g_snap.busy = false;
++        g_snap.version++;
++        return;
++    }
++
++    /* 4. 查服务器类型(servers.json 按 host:port 匹配) */
++    char type[12] = {};
++    for (u32 i = 0; i < g_serverN; i++) {
++        if (strcasecmp(g_servers[i].host, host) == 0 && g_servers[i].port == port) {
++            snprintf(type, sizeof(type), "%s", g_servers[i].type);
++            break;
++        }
++    }
++
++    /* 5. 查询:按类型;未登记的服务器 graphql 优先(含房间),失败再 rest */
++    bool ok;
++    if (strcmp(type, "rest") == 0) {
++        ok = QueryRest(host, port, &qr);
++    } else {
++        ok = QueryGraphql(host, port, &qr);
++        if (!ok)
++            ok = QueryRest(host, port, &qr);
++    }
++
++    /* 6. 接口不给房间时,用 UDP 主动扫描补房间(rest 1.0 服务器) */
++    if (ok && qr.roomN == 0)
++        UdpRoomScan(host, port, &qr);
++
++    /* 7. 写快照 */
++    {
++        std::scoped_lock lk(g_mutex);
++        g_snap.online = qr.online;
++        g_snap.roomCount = ok ? (s32)qr.roomN : -1;
++        g_snap.roomN = qr.roomN;
++        for (u32 i = 0; i < qr.roomN; i++)
++            g_snap.rooms[i] = qr.rooms[i];
++        if (!ok) {
++            snprintf(g_snap.status, sizeof(g_snap.status), "%s",
++                     T_STR("查询失败", "查詢失敗"));
++        } else if (qr.roomN == 0) {
++            snprintf(g_snap.status, sizeof(g_snap.status), "%s",
++                     T_STR("暂无房间", "暫無房間"));
++        } else {
++            g_snap.status[0] = 0;
++        }
++        g_snap.busy = false;
++        g_snap.version++;
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* 后台线程(libnx 线程,风格同 libtesla)                               */
++/* ------------------------------------------------------------------ */
++
++alignas(0x1000) static u8 g_workerStack[0x8000];
++
++static void MonitorWorker(void *) {
++    while (!g_exit.load()) {
++        u32 want = g_reqGen.load();
++        if (want != g_doneGen) {
++            g_doneGen = want;
++            char name[48];
++            {
++                std::scoped_lock lk(g_mutex);
++                memcpy(name, g_pendingName, sizeof(name));
++            }
++            DoRefresh(name[0] ? name : nullptr);
++        } else {
++            svcSleepThread(50'000'000);      /* 50ms */
++        }
++    }
++}
++
++void MonitorSetTraditional(bool traditional) {
++    g_traditional.store(traditional);
++}
++
++void MonitorInit() {
++    if (g_inited)
++        return;
++    g_inited = true;
++    g_exit.store(false);
++    g_pendingName[0] = 0;
++
++    if (!g_titleKey) {
++        g_titleKey   = (u64 *)calloc(kTitleHashSize, sizeof(u64));
++        g_titleOff   = (u32 *)calloc(kTitleHashSize, sizeof(u32));
++        g_titleLen   = (u16 *)calloc(kTitleHashSize, sizeof(u16));
++        g_titleArena = (char *)calloc(kTitleArena, 1);
++    }
++
++    Result rc = threadCreate(&g_thread, MonitorWorker, nullptr, g_workerStack,
++                             sizeof(g_workerStack), 0x2C, -2);
++    if (R_SUCCEEDED(rc))
++        threadStart(&g_thread);
++}
++
++void MonitorExit() {
++    if (!g_inited)
++        return;
++    g_exit.store(true);
++    threadWaitForExit(&g_thread);
++    threadClose(&g_thread);
++    g_inited = false;
++}
++
++void MonitorRequestRefresh(const char *serverName) {
++    {
++        std::scoped_lock lk(g_mutex);
++        snprintf(g_pendingName, sizeof(g_pendingName), "%s", serverName ? serverName : "");
++    }
++    g_reqGen.fetch_add(1);
++}
++
++void MonitorCopySnapshot(MonitorSnapshot *out) {
++    std::scoped_lock lk(g_mutex);
++    *out = g_snap;
++}
+diff --git a/overlay/source/monitor.hpp b/overlay/source/monitor.hpp
+new file mode 100644
+index 0000000..448af0d
+--- /dev/null
++++ b/overlay/source/monitor.hpp
+@@ -0,0 +1,48 @@
++#pragma once
++#include <switch.h>
++
++/* 联机监视器:当前中继服务器的在线人数 / 房间数 / 游戏房间列表。
++ *
++ * 数据来源:
++ *   1. 服务器列表订阅  servers.json    (type=graphql/rest、region)
++ *   2. 标题映射订阅    chinese_db.json (标题ID -> 中文名)
++ *   3. 服务器自身的查询接口(graphql POST / 或 rest GET /info),
++ *      rest 服务器接口不给房间时用 UDP 主动扫描补上。
++ *
++ * 两个订阅文件每次打开 overlay 都从远程重新下载,落盘到
++ * sdmc:/config/ldn_mitm/ 下供下次离线兜底。
++ */
++
++#define MONITOR_MAX_ROOMS  32
++#define MONITOR_MAX_SERVERS 32
++
++struct MonitorRoom {
++    char game[52];      /* 中文游戏名;未映射时是 16 位标题 ID */
++    u32  players;       /* 当前人数 */
++    u32  playersMax;    /* 人数上限,0 = 未知 */
++};
++
++struct MonitorSnapshot {
++    u32 version;        /* 每次查询完成 +1,UI 据此决定是否重建列表 */
++    bool busy;          /* 后台正在查询 */
++    s32 online;         /* 在线人数,-1 = 未知 */
++    s32 roomCount;      /* 房间数量,-1 = 未知 */
++    char server[48];    /* 当前选择的服务器名(host:port 兜底) */
++    char status[96];    /* 状态文本(错误/提示) */
++    u32  roomN;         /* rooms[] 有效条数 */
++    MonitorRoom rooms[MONITOR_MAX_ROOMS];
++};
++
++void MonitorInit();
++void MonitorExit();
++
++/* 简繁文案切换(与 UI 的 T() 同步)。 */
++void MonitorSetTraditional(bool traditional);
++
++/* 请求一次后台刷新(每次打开 overlay / 切换服务器时调用)。
++ * serverName:选中的服务器名(可空,空则读 relay.cfg 的 selected=)。
++ * 非阻塞;完成后 MonitorCopySnapshot 里的 version 会 +1。 */
++void MonitorRequestRefresh(const char *serverName);
++
++/* 取当前快照的副本。 */
++void MonitorCopySnapshot(MonitorSnapshot *out);
+-- 
+2.47.3
+

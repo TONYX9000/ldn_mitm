@@ -2,9 +2,10 @@ name: beta
 
 # 手动触发的 beta 构建(Actions → beta → Run workflow)。
 #
-# 默认行为(auto):若仓库里带了 patches/000[1-9]-*.patch
-# (bsd-broadcast-relay-TONYX9000 移植补丁)且尚未应用,
-# 构建前先自动应用,再产出可直接拷到 SD 卡的产物。
+# 默认行为(auto):若仓库里带了 patches/000[1-9]-*.patch 与
+# patches/0010-*.patch(bsd-broadcast-relay-TONYX9000 移植补丁 +
+# 联机监视器 0010)且尚未应用,构建前先自动应用,
+# 再产出可直接拷到 SD 卡的产物。
 # 分支本身已打好补丁时会自动跳过(以 relay_client.cpp 为标记)。
 #
 # 用法一:把 .github/workflows/beta.yml 与 patches/ 一起放进仓库,
@@ -62,7 +63,7 @@ jobs:
           DECISION: ${{ inputs.apply_patches }}
         run: |
           shopt -s nullglob
-          patches=(patches/000[1-9]-*.patch)
+          patches=(patches/000[1-9]-*.patch patches/0010-*.patch)
 
           if [ "$DECISION" = "no" ]; then
             echo "按输入跳过补丁。"
@@ -71,7 +72,7 @@ jobs:
 
           if [ ${#patches[@]} -eq 0 ]; then
             if [ "$DECISION" = "yes" ]; then
-              echo "::error::未找到 patches/000[1-9]-*.patch"
+              echo "::error::未找到 patches/000[1-9]-*.patch / patches/0010-*.patch"
               exit 1
             fi
             echo "patches/ 下没有补丁,跳过。"
