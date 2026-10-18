@@ -1,4 +1,4 @@
-From 43555394acb3cf389ccd038c776c7b650856f38c Mon Sep 17 00:00:00 2001
+From dac0e94d20fe1e80a1755dc2e4755749cb02418e Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
 Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
@@ -25,7 +25,8 @@ Content-Transfer-Encoding: 8bit
 - 内存优化(修复 ovlloader 堆溢出 0x559):标题表(哈希 16384 桶 + 288KB
   名称池,约 512KB)延迟到首次解析订阅时才分配,不再挤占渲染器
   frameBuffer(约 1.3MB)的分配;HTTP 响应体原地裁剪不再二次拷贝;
-  overlay 启用 --gc-sections/-fno-rtti/-fdata-sections 减小镜像
+  overlay 启用 --gc-sections/-fdata-sections 减小镜像(注:libtesla 用了
+  dynamic_cast,不能加 -fno-rtti)
 - CI 修复(适配最新系统):构建前把 Atmosphere-libs 顶到 master(与上游
   nightly.yml 相同,跟踪 23.0.1+ 固件适配,否则插件在新系统启动报错),
   并安装 libnx master 与其配套(新 pgl 命名);三个工作流统一此流程,
@@ -37,11 +38,11 @@ Reference: https://github.com/jieluojun/LanPlayMonitor
  .github/workflows/build.yml   |   14 +-
  .github/workflows/nightly.yml |   17 +-
  .github/workflows/release.yml |   24 +-
- overlay/Makefile              |    6 +-
+ overlay/Makefile              |    4 +-
  overlay/source/main.cpp       |  149 +++-
  overlay/source/monitor.cpp    | 1414 +++++++++++++++++++++++++++++++++
  overlay/source/monitor.hpp    |   48 ++
- 7 files changed, 1648 insertions(+), 24 deletions(-)
+ 7 files changed, 1647 insertions(+), 23 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
@@ -150,10 +151,10 @@ index 7f34343..b34daa5 100644
      - name: Pack
        run: |
 diff --git a/overlay/Makefile b/overlay/Makefile
-index e2cdc19..ea651ae 100644
+index e2cdc19..7f48634 100644
 --- a/overlay/Makefile
 +++ b/overlay/Makefile
-@@ -57,15 +57,15 @@ NO_ICON		:=  1
+@@ -57,7 +57,7 @@ NO_ICON		:=  1
  #---------------------------------------------------------------------------------
  ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
  
@@ -162,9 +163,8 @@ index e2cdc19..ea651ae 100644
  			$(ARCH) $(DEFINES) $(VERSION_DEFINES)
  
  CFLAGS	+=	$(INCLUDE) -D__SWITCH__
- 
--CXXFLAGS	:= $(CFLAGS) -fno-exceptions -std=c++20
-+CXXFLAGS	:= $(CFLAGS) -fno-exceptions -fno-rtti -std=c++20
+@@ -65,7 +65,7 @@ CFLAGS	+=	$(INCLUDE) -D__SWITCH__
+ CXXFLAGS	:= $(CFLAGS) -fno-exceptions -std=c++20
  
  ASFLAGS	:=	-g $(ARCH)
 -LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
