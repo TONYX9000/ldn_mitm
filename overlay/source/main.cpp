@@ -34,6 +34,16 @@ static bool g_isTraditional = false;
 
 #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
 
+/* The list currently on screen, plus the "restore defaults" row. Both are
+   needed after a server is added/removed: libtesla has no per-item refresh,
+   so the whole list is rebuilt in place (see rebuildUi()). */
+static tsl::elm::List *g_list = nullptr;
+static tsl::elm::ListItem *g_restoreItem = nullptr;
+static bool g_restoreArmed = false;
+
+static void buildList(tsl::elm::List *list);
+static void rebuildUi();
+
 class ConfigToggleListItem : public tsl::elm::ToggleListItem {
 public:
     ConfigToggleListItem(const char *label,
@@ -81,129 +91,10 @@ public:
         // string is repeated in the T("关于", "關於") block at the bottom.
         auto frame = new tsl::elm::OverlayFrame(T("联机插件", "連線插件"), g_brand);
 
-        auto list = new tsl::elm::List();
+        g_list = new tsl::elm::List();
+        buildList(g_list);
 
-        if (g_state == State::Error) {
-            list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
-        } else if (g_state == State::Uninit) {
-            list->addItem(new tsl::elm::ListItem(T("错误的状态", "錯誤的狀態")));
-        } else {
-            list->addItem(new ConfigToggleListItem(T("启用", "啟用"), ldnMitmGetEnabled, ldnMitmSetEnabled));
-            list->addItem(new ConfigToggleListItem(T("广播转发", "廣播轉發"), ldnMitmGetBroadcastRelay, ldnMitmSetBroadcastRelay));
-            list->addItem(new ConfigToggleListItem(T("日志", "日誌"), ldnMitmGetLogging, ldnMitmSetLogging));
-
-            list->addItem(new tsl::elm::CategoryHeader(T("互联网中继（跨网联机）", "網際網路中繼（跨網連線）")));
-            list->addItem(new ConfigToggleListItem(T("互联网中继", "網際網路中繼"), ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
-
-            g_serverItems.clear();
-            u32 count = 0;
-            if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count))) {
-                list->addItem(new tsl::elm::ListItem(T("读取服务器列表失败", "讀取伺服器清單失敗")));
-            } else if (count == 0) {
-                list->addItem(new tsl::elm::ListItem(T("没有服务器，请编辑 relay.cfg", "沒有伺服器，請編輯 relay.cfg")));
-            } else {
-                u32 selected = 0;
-                if (R_FAILED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &selected))) {
-                    selected = count;
-                }
-                for (u32 i = 0; i < count; i++) {
-                    char name[32] = {};
-                    ldnMitmGetRelayServerName(&g_ldnConfig, i, name);
-                    auto *item = new tsl::elm::ListItem(name);
-                    item->setValue(i == selected ? "*" : "");
-                    item->setClickListener([i](u64 keys) {
-                        if (keys & HidNpadButton_A) {
-                            if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
-                                g_serverItems[i]->setValue(T("错误", "錯誤"));
-                                return true;
-                            }
-                            for (size_t k = 0; k < g_serverItems.size(); k++) {
-                                g_serverItems[k]->setValue(k == i ? "*" : "");
-                            }
-                            // The loop above just wiped every latency label back
-                            // to a bare "*". Invalidate the cache so the next
-                            // update() repaints, otherwise the rows would sit
-                            // there with only a star until the overlay is
-                            // reopened.
-                            g_shown_latency = 0xFFFFFFFFu;
-                            return true;
-                        }
-                        return false;
-                    });
-                    g_serverItems.push_back(item);
-                    list->addItem(item);
-                }
-            }
-
-            // Show this console's relay identity. relay.cfg only stores the
-            // low 16 bits (`id=`), and the plugin assigns one on first use if
-            // the line is absent, so this is the only place to read it back.
-            list->addItem(new tsl::elm::CategoryHeader(T("本机身份", "本機身分")));
-
-            // The relay address is derived from this LAN address, so showing
-            // it makes it obvious why the two consoles get different ids.
-            // nifm only hands out an address once the LAN session exists, so
-            // before the game creates or joins a room there is nothing to
-            // read -- that is expected, not a failure.
-            u32 local_ip = 0;
-            if (R_SUCCEEDED(ldnMitmGetRelayLocalIp(&g_ldnConfig, &local_ip)) && local_ip != 0) {
-                char ipbuf[32];
-                snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u",
-                         (local_ip >> 24) & 0xff, (local_ip >> 16) & 0xff,
-                         (local_ip >> 8) & 0xff, local_ip & 0xff);
-                list->addItem(new tsl::elm::ListItem(T("本机 IP", "本機 IP"), ipbuf));
-            } else {
-                list->addItem(new tsl::elm::ListItem(T("本机 IP", "本機 IP"), T("建立房间后显示", "建立房間後顯示")));
-            }
-
-            u32 vaddr = 0;
-            const bool addr_ok = R_SUCCEEDED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr));
-            if (!addr_ok) {
-                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), T("读取失败", "讀取失敗")));
-            } else if (vaddr == 0) {
-                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), T("建立房间后分配", "建立房間後分配")));
-            } else {
-                char buf[48];
-                snprintf(buf, sizeof(buf), "%u.%u.%u.%u  (id=%u)",
-                         (vaddr >> 24) & 0xff, (vaddr >> 16) & 0xff,
-                         (vaddr >> 8) & 0xff, vaddr & 0xff, vaddr & 0xffff);
-                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), buf));
-            }
-
-            // Tell the user whether the address is stable. T("硬件派生", "硬體衍生") is
-            // derived from this console's LAN address, so it is the same on
-            // every boot even when the SD card is write-protected. T("启动随机", "啟動隨機")
-            // still gets written to relay.cfg, so check it again after a
-            // reboot -- if the number changes, the write is failing.
-            if (addr_ok && vaddr != 0) {
-                u32 src = 0;
-                if (R_FAILED(ldnMitmGetRelayIdSource(&g_ldnConfig, &src))) {
-                    src = 0;
-                }
-                if (src == 1) {
-                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("硬件派生", "硬體衍生")));
-                } else if (src == 2) {
-                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("启动随机", "啟動隨機")));
-                } else if (src == 3) {
-                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("已自动更换", "已自動更換")));
-                } else {
-                    // The id either predates hardware derivation or was cached
-                    // before this console's LAN address changed.
-                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("未知来源", "未知來源")));
-                }
-            }
-            list->addItem(new tsl::elm::ListItem(T("两台机器的地址必须不同", "兩台機器的位址必須不同")));
-            list->addItem(new tsl::elm::ListItem(T("重启后地址不变即正常", "重新啟動後位址不變即正常")));
-
-            // Release signature. Kept at the very bottom so it never gets in
-            // the way of the settings, but every user scrolling down sees it.
-            list->addItem(new tsl::elm::CategoryHeader(T("关于", "關於")));
-            list->addItem(new tsl::elm::ListItem(T("制作", "製作"), T("阿东 & 大肥鱼", "阿東 & 大肥魚")));
-            list->addItem(new tsl::elm::ListItem(T("版本", "版本"), g_version));
-            list->addItem(new tsl::elm::ListItem(T("声明", "聲明"), T("免费分享 禁止倒卖", "免費分享 禁止轉賣")));
-        }
-
-        frame->setContent(list);
+        frame->setContent(g_list);
 
         // Every item was just created with a bare "*". Force the first
         // update() to paint the latency text even if the reading has not
@@ -217,6 +108,14 @@ public:
 
     // Called once every frame to update values
     virtual void update() override {
+        // Cancel an armed "restore defaults" if the user moved the cursor
+        // away, so the row never stays in a half-confirmed state.
+        if (g_restoreArmed && g_restoreItem != nullptr &&
+            this->getFocusedElement() != g_restoreItem) {
+            g_restoreArmed = false;
+            g_restoreItem->setValue("");
+        }
+
         // Show the live relay latency next to the selected server.
         // Only the selected server is connected, so it is the only one
         // whose round-trip time we can actually know.
@@ -259,6 +158,191 @@ public:
         return false;
     }
 };
+
+
+/* Everything below the frame header. Kept out of createUI() so it can be
+   called again after the relay list changes: libtesla cannot refresh a
+   single row, but it can delete and re-add the whole list on the next
+   frame (List::clear() + addItem() are both deferred). */
+static void buildList(tsl::elm::List *list) {
+    g_serverItems.clear();
+    g_restoreItem = nullptr;
+    g_restoreArmed = false;
+
+    if (g_state == State::Error) {
+        list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
+    } else if (g_state == State::Uninit) {
+        list->addItem(new tsl::elm::ListItem(T("错误的状态", "錯誤的狀態")));
+    } else {
+        list->addItem(new ConfigToggleListItem(T("启用", "啟用"), ldnMitmGetEnabled, ldnMitmSetEnabled));
+        list->addItem(new ConfigToggleListItem(T("广播转发", "廣播轉發"), ldnMitmGetBroadcastRelay, ldnMitmSetBroadcastRelay));
+        list->addItem(new ConfigToggleListItem(T("日志", "日誌"), ldnMitmGetLogging, ldnMitmSetLogging));
+
+        list->addItem(new tsl::elm::CategoryHeader(T("互联网中继（按 X 删除）", "網際網路中繼（按 X 刪除）")));
+        list->addItem(new ConfigToggleListItem(T("互联网中继", "網際網路中繼"), ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
+
+        u32 count = 0;
+        if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count))) {
+            list->addItem(new tsl::elm::ListItem(T("读取服务器列表失败", "讀取伺服器清單失敗")));
+        } else if (count == 0) {
+            list->addItem(new tsl::elm::ListItem(T("没有服务器，请恢复默认", "沒有伺服器，請恢復預設")));
+        } else {
+            u32 selected = 0;
+            if (R_FAILED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &selected))) {
+                selected = count;
+            }
+            for (u32 i = 0; i < count; i++) {
+                char name[32] = {};
+                ldnMitmGetRelayServerName(&g_ldnConfig, i, name);
+                auto *item = new tsl::elm::ListItem(name);
+                item->setValue(i == selected ? "*" : "");
+                item->setClickListener([i](u64 keys) {
+                    if (keys & HidNpadButton_A) {
+                        if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
+                            g_serverItems[i]->setValue(T("错误", "錯誤"));
+                            return true;
+                        }
+                        for (size_t k = 0; k < g_serverItems.size(); k++) {
+                            g_serverItems[k]->setValue(k == i ? "*" : "");
+                        }
+                        // The loop above just wiped every latency label back
+                        // to a bare "*". Invalidate the cache so the next
+                        // update() repaints, otherwise the rows would sit
+                        // there with only a star until the overlay is
+                        // reopened.
+                        g_shown_latency = 0xFFFFFFFFu;
+                        return true;
+                    }
+                    if (keys & HidNpadButton_X) {
+                        // Deleting shifts every following index, so the UI is
+                        // rebuilt from the sysmodule's list instead of trying
+                        // to patch the rows in place.
+                        if (R_SUCCEEDED(ldnMitmDeleteRelayServer(&g_ldnConfig, i))) {
+                            rebuildUi();
+                        } else if (i < g_serverItems.size()) {
+                            g_serverItems[i]->setValue(T("删除失败", "刪除失敗"), true);
+                        }
+                        return true;
+                    }
+                    return false;
+                });
+                g_serverItems.push_back(item);
+                list->addItem(item);
+            }
+        }
+
+        // Undo a mistake without editing relay.cfg on a PC. Two presses on
+        // purpose: this rewrites the whole relay list.
+        list->addItem(new tsl::elm::CategoryHeader(T("管理", "管理")));
+        g_restoreItem = new tsl::elm::ListItem(T("恢复默认服务器", "恢復預設伺服器"));
+        g_restoreItem->setClickListener([](u64 keys) {
+            if (!(keys & HidNpadButton_A)) {
+                return false;
+            }
+            if (!g_restoreArmed) {
+                g_restoreArmed = true;
+                g_restoreItem->setValue(T("再按 A 确认", "再按 A 確認"), true);
+                return true;
+            }
+            g_restoreArmed = false;
+            if (R_SUCCEEDED(ldnMitmRestoreDefaultRelayServers(&g_ldnConfig))) {
+                rebuildUi();
+            } else if (g_restoreItem != nullptr) {
+                g_restoreItem->setValue(T("恢复失败", "恢復失敗"), true);
+            }
+            return true;
+        });
+        list->addItem(g_restoreItem);
+
+        // Show this console's relay identity. relay.cfg only stores the
+        // low 16 bits (`id=`), and the plugin assigns one on first use if
+        // the line is absent, so this is the only place to read it back.
+        list->addItem(new tsl::elm::CategoryHeader(T("本机身份", "本機身分")));
+
+        // The relay address is derived from this LAN address, so showing
+        // it makes it obvious why the two consoles get different ids.
+        // nifm only hands out an address once the LAN session exists, so
+        // before the game creates or joins a room there is nothing to
+        // read -- that is expected, not a failure.
+        u32 local_ip = 0;
+        if (R_SUCCEEDED(ldnMitmGetRelayLocalIp(&g_ldnConfig, &local_ip)) && local_ip != 0) {
+            char ipbuf[32];
+            snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u",
+                     (local_ip >> 24) & 0xff, (local_ip >> 16) & 0xff,
+                     (local_ip >> 8) & 0xff, local_ip & 0xff);
+            list->addItem(new tsl::elm::ListItem(T("本机 IP", "本機 IP"), ipbuf));
+        } else {
+            list->addItem(new tsl::elm::ListItem(T("本机 IP", "本機 IP"), T("建立房间后显示", "建立房間後顯示")));
+        }
+
+        u32 vaddr = 0;
+        const bool addr_ok = R_SUCCEEDED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr));
+        if (!addr_ok) {
+            list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), T("读取失败", "讀取失敗")));
+        } else if (vaddr == 0) {
+            list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), T("建立房间后分配", "建立房間後分配")));
+        } else {
+            char buf[48];
+            snprintf(buf, sizeof(buf), "%u.%u.%u.%u  (id=%u)",
+                     (vaddr >> 24) & 0xff, (vaddr >> 16) & 0xff,
+                     (vaddr >> 8) & 0xff, vaddr & 0xff, vaddr & 0xffff);
+            list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), buf));
+        }
+
+        // Tell the user whether the address is stable. T("硬件派生", "硬體衍生") is
+        // derived from this console's LAN address, so it is the same on
+        // every boot even when the SD card is write-protected. T("启动随机", "啟動隨機")
+        // still gets written to relay.cfg, so check it again after a
+        // reboot -- if the number changes, the write is failing.
+        if (addr_ok && vaddr != 0) {
+            u32 src = 0;
+            if (R_FAILED(ldnMitmGetRelayIdSource(&g_ldnConfig, &src))) {
+                src = 0;
+            }
+            if (src == 1) {
+                list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("硬件派生", "硬體衍生")));
+            } else if (src == 2) {
+                list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("启动随机", "啟動隨機")));
+            } else if (src == 3) {
+                list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("已自动更换", "已自動更換")));
+            } else {
+                // The id either predates hardware derivation or was cached
+                // before this console's LAN address changed.
+                list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("未知来源", "未知來源")));
+            }
+        }
+        list->addItem(new tsl::elm::ListItem(T("两台机器的地址必须不同", "兩台機器的位址必須不同")));
+        list->addItem(new tsl::elm::ListItem(T("重启后地址不变即正常", "重新啟動後位址不變即正常")));
+
+        // Release signature. Kept at the very bottom so it never gets in
+        // the way of the settings, but every user scrolling down sees it.
+        list->addItem(new tsl::elm::CategoryHeader(T("关于", "關於")));
+        list->addItem(new tsl::elm::ListItem(T("制作", "製作"), T("阿东 & 大肥鱼", "阿東 & 大肥魚")));
+        list->addItem(new tsl::elm::ListItem(T("版本", "版本"), g_version));
+        list->addItem(new tsl::elm::ListItem(T("声明", "聲明"), T("免费分享 禁止倒卖", "免費分享 禁止轉賣")));
+    }
+
+    // Rebuilt rows start with a bare "*"; force update() to paint them.
+    g_shown_latency = 0xFFFFFFFFu;
+}
+
+/* Rebuild the visible list after the relay list changed. The old rows are
+   deleted by List::draw() on the next frame, so focus is dropped first:
+   leaving the Gui pointing at a deleted element would crash on the next
+   input. restoreFocus() makes the following frame pick a fresh row. */
+static void rebuildUi() {
+    if (g_list == nullptr) {
+        return;
+    }
+    auto &gui = tsl::Overlay::get()->getCurrentGui();
+    if (gui == nullptr) {
+        return;
+    }
+    gui->removeFocus();
+    g_list->clear();
+    buildList(g_list);
+    gui->restoreFocus();
+}
 
 class Overlay : public tsl::Overlay {
 public:

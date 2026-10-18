@@ -83,6 +83,21 @@ namespace ams::mitm::ldn::relay {
         struct Server { char name[ServerNameLen]; char host[64]; u32 ip; u16 port; };
         Server g_servers[MaxServers];
         int g_count = 0;
+
+        /* Factory list for RestoreDefaultServers(); keep in sync with the
+           relay.cfg shipped in the release zip. */
+        struct BuiltinServer { const char *name; const char *host; u16 port; };
+        constexpr BuiltinServer g_builtin[] = {
+            { "China-Beijing",    "olunira.fun",          11451 },
+            { "China-Shanghai",   "47.102.121.212",       11451 },
+            { "China-Guangdong",  "gugu.mulaosi.cn",      11451 },
+            { "China-Zhejiang",   "yordon.cn",            11451 },
+            { "China-Henan",      "srv.jaxlewis.top",     11451 },
+            { "USA-SanFrancisco", "tekn0.net",            11451 },
+            { "Netherlands-1",    "switch.jayseateam.nl", 11451 },
+            { "Germany-1",        "erdbeerbaerlp.de",     11451 },
+        };
+        constexpr int BuiltinCount = static_cast<int>(sizeof(g_builtin) / sizeof(g_builtin[0]));
         std::atomic_int  g_selected{0};
         std::atomic_bool g_enabled{false};
         /* Low 16 bits of our virtual address 10.13.x.x; 0 = unassigned. */
@@ -313,6 +328,12 @@ namespace ams::mitm::ldn::relay {
                 if (IsDirectiveLine(p)) {
                     continue;
                 }
+                /* Relay entries (name host:port) are regenerated from
+                   g_servers below so add/remove takes effect; comments and
+                   blank lines are copied verbatim. */
+                if (*p != '#' && *p != '\0') {
+                    continue;
+                }
                 const size_t need = std::strlen(line) + 1;
                 if (pos + need >= OutCap) {
                     LogFormat("relay: not persisting settings, rewritten config too large");
@@ -321,6 +342,19 @@ namespace ams::mitm::ldn::relay {
                 std::memcpy(out + pos, line, need - 1);
                 out[pos + need - 1] = '\n';
                 pos += need;
+            }
+
+            /* Regenerate the relay list. */
+            for (int i = 0; i < g_count; i++) {
+                const size_t need = std::strlen(g_servers[i].name) +
+                                    std::strlen(g_servers[i].host) + 24;
+                if (pos + need >= OutCap) {
+                    LogFormat("relay: not persisting settings, server list too large");
+                    return;
+                }
+                pos += static_cast<size_t>(std::snprintf(out + pos, OutCap - pos,
+                    "%s %s:%u\n", g_servers[i].name, g_servers[i].host,
+                    static_cast<unsigned>(g_servers[i].port)));
             }
 
             fs::FileHandle f;
@@ -446,6 +480,133 @@ namespace ams::mitm::ldn::relay {
        the old host until it is reopened, so this is what the latency reading
        must be validated against. -1 = no transport open yet. */
     int  ActiveServer()       { return g_active_server.load(); }
+
+    /* --- runtime server management ------------------------------------
+       The Tesla overlay drives these through the config IPC service, so a
+       user can drop a dead relay, free a slot, or add one a friend
+       recommended without pulling the SD card out. Every mutation rewrites
+       relay.cfg, so the change survives a reboot. */
+
+    bool ServerIsBuiltin(int index) {
+        if (index < 0 || index >= g_count) {
+            return false;
+        }
+        for (int i = 0; i < BuiltinCount; i++) {
+            if (std::strcmp(g_servers[index].host, g_builtin[i].host) == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    const char *ServerHostAt(int index) {
+        return (index >= 0 && index < g_count) ? g_servers[index].host : "";
+    }
+
+    u16 ServerPortAt(int index) {
+        return (index >= 0 && index < g_count) ? static_cast<u16>(g_servers[index].port) : 0;
+    }
+
+    /* IPv4 literal -> host-order address; 0 means "resolve this hostname". */
+    static u32 ParseIpv4Host(const char *host) {
+        unsigned a = 0, b = 0, c = 0, d = 0;
+        if (std::sscanf(host, "%u.%u.%u.%u", &a, &b, &c, &d) == 4 &&
+            a <= 255 && b <= 255 && c <= 255 && d <= 255) {
+            return (a << 24) | (b << 16) | (c << 8) | d;
+        }
+        return 0;
+    }
+
+    bool AddServer(const char *name, const char *host, u16 port) {
+        if (name == nullptr || host == nullptr) {
+            return false;
+        }
+        if (host[0] == '\0' || port == 0 || name[0] == '\0') {
+            return false;
+        }
+        {
+            std::scoped_lock lk(g_config_mutex);
+            if (g_count >= MaxServers) {
+                return false;
+            }
+            for (int i = 0; i < g_count; i++) {
+                if (std::strcmp(g_servers[i].host, host) == 0 &&
+                    g_servers[i].port == port) {
+                    return false;
+                }
+            }
+            Server &s = g_servers[g_count];
+            std::strncpy(s.name, name, sizeof(s.name) - 1);
+            s.name[sizeof(s.name) - 1] = '\0';
+            std::strncpy(s.host, host, sizeof(s.host) - 1);
+            s.host[sizeof(s.host) - 1] = '\0';
+            s.port = port;
+            s.ip   = ParseIpv4Host(s.host);
+            g_count++;
+        }
+        PersistConfig();
+        return true;
+    }
+
+    bool DeleteServer(int index) {
+        {
+            std::scoped_lock lk(g_config_mutex);
+            if (index < 0 || index >= g_count) {
+                return false;
+            }
+            for (int i = index; i + 1 < g_count; i++) {
+                g_servers[i] = g_servers[i + 1];
+            }
+            g_count--;
+            /* Keep the same server selected. Removing an entry before it
+               shifts its index down by one; removing the selected entry
+               itself leaves the next server in that slot. Simply clamping
+               to g_count would silently switch the user to another host. */
+            int sel = g_selected.load();
+            if (index < sel) {
+                sel--;
+            } else if (index == sel && sel >= g_count) {
+                sel = (g_count > 0) ? (g_count - 1) : 0;
+            }
+            if (sel < 0) {
+                sel = 0;
+            }
+            g_selected = sel;
+            g_latency.ms = 0;
+            g_latency.waiting = 0;
+            /* Removing an entry shifts every index after it. The open
+               transport's index may now point at a different host, and
+               ActiveServer() == SelectedServer() would keep it open, so
+               invalidate it and let the worker reconnect. */
+            g_active_server = -1;
+        }
+        PersistConfig();
+        return true;
+    }
+
+    void RestoreDefaultServers() {
+        {
+            std::scoped_lock lk(g_config_mutex);
+            g_count = 0;
+            for (int i = 0; i < BuiltinCount && g_count < MaxServers; i++) {
+                Server &s = g_servers[g_count];
+                std::strncpy(s.name, g_builtin[i].name, sizeof(s.name) - 1);
+                s.name[sizeof(s.name) - 1] = '\0';
+                std::strncpy(s.host, g_builtin[i].host, sizeof(s.host) - 1);
+                s.host[sizeof(s.host) - 1] = '\0';
+                s.port = g_builtin[i].port;
+                s.ip   = ParseIpv4Host(s.host);
+                g_count++;
+            }
+            g_selected = 0;
+            g_latency.ms = 0;
+            g_latency.waiting = 0;
+            /* Index 0 may now be a different host than the one the open
+               transport is talking to; force a reconnect. */
+            g_active_server = -1;
+        }
+        PersistConfig();
+    }
 
     u32  ServerIp() {
         const int i = g_selected.load();
