@@ -41,8 +41,20 @@ static tsl::elm::List *g_list = nullptr;
 static tsl::elm::ListItem *g_restoreItem = nullptr;
 static bool g_restoreArmed = false;
 
+/* Rows only enter the List on the next draw, so a rebuilt list cannot take
+   focus immediately. update() re-applies this once the target is really in
+   the list, which keeps the cursor on the row the user was working on
+   instead of snapping back to the first entry. */
+static tsl::elm::Element *g_focus_after_rebuild = nullptr;
+static int g_focus_retries = 0;
+
 static void buildList(tsl::elm::List *list);
 static void rebuildUi();
+
+static void focusAfterRebuild(tsl::elm::Element *element) {
+    g_focus_after_rebuild = element;
+    g_focus_retries = 10;
+}
 
 class ConfigToggleListItem : public tsl::elm::ToggleListItem {
 public:
@@ -108,6 +120,24 @@ public:
 
     // Called once every frame to update values
     virtual void update() override {
+        // Put the cursor back on the row the user was on before the list was
+        // rebuilt (delete / restore). Runs before draw, so the target is only
+        // found once List::draw() has inserted the freshly built rows.
+        if (g_focus_after_rebuild != nullptr) {
+            if (g_list != nullptr) {
+                const s32 idx = g_list->getIndexInList(g_focus_after_rebuild);
+                if (idx >= 0) {
+                    g_list->setFocusedIndex(static_cast<u32>(idx));
+                    this->requestFocus(g_focus_after_rebuild, tsl::FocusDirection::None);
+                    g_focus_after_rebuild = nullptr;
+                } else if (--g_focus_retries <= 0) {
+                    g_focus_after_rebuild = nullptr;
+                }
+            } else {
+                g_focus_after_rebuild = nullptr;
+            }
+        }
+
         // Cancel an armed "restore defaults" if the user moved the cursor
         // away, so the row never stays in a half-confirmed state.
         if (g_restoreArmed && g_restoreItem != nullptr &&
@@ -219,6 +249,16 @@ static void buildList(tsl::elm::List *list) {
                         // to patch the rows in place.
                         if (R_SUCCEEDED(ldnMitmDeleteRelayServer(&g_ldnConfig, i))) {
                             rebuildUi();
+                            // Keep the cursor on the same slot: the row that
+                            // slid up into the deleted one, or the new last
+                            // row. With no servers left, land on "restore
+                            // defaults" -- that is the only useful action.
+                            if (!g_serverItems.empty()) {
+                                const size_t next = (i < g_serverItems.size()) ? i : (g_serverItems.size() - 1);
+                                focusAfterRebuild(g_serverItems[next]);
+                            } else {
+                                focusAfterRebuild(g_restoreItem);
+                            }
                         } else if (i < g_serverItems.size()) {
                             g_serverItems[i]->setValue(T("删除失败", "刪除失敗"), true);
                         }
@@ -247,6 +287,7 @@ static void buildList(tsl::elm::List *list) {
             g_restoreArmed = false;
             if (R_SUCCEEDED(ldnMitmRestoreDefaultRelayServers(&g_ldnConfig))) {
                 rebuildUi();
+                focusAfterRebuild(g_restoreItem);
             } else if (g_restoreItem != nullptr) {
                 g_restoreItem->setValue(T("恢复失败", "恢復失敗"), true);
             }
