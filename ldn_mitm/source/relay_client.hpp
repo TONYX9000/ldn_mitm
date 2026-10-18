@@ -50,6 +50,12 @@ namespace ams::mitm::ldn {
         const char *ServerHostAt(int index);
         u16  ServerPortAt(int index);
         bool ServerIsBuiltin(int index);
+        /* Factory list (the relays shipped in the archive), exposed so the
+           overlay can offer a deleted one for re-adding. */
+        int  BuiltinServerCount();
+        const char *BuiltinServerName(int index);
+        const char *BuiltinServerHost(int index);
+        u16  BuiltinServerPort(int index);
         /* Server the open transport is connected to; -1 when none is open.
            SelectServer only rewrites the config, so the worker compares the
            two and reopens when they differ. */

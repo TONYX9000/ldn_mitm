@@ -116,4 +116,16 @@ namespace ams::mitm::ldn {
         relay::RestoreDefaultServers();
         R_SUCCEED();
     }
+    Result LdnConfig::GetBuiltinRelayServerCount(sf::Out<u32> count) {
+        count.SetValue(static_cast<u32>(relay::BuiltinServerCount()));
+        R_SUCCEED();
+    }
+    Result LdnConfig::GetBuiltinRelayServerInfo(u32 index, sf::Out<RelayServerInfo> info) {
+        RelayServerInfo out = {};
+        std::strncpy(out.name, relay::BuiltinServerName(static_cast<int>(index)), sizeof(out.name) - 1);
+        std::strncpy(out.host, relay::BuiltinServerHost(static_cast<int>(index)), sizeof(out.host) - 1);
+        out.port = relay::BuiltinServerPort(static_cast<int>(index));
+        info.SetValue(out);
+        R_SUCCEED();
+    }
 }

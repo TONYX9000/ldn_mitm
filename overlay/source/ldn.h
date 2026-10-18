@@ -43,6 +43,8 @@ Result ldnMitmGetRelayServerInfo(LdnMitmConfigService *s, u32 index, LdnRelaySer
 Result ldnMitmAddRelayServer(LdnMitmConfigService *s, const LdnRelayServerInfo *info);
 Result ldnMitmDeleteRelayServer(LdnMitmConfigService *s, u32 index);
 Result ldnMitmRestoreDefaultRelayServers(LdnMitmConfigService *s);
+Result ldnMitmGetBuiltinRelayServerCount(LdnMitmConfigService *s, u32 *count);
+Result ldnMitmGetBuiltinRelayServerInfo(LdnMitmConfigService *s, u32 index, LdnRelayServerInfo *info);
 Result ldnMitmGetConfig(LdnMitmConfigService *out);
 Result ldnMitmGetConfigFromService(Service* s, LdnMitmConfigService *out);
 

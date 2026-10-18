@@ -44,6 +44,8 @@ namespace ams::mitm::ldn {
     AMS_SF_METHOD_INFO(C, H, 65018, Result, GetRelayServerInfo, (u32 index, ams::sf::Out<ams::mitm::ldn::RelayServerInfo> info), (index, info))	\
     AMS_SF_METHOD_INFO(C, H, 65019, Result, AddRelayServer, 	(ams::mitm::ldn::RelayServerInfo info), 			(info))	\
     AMS_SF_METHOD_INFO(C, H, 65020, Result, DeleteRelayServer, 	(u32 index), 									(index))	\
-    AMS_SF_METHOD_INFO(C, H, 65021, Result, RestoreDefaultRelayServers, (), 										())
+    AMS_SF_METHOD_INFO(C, H, 65021, Result, RestoreDefaultRelayServers, (), 										())	\
+    AMS_SF_METHOD_INFO(C, H, 65022, Result, GetBuiltinRelayServerCount, (ams::sf::Out<u32> count), 					(count))	\
+    AMS_SF_METHOD_INFO(C, H, 65023, Result, GetBuiltinRelayServerInfo, (u32 index, ams::sf::Out<ams::mitm::ldn::RelayServerInfo> info), (index, info))
 
     AMS_SF_DEFINE_INTERFACE(ams::mitm::ldn, ILdnConfig, AMS_LDN_CONFIG, 0x14c8af2c)

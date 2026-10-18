@@ -507,6 +507,22 @@ namespace ams::mitm::ldn::relay {
         return (index >= 0 && index < g_count) ? static_cast<u16>(g_servers[index].port) : 0;
     }
 
+    int BuiltinServerCount() {
+        return BuiltinCount;
+    }
+
+    const char *BuiltinServerName(int index) {
+        return (index >= 0 && index < BuiltinCount) ? g_builtin[index].name : "";
+    }
+
+    const char *BuiltinServerHost(int index) {
+        return (index >= 0 && index < BuiltinCount) ? g_builtin[index].host : "";
+    }
+
+    u16 BuiltinServerPort(int index) {
+        return (index >= 0 && index < BuiltinCount) ? static_cast<u16>(g_builtin[index].port) : 0;
+    }
+
     /* IPv4 literal -> host-order address; 0 means "resolve this hostname". */
     static u32 ParseIpv4Host(const char *host) {
         unsigned a = 0, b = 0, c = 0, d = 0;

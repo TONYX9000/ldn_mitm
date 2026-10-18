@@ -51,6 +51,10 @@ namespace ams::mitm::ldn {
             Result AddRelayServer(RelayServerInfo info);
             Result DeleteRelayServer(u32 index);
             Result RestoreDefaultRelayServers();
+            /* Factory list, so the overlay's add page can list what is not
+               currently configured. */
+            Result GetBuiltinRelayServerCount(sf::Out<u32> count);
+            Result GetBuiltinRelayServerInfo(u32 index, sf::Out<RelayServerInfo> info);
     };
     static_assert(ams::mitm::ldn::IsILdnConfig<LdnConfig>);
 

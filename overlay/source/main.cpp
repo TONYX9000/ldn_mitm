@@ -60,6 +60,11 @@ static bool g_restoreArmed = false;
 static tsl::elm::Element *g_focus_after_rebuild = nullptr;
 static int g_focus_retries = 0;
 
+/* Set by the add page. The main list is not the top Gui while that page is
+   open, so it rebuilds on the first frame it becomes visible again. */
+static bool g_main_list_dirty = false;
+static tsl::elm::ListItem *g_addServerItem = nullptr;
+
 static void buildList(tsl::elm::List *list);
 static void rebuildUi();
 
@@ -132,6 +137,14 @@ public:
 
     // Called once every frame to update values
     virtual void update() override {
+        // Coming back from the add page: the relay list changed while this
+        // Gui sat underneath it, so rebuild now that it is on top again.
+        if (g_main_list_dirty) {
+            g_main_list_dirty = false;
+            rebuildUi();
+            focusAfterRebuild(g_addServerItem);
+        }
+
         // Put the cursor back on the row the user was on before the list was
         // rebuilt (delete / restore). Runs before draw, so the target is only
         // found once List::draw() has inserted the freshly built rows.
@@ -202,6 +215,69 @@ public:
     }
 };
 
+/* Preset picker. libtesla has no text input (Tesla cannot open swkbd from a
+   LibraryApplet), so "add" means putting one of the factory relays back.
+   Entries that are already configured say 已添加 and do nothing. */
+class AddServerGui : public tsl::Gui {
+public:
+    virtual tsl::elm::Element* createUI() override {
+        auto frame = new tsl::elm::OverlayFrame(T("添加服务器", "新增伺服器"), g_brand);
+        auto *list = new tsl::elm::List();
+
+        u32 builtin = 0;
+        if (R_FAILED(ldnMitmGetBuiltinRelayServerCount(&g_ldnConfig, &builtin))) {
+            builtin = 0;
+        }
+        u32 current = 0;
+        ldnMitmGetRelayServerCount(&g_ldnConfig, &current);
+
+        list->addItem(new tsl::elm::CategoryHeader(T("内置服务器（按 A 添加）", "內建伺服器（按 A 新增）")));
+
+        for (u32 i = 0; i < builtin; i++) {
+            LdnRelayServerInfo info = {};
+            if (R_FAILED(ldnMitmGetBuiltinRelayServerInfo(&g_ldnConfig, i, &info))) {
+                continue;
+            }
+            bool present = false;
+            for (u32 k = 0; k < current; k++) {
+                LdnRelayServerInfo cur = {};
+                if (R_SUCCEEDED(ldnMitmGetRelayServerInfo(&g_ldnConfig, k, &cur)) &&
+                    strcmp(cur.host, info.host) == 0 && cur.port == info.port) {
+                    present = true;
+                    break;
+                }
+            }
+
+            char addr[96];
+            snprintf(addr, sizeof(addr), "%s:%u", info.host, static_cast<unsigned>(info.port));
+            auto *item = new tsl::elm::ListItem(info.name);
+            item->setValue(present ? T("已添加", "已新增") : addr, present);
+
+            auto added = std::make_shared<bool>(present);
+            item->setClickListener([item, info, added](u64 keys) {
+                if (!(keys & HidNpadButton_A)) {
+                    return false;
+                }
+                if (*added) {
+                    return true;
+                }
+                if (R_SUCCEEDED(ldnMitmAddRelayServer(&g_ldnConfig, &info))) {
+                    *added = true;
+                    item->setValue(T("已添加", "已新增"), true);
+                    g_main_list_dirty = true;
+                } else {
+                    item->setValue(T("添加失败", "新增失敗"), true);
+                }
+                return true;
+            });
+            list->addItem(item);
+        }
+
+        frame->setContent(list);
+        return frame;
+    }
+};
+
 
 /* Everything below the frame header. Kept out of createUI() so it can be
    called again after the relay list changes: libtesla cannot refresh a
@@ -210,6 +286,7 @@ public:
 static void buildList(tsl::elm::List *list) {
     g_serverItems.clear();
     g_restoreItem = nullptr;
+    g_addServerItem = nullptr;
     g_restoreArmed = false;
 
     if (g_state == State::Error) {
@@ -287,6 +364,17 @@ static void buildList(tsl::elm::List *list) {
         // Undo a mistake without editing relay.cfg on a PC. Two presses on
         // purpose: this rewrites the whole relay list.
         list->addItem(new tsl::elm::CategoryHeader(T("管理", "管理")));
+
+        g_addServerItem = new tsl::elm::ListItem(T("添加服务器", "新增伺服器"));
+        g_addServerItem->setClickListener([](u64 keys) {
+            if (keys & HidNpadButton_A) {
+                tsl::changeTo<AddServerGui>();
+                return true;
+            }
+            return false;
+        });
+        list->addItem(g_addServerItem);
+
         g_restoreItem = new tsl::elm::ListItem(T("恢复默认服务器", "恢復預設伺服器"));
         g_restoreItem->setClickListener([](u64 keys) {
             if (!(keys & HidNpadButton_A)) {

@@ -117,6 +117,21 @@ Result ldnMitmRestoreDefaultRelayServers(LdnMitmConfigService *s) {
     return serviceDispatch(&s->s, 65021);
 }
 
+Result ldnMitmGetBuiltinRelayServerCount(LdnMitmConfigService *s, u32 *count) {
+    return serviceDispatchOut(&s->s, 65022, *count);
+}
+
+Result ldnMitmGetBuiltinRelayServerInfo(LdnMitmConfigService *s, u32 index, LdnRelayServerInfo *info) {
+    LdnRelayServerInfo out;
+    Result rc = serviceDispatchInOut(&s->s, 65023, index, out);
+    if (R_SUCCEEDED(rc)) {
+        out.name[sizeof(out.name) - 1] = '\0';
+        out.host[sizeof(out.host) - 1] = '\0';
+        *info = out;
+    }
+    return rc;
+}
+
 Result ldnMitmGetVersion(LdnMitmConfigService *s, char *version) {
     char version_s[32];
     Result rc = serviceDispatchOut(&s->s, 65001, version_s);
