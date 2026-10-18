@@ -1,4 +1,4 @@
-From dac0e94d20fe1e80a1755dc2e4755749cb02418e Mon Sep 17 00:00:00 2001
+From 173beb884d6d848de06183464b85d9461860eef3 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
 Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
@@ -22,11 +22,16 @@ Content-Transfer-Encoding: 8bit
 - 每次点开 overlay(Overlay::onShow)与切换服务器时重新下载订阅并刷新
 - 后台线程刷新(libnx thread,不阻塞 UI),UI 按快照 version 重建列表
 - 域名解析用 getaddrinfo(libnx/newlib 无 gethostbyname);INADDR_NONE 兼容定义
-- 内存优化(修复 ovlloader 堆溢出 0x559):标题表(哈希 16384 桶 + 288KB
-  名称池,约 512KB)延迟到首次解析订阅时才分配,不再挤占渲染器
-  frameBuffer(约 1.3MB)的分配;HTTP 响应体原地裁剪不再二次拷贝;
-  overlay 启用 --gc-sections/-fdata-sections 减小镜像(注:libtesla 用了
-  dynamic_cast,不能加 -fno-rtti)
+- 内存优化(修复 ovlloader 堆溢出 0x559 OutOfMemory):
+  标题表(哈希 16384 桶 + 288KB 名称池,约 512KB)延迟到首次解析订阅时
+  才分配;chinese_db.json 落盘后先释放字符串,再 1KB 窗口流式解析入库
+  (峰值约 512KB,不再与约 0.5MB 订阅字符串同驻);HTTP 响应按
+  Content-Length 精确预留,避免 std::string 几何增长翻倍瞬时占用;
+  overlay 启用 --gc-sections/-fdata-sections/-fno-unwind-tables/-Os
+  减小镜像(libtesla 用 dynamic_cast,不能加 -fno-rtti)
+- 诊断日志 sdmc:/config/ldn_mitm/monitor.log(worker-init /
+  initServices-done / first-frame / refresh-start / refresh-done),
+  堆不足复现时可直接定位爆点
 - CI 修复(适配最新系统):构建前把 Atmosphere-libs 顶到 master(与上游
   nightly.yml 相同,跟踪 23.0.1+ 固件适配,否则插件在新系统启动报错),
   并安装 libnx master 与其配套(新 pgl 命名);三个工作流统一此流程,
@@ -38,11 +43,11 @@ Reference: https://github.com/jieluojun/LanPlayMonitor
  .github/workflows/build.yml   |   14 +-
  .github/workflows/nightly.yml |   17 +-
  .github/workflows/release.yml |   24 +-
- overlay/Makefile              |    4 +-
- overlay/source/main.cpp       |  149 +++-
- overlay/source/monitor.cpp    | 1414 +++++++++++++++++++++++++++++++++
- overlay/source/monitor.hpp    |   48 ++
- 7 files changed, 1647 insertions(+), 23 deletions(-)
+ overlay/Makefile              |    5 +-
+ overlay/source/main.cpp       |  151 +++-
+ overlay/source/monitor.cpp    | 1499 +++++++++++++++++++++++++++++++++
+ overlay/source/monitor.hpp    |   51 ++
+ 7 files changed, 1738 insertions(+), 23 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
@@ -151,19 +156,20 @@ index 7f34343..b34daa5 100644
      - name: Pack
        run: |
 diff --git a/overlay/Makefile b/overlay/Makefile
-index e2cdc19..7f48634 100644
+index e2cdc19..168940f 100644
 --- a/overlay/Makefile
 +++ b/overlay/Makefile
-@@ -57,7 +57,7 @@ NO_ICON		:=  1
+@@ -57,7 +57,8 @@ NO_ICON		:=  1
  #---------------------------------------------------------------------------------
  ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
  
 -CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
-+CFLAGS	:=	-g -Wall -O2 -ffunction-sections -fdata-sections \
++CFLAGS	:=	-g -Wall -Os -ffunction-sections -fdata-sections \
++			-fno-unwind-tables -fno-asynchronous-unwind-tables \
  			$(ARCH) $(DEFINES) $(VERSION_DEFINES)
  
  CFLAGS	+=	$(INCLUDE) -D__SWITCH__
-@@ -65,7 +65,7 @@ CFLAGS	+=	$(INCLUDE) -D__SWITCH__
+@@ -65,7 +66,7 @@ CFLAGS	+=	$(INCLUDE) -D__SWITCH__
  CXXFLAGS	:= $(CFLAGS) -fno-exceptions -std=c++20
  
  ASFLAGS	:=	-g $(ARCH)
@@ -173,7 +179,7 @@ index e2cdc19..7f48634 100644
  LIBS	:= -lnx
  
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..52a7130 100644
+index 8e07c19..8bc36f6 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,7 @@
@@ -184,7 +190,7 @@ index 8e07c19..52a7130 100644
  #include <vector>
  
  enum class State {
-@@ -34,6 +35,70 @@ static bool g_isTraditional = false;
+@@ -34,6 +35,71 @@ static bool g_isTraditional = false;
  
  #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
  
@@ -220,6 +226,7 @@ index 8e07c19..52a7130 100644
 +        : tsl::elm::OverlayFrame(title, subtitle) {}
 +
 +    virtual void draw(tsl::gfx::Renderer *renderer) override {
++        { static bool once = false; if (!once) { once = true; MonitorLog("first-frame"); } }
 +        tsl::elm::OverlayFrame::draw(renderer);
 +
 +        MonitorSnapshot snap;
@@ -255,7 +262,7 @@ index 8e07c19..52a7130 100644
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -70,6 +135,51 @@ static void detectLanguage()
+@@ -70,6 +136,51 @@ static void detectLanguage()
      strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
  }
  
@@ -307,7 +314,7 @@ index 8e07c19..52a7130 100644
  class MainGui : public tsl::Gui {
  public:
      MainGui() { }
-@@ -79,9 +189,10 @@ public:
+@@ -79,9 +190,10 @@ public:
          // bundled font has CJK glyphs, so the UI is localised in place.
          // The header subtitle carries the release brand; the full version
          // string is repeated in the T("关于", "關於") block at the bottom.
@@ -319,7 +326,7 @@ index 8e07c19..52a7130 100644
  
          if (g_state == State::Error) {
              list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
-@@ -96,6 +207,7 @@ public:
+@@ -96,6 +208,7 @@ public:
              list->addItem(new ConfigToggleListItem(T("互联网中继", "網際網路中繼"), ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
  
              g_serverItems.clear();
@@ -327,7 +334,7 @@ index 8e07c19..52a7130 100644
              u32 count = 0;
              if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count))) {
                  list->addItem(new tsl::elm::ListItem(T("读取服务器列表失败", "讀取伺服器清單失敗")));
-@@ -109,9 +221,11 @@ public:
+@@ -109,9 +222,11 @@ public:
                  for (u32 i = 0; i < count; i++) {
                      char name[32] = {};
                      ldnMitmGetRelayServerName(&g_ldnConfig, i, name);
@@ -340,7 +347,7 @@ index 8e07c19..52a7130 100644
                          if (keys & HidNpadButton_A) {
                              if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
                                  g_serverItems[i]->setValue(T("错误", "錯誤"));
-@@ -126,6 +240,9 @@ public:
+@@ -126,6 +241,9 @@ public:
                              // there with only a star until the overlay is
                              // reopened.
                              g_shown_latency = 0xFFFFFFFFu;
@@ -350,7 +357,7 @@ index 8e07c19..52a7130 100644
                              return true;
                          }
                          return false;
-@@ -135,6 +252,11 @@ public:
+@@ -135,6 +253,11 @@ public:
                  }
              }
  
@@ -362,7 +369,7 @@ index 8e07c19..52a7130 100644
              // Show this console's relay identity. relay.cfg only stores the
              // low 16 bits (`id=`), and the plugin assigns one on first use if
              // the line is absent, so this is the only place to read it back.
-@@ -211,12 +333,22 @@ public:
+@@ -211,12 +334,22 @@ public:
          // cached value made update() return early and the label stayed at
          // just "*" with no "--" and no number.
          g_shown_latency = 0xFFFFFFFFu;
@@ -385,7 +392,7 @@ index 8e07c19..52a7130 100644
          // Show the live relay latency next to the selected server.
          // Only the selected server is connected, so it is the only one
          // whose round-trip time we can actually know.
-@@ -265,9 +397,14 @@ public:
+@@ -265,9 +398,14 @@ public:
      virtual void initServices() override {
          g_state = State::Uninit;
          detectLanguage();
@@ -400,11 +407,12 @@ index 8e07c19..52a7130 100644
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,13 +425,19 @@ public:
+@@ -288,13 +426,20 @@ public:
              g_state = State::Loaded;
          });
  
 +        MonitorInit();
++        MonitorLog("initServices-done");
      }
      virtual void exitServices() override {
 +        MonitorExit();
@@ -423,10 +431,10 @@ index 8e07c19..52a7130 100644
      virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..4b23cc7
+index 0000000..96e17f7
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,1414 @@
+@@ -0,0 +1,1499 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -483,6 +491,22 @@ index 0000000..4b23cc7
 +static const char *kSaveServersPath = "sdmc:/config/ldn_mitm/servers.json";
 +static const char *kSaveChinesePath = "sdmc:/config/ldn_mitm/chinese_db.json";
 +static const char *kRelayCfgPath    = "sdmc:/config/ldn_mitm/relay.cfg";
++static const char *kLogPath         = "sdmc:/config/ldn_mitm/monitor.log";
++
++/* 诊断日志:记录各阶段,便于定位 ovlloader 堆不足时的爆点。
++ * 每次 MonitorInit 截断重写。 */
++static void MonLog(const char *msg) {
++    FILE *f = fopen(kLogPath, "a");
++    if (!f)
++        return;
++    fputs(msg, f);
++    fputc('\n', f);
++    fclose(f);
++}
++
++void MonitorLog(const char *msg) {
++    MonLog(msg);
++}
 +
 +static constexpr size_t kMaxDownload  = 3u * 1024 * 1024;  /* 订阅文件上限 */
 +static constexpr size_t kMaxHttpBody  = 512u * 1024;       /* 查询响应上限 */
@@ -933,6 +957,11 @@ index 0000000..4b23cc7
 +                if (contentLength < 0)
 +                    contentLength = 0;
 +            }
++            /* 按 Content-Length 精确预留,避免 std::string 几何增长
++             * 产生约 2 倍的瞬时容量(挤爆 ovlloader 的小堆)。 */
++            if (!chunked && contentLength > 0 &&
++                (size_t)contentLength <= maxBody)
++                raw.reserve(headerEnd + (size_t)contentLength);
 +        }
 +        if (haveHeaders && contentLength >= 0 && !chunked &&
 +            raw.size() >= headerEnd + (size_t)contentLength)
@@ -1167,30 +1196,84 @@ index 0000000..4b23cc7
 +    return nullptr;
 +}
 +
-+static void ParseChineseDbJson(const char *json) {
-+    const char *p = JsWs(SkipBom(json));
-+    if (*p != '{')
-+        return;
-+    p = JsWs(p + 1);
-+    for (;;) {
-+        char key[24];
-+        if (*p != '"' || !JsonString(&p, key, sizeof(key)))
++/* (整读 JSON 的旧解析器已由 ParseChineseDbFile 流式版取代) */
++
++/* 从文件流式解析 {"KEY":"NAME",...} 到标题表。
++ * 不把 480KB 的订阅 JSON 整个读进 std::string——窗口只有 1KB,
++ * 峰值内存 = 标题表(约 512KB) + 窗口,避免与订阅字符串叠加把
++ * ovlloader 仅几 MB 的堆挤爆(0x559 OutOfMemory)。 */
++static bool ParseChineseDbFile(const char *path) {
++    FILE *f = fopen(path, "rb");
++    if (!f)
++        return false;
++    char win[1280];
++    size_t winLen = 0;
++    bool eof = false, atStart = true;
++
++    while (!eof || winLen > 0) {
++        if (!eof && winLen < sizeof(win) - 1) {
++            size_t n = fread(win + winLen, 1, sizeof(win) - 1 - winLen, f);
++            if (n == 0)
++                eof = true;
++            winLen += n;
++        }
++        win[winLen] = '\0';
++
++        const char *p = win;
++        if (atStart) {
++            p = JsWs(SkipBom(p));
++            if (*p == '{')
++                p = JsWs(p + 1);
++            else if (*p == '\0' && !eof)
++                continue;                 /* 数据未到 */
++            atStart = false;
++        }
++
++        bool advanced = true;
++        while (advanced) {
++            advanced = false;
++            p = JsWs(p);
++            if (*p == '\0')
++                break;                    /* 窗口尾:等更多数据 */
++            if (*p == '}')
++                { fclose(f); return true; }
++            if (*p == ',')
++                { p++; advanced = true; continue; }
++            if (*p != '"')
++                { p++; advanced = true; continue; }   /* 容错跳过 */
++
++            const char *q = p;
++            char key[24], name[128];
++            if (!JsonString(&q, key, sizeof(key)))
++                break;                    /* 不完整(跨块)或坏转义 */
++            q = JsWs(q);
++            if (*q != ':')
++                break;
++            q = JsWs(q + 1);
++            if (!JsonString(&q, name, sizeof(name)))
++                break;
++
++            u64 k = TitleKeyPack(key);
++            if (k != 0 && name[0])
++                TitleInsert(k, name, strlen(name));
++            p = q;
++            advanced = true;
++        }
++
++        size_t used = (size_t)(p - win);
++        if (used > 0) {
++            memmove(win, win + used, winLen - used);
++            winLen -= used;
++        }
++        if (!advanced && !eof && winLen == sizeof(win) - 1) {
++            /* 病态长 token 塞满窗口:丢一字节防止死锁 */
++            memmove(win, win + 1, --winLen);
++        }
++        if (eof && !advanced)
 +            break;
-+        p = JsWs(p);
-+        if (*p != ':')
-+            break;
-+        p = JsWs(p + 1);
-+        char name[128];
-+        if (*p != '"' || !JsonString(&p, name, sizeof(name)))
-+            break;
-+        u64 k = TitleKeyPack(key);
-+        if (k != 0 && name[0])
-+            TitleInsert(k, name, strlen(name));
-+        p = JsWs(p);
-+        if (*p != ',')
-+            break;
-+        p = JsWs(p + 1);
 +    }
++    fclose(f);
++    return true;
 +}
 +
 +/* ------------------------------------------------------------------ */
@@ -1659,6 +1742,7 @@ index 0000000..4b23cc7
 +/* ------------------------------------------------------------------ */
 +
 +static void DoRefresh(const char *nameOverride) {
++    MonLog("refresh-start");
 +    {
 +        std::scoped_lock lk(g_mutex);
 +        g_snap.busy = true;
@@ -1706,7 +1790,11 @@ index 0000000..4b23cc7
 +        if (g_titleKey) {
 +            g_titleArenaUsed = 0;
 +            memset(g_titleKey, 0, kTitleHashSize * sizeof(u64));
-+            ParseChineseDbJson(chineseJson.c_str());
++            /* 先释放 JSON 字符串(约 0.5MB),再从落盘文件流式解析,
++             * 避免字符串与标题表同驻把 ovlloader 的堆挤爆。 */
++            std::string().swap(chineseJson);
++            if (!ParseChineseDbFile(kSaveChinesePath))
++                MonLog("chinese_db: open file failed");
 +        }
 +    }
 +
@@ -1781,6 +1869,7 @@ index 0000000..4b23cc7
 +                memcpy(name, g_pendingName, sizeof(name));
 +            }
 +            DoRefresh(name[0] ? name : nullptr);
++            MonLog("refresh-done");
 +        } else {
 +            svcSleepThread(50'000'000);      /* 50ms */
 +        }
@@ -1813,6 +1902,10 @@ index 0000000..4b23cc7
 +    g_inited = true;
 +    g_exit.store(false);
 +    g_pendingName[0] = 0;
++    mkdir("sdmc:/config", 0777);
++    mkdir(kSaveDir, 0777);
++    fclose(fopen(kLogPath, "w"));   /* 截断上一轮日志 */
++    MonLog("worker-init");
 +
 +    Result rc = threadCreate(&g_thread, MonitorWorker, nullptr, g_workerStack,
 +                             sizeof(g_workerStack), 0x2C, -2);
@@ -1843,10 +1936,10 @@ index 0000000..4b23cc7
 +}
 diff --git a/overlay/source/monitor.hpp b/overlay/source/monitor.hpp
 new file mode 100644
-index 0000000..448af0d
+index 0000000..02c64c8
 --- /dev/null
 +++ b/overlay/source/monitor.hpp
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,51 @@
 +#pragma once
 +#include <switch.h>
 +
@@ -1895,6 +1988,9 @@ index 0000000..448af0d
 +
 +/* 取当前快照的副本。 */
 +void MonitorCopySnapshot(MonitorSnapshot *out);
++
++/* 诊断日志:写 sdmc:/config/ldn_mitm/monitor.log(UI 侧打点用)。 */
++void MonitorLog(const char *msg);
 -- 
 2.47.3
 
