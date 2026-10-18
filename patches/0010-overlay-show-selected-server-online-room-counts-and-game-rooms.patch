@@ -1,4 +1,4 @@
-From e3675429346a9e37fbdbb18e743145e170496b1d Mon Sep 17 00:00:00 2001
+From 3785818c49f7f4945d017e1b7080da44b1553af5 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
 Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
@@ -22,51 +22,55 @@ Content-Transfer-Encoding: 8bit
 - 每次点开 overlay(Overlay::onShow)与切换服务器时重新下载订阅并刷新
 - 后台线程刷新(libnx thread,不阻塞 UI),UI 按快照 version 重建列表
 - 域名解析用 getaddrinfo(libnx/newlib 无 gethostbyname);INADDR_NONE 兼容定义
-- CI 修复:libnx 2026-09-15 起 pgl API 整体改名(GetProcessEvent→GetShellEvent 系),
-  镜像自带/最新 libnx 均与本仓库 Atmosphere-libs(2026-04)不兼容导致
-  libstratosphere 编译失败;build/nightly/release 统一改为构建前固定安装
-  libnx dbcc1bea(改名前最后一个提交),移除失效的"装 libnx master 重试"兜底
+- CI 修复(适配最新系统):构建前把 Atmosphere-libs 顶到 master(与上游
+  nightly.yml 相同,跟踪 23.0.1+ 固件适配,否则插件在新系统启动报错),
+  并安装 libnx master 与其配套(新 pgl 命名);三个工作流统一此流程,
+  移除失效的"装 libnx master 重试"兜底与旧 pgl 固定
 - 参考 jieluojun/LanPlayMonitor 的服务器 API 口径(main.py)
 
 Reference: https://github.com/jieluojun/LanPlayMonitor
 ---
- .github/workflows/build.yml   |    7 +-
- .github/workflows/nightly.yml |   18 +-
- .github/workflows/release.yml |   18 +-
+ .github/workflows/build.yml   |   14 +-
+ .github/workflows/nightly.yml |   17 +-
+ .github/workflows/release.yml |   24 +-
  overlay/source/main.cpp       |  149 +++-
  overlay/source/monitor.cpp    | 1397 +++++++++++++++++++++++++++++++++
  overlay/source/monitor.hpp    |   48 ++
- 6 files changed, 1615 insertions(+), 22 deletions(-)
+ 6 files changed, 1628 insertions(+), 21 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
-index 55e5970..9248fcf 100644
+index 55e5970..304d75d 100644
 --- a/.github/workflows/build.yml
 +++ b/.github/workflows/build.yml
-@@ -38,11 +38,16 @@ jobs:
+@@ -38,8 +38,20 @@ jobs:
        - name: Setup ccache
          uses: hendrikmuhs/ccache-action@v1.2
  
 -      - name: Install latest libnx (before building)
-+      - name: Install pinned libnx (before building)
++      - name: update Atmosphere-libs (适配最新系统)
          run: |
-+          # Atmosphere-libs(2026-04)使用旧 pgl API(pglEventObserverGetProcessEvent 等);
-+          # libnx 2026-09-15(commit a13cd192)将其改名为 GetShellEvent 系,
-+          # "最新 libnx"与镜像自带 libnx 都与本仓库的 Atmosphere-libs 不兼容。
-+          # 固定到改名前最后一个提交 dbcc1bea(2026-05-04)。
++          # 与上游 nightly.yml 相同:构建前把 Atmosphere-libs 顶到 master,
++          # 跟踪最新系统固件适配(23.0.1+);不顶的话插件会在新系统上启动报错。
++          pushd Atmosphere-libs
++          git fetch --all
++          git reset --hard origin/master
++          popd
++
++      - name: Install libnx master (before building)
++        run: |
++          # 最新 Atmosphere-libs 使用 pgl 新命名(pglEventObserverGetShellEvent 系,
++          # libnx 2026-09-15 a13cd192 起),安装 libnx master 与其配套,
++          # 保证无论镜像自带 libnx 版本如何都能编译。
            pushd /tmp
            git clone https://github.com/switchbrew/libnx
            cd libnx
-+          git checkout dbcc1bea
-           make clean
-           make -j8 PREFIX="ccache aarch64-none-elf-"
-           make install
 diff --git a/.github/workflows/nightly.yml b/.github/workflows/nightly.yml
-index c53077f..6a34a2f 100644
+index c53077f..8751326 100644
 --- a/.github/workflows/nightly.yml
 +++ b/.github/workflows/nightly.yml
-@@ -37,22 +37,22 @@ jobs:
+@@ -37,22 +37,21 @@ jobs:
            git reset --hard origin/master
            popd
  
@@ -78,15 +82,14 @@ index c53077f..6a34a2f 100644
 -      - name: Install libnx master & Retry build
 -        id: retry
 -        if: ${{ steps.build.outcome == 'failure' }}
-+      - name: Install pinned libnx (before building)
++      - name: Install libnx master (before building)
          run: |
-+          # Atmosphere-libs(2026-04)使用旧 pgl API(pglEventObserverGetProcessEvent 等);
-+          # libnx 2026-09-15(commit a13cd192)将其改名为 GetShellEvent 系,
-+          # 镜像自带/最新 libnx 均不兼容,固定到改名前最后一个提交 dbcc1bea(2026-05-04)。
++          # 最新 Atmosphere-libs(上一步已顶到 master)使用 pgl 新命名
++          # (pglEventObserverGetShellEvent 系,libnx 2026-09-15 a13cd192 起),
++          # 安装 libnx master 与其配套,保证无论镜像自带 libnx 版本如何都能编译。
            pushd /tmp
            git clone https://github.com/switchbrew/libnx
            cd libnx
-+          git checkout dbcc1bea
            make -j8 PREFIX="ccache aarch64-none-elf-"
            make install
            popd
@@ -99,10 +102,10 @@ index c53077f..6a34a2f 100644
        - name: Upload built files
          uses: actions/upload-artifact@v7
 diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
-index 7f34343..4788da6 100644
+index 7f34343..b34daa5 100644
 --- a/.github/workflows/release.yml
 +++ b/.github/workflows/release.yml
-@@ -35,22 +35,22 @@ jobs:
+@@ -35,22 +35,30 @@ jobs:
      - name: Setup ccache
        uses: hendrikmuhs/ccache-action@v1.2
  
@@ -110,19 +113,26 @@ index 7f34343..4788da6 100644
 -      id: build
 -      run: make -j8 PREFIX="ccache aarch64-none-elf-"
 -      continue-on-error: true
--
++    - name: update Atmosphere-libs (适配最新系统)
++      run: |
++        # 与上游 nightly.yml 相同:构建前把 Atmosphere-libs 顶到 master,
++        # 跟踪最新系统固件适配(23.0.1+);不顶的话插件会在新系统上启动报错。
++        pushd Atmosphere-libs
++        git fetch --all
++        git reset --hard origin/master
++        popd
+ 
 -    - name: Install libnx master & Retry build
 -      id: retry
 -      if: ${{ steps.build.outcome == 'failure' }}
-+    - name: Install pinned libnx (before building)
++    - name: Install libnx master (before building)
        run: |
-+        # Atmosphere-libs(2026-04)使用旧 pgl API(pglEventObserverGetProcessEvent 等);
-+        # libnx 2026-09-15(commit a13cd192)将其改名为 GetShellEvent 系,
-+        # 镜像自带/最新 libnx 均不兼容,固定到改名前最后一个提交 dbcc1bea(2026-05-04)。
++        # 最新 Atmosphere-libs 使用 pgl 新命名(pglEventObserverGetShellEvent 系,
++        # libnx 2026-09-15 a13cd192 起),安装 libnx master 与其配套,
++        # 保证无论镜像自带 libnx 版本如何都能编译。
          pushd /tmp
          git clone https://github.com/switchbrew/libnx
          cd libnx
-+        git checkout dbcc1bea
          make -j8 PREFIX="ccache aarch64-none-elf-"
          make install
          popd
