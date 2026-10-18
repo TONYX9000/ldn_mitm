@@ -221,7 +221,10 @@ public:
 class AddServerGui : public tsl::Gui {
 public:
     virtual tsl::elm::Element* createUI() override {
-        auto frame = new tsl::elm::OverlayFrame(T("添加服务器", "新增伺服器"), g_brand);
+        // The subtitle doubles as a hint: entries are appended, so a re-added
+        // server lands at the bottom instead of its factory position.
+        auto frame = new tsl::elm::OverlayFrame(T("添加服务器", "新增伺服器"),
+                                                T("添加后排在最后", "新增後排在最後"));
         auto *list = new tsl::elm::List();
 
         u32 builtin = 0;
