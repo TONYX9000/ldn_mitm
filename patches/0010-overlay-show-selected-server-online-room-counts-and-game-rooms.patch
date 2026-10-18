@@ -1,4 +1,4 @@
-From 8948c19c300a45215e5cfad89063af41d7c969d7 Mon Sep 17 00:00:00 2001
+From e3675429346a9e37fbdbb18e743145e170496b1d Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
 Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
@@ -21,17 +21,119 @@ Content-Transfer-Encoding: 8bit
   (11452 广播,1.5s 收集,type 0x01/0x03 分片重组,RLE 解压 NetworkInfo)
 - 每次点开 overlay(Overlay::onShow)与切换服务器时重新下载订阅并刷新
 - 后台线程刷新(libnx thread,不阻塞 UI),UI 按快照 version 重建列表
+- 域名解析用 getaddrinfo(libnx/newlib 无 gethostbyname);INADDR_NONE 兼容定义
+- CI 修复:libnx 2026-09-15 起 pgl API 整体改名(GetProcessEvent→GetShellEvent 系),
+  镜像自带/最新 libnx 均与本仓库 Atmosphere-libs(2026-04)不兼容导致
+  libstratosphere 编译失败;build/nightly/release 统一改为构建前固定安装
+  libnx dbcc1bea(改名前最后一个提交),移除失效的"装 libnx master 重试"兜底
 - 参考 jieluojun/LanPlayMonitor 的服务器 API 口径(main.py)
 
 Reference: https://github.com/jieluojun/LanPlayMonitor
 ---
- overlay/source/main.cpp    |  149 +++-
- overlay/source/monitor.cpp | 1397 ++++++++++++++++++++++++++++++++++++
- overlay/source/monitor.hpp |   48 ++
- 3 files changed, 1591 insertions(+), 3 deletions(-)
+ .github/workflows/build.yml   |    7 +-
+ .github/workflows/nightly.yml |   18 +-
+ .github/workflows/release.yml |   18 +-
+ overlay/source/main.cpp       |  149 +++-
+ overlay/source/monitor.cpp    | 1397 +++++++++++++++++++++++++++++++++
+ overlay/source/monitor.hpp    |   48 ++
+ 6 files changed, 1615 insertions(+), 22 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index 55e5970..9248fcf 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -38,11 +38,16 @@ jobs:
+       - name: Setup ccache
+         uses: hendrikmuhs/ccache-action@v1.2
+ 
+-      - name: Install latest libnx (before building)
++      - name: Install pinned libnx (before building)
+         run: |
++          # Atmosphere-libs(2026-04)使用旧 pgl API(pglEventObserverGetProcessEvent 等);
++          # libnx 2026-09-15(commit a13cd192)将其改名为 GetShellEvent 系,
++          # "最新 libnx"与镜像自带 libnx 都与本仓库的 Atmosphere-libs 不兼容。
++          # 固定到改名前最后一个提交 dbcc1bea(2026-05-04)。
+           pushd /tmp
+           git clone https://github.com/switchbrew/libnx
+           cd libnx
++          git checkout dbcc1bea
+           make clean
+           make -j8 PREFIX="ccache aarch64-none-elf-"
+           make install
+diff --git a/.github/workflows/nightly.yml b/.github/workflows/nightly.yml
+index c53077f..6a34a2f 100644
+--- a/.github/workflows/nightly.yml
++++ b/.github/workflows/nightly.yml
+@@ -37,22 +37,22 @@ jobs:
+           git reset --hard origin/master
+           popd
+ 
+-      - name: Build
+-        id: build
+-        run: make -j8 PREFIX="ccache aarch64-none-elf-"
+-        continue-on-error: true
+-
+-      - name: Install libnx master & Retry build
+-        id: retry
+-        if: ${{ steps.build.outcome == 'failure' }}
++      - name: Install pinned libnx (before building)
+         run: |
++          # Atmosphere-libs(2026-04)使用旧 pgl API(pglEventObserverGetProcessEvent 等);
++          # libnx 2026-09-15(commit a13cd192)将其改名为 GetShellEvent 系,
++          # 镜像自带/最新 libnx 均不兼容,固定到改名前最后一个提交 dbcc1bea(2026-05-04)。
+           pushd /tmp
+           git clone https://github.com/switchbrew/libnx
+           cd libnx
++          git checkout dbcc1bea
+           make -j8 PREFIX="ccache aarch64-none-elf-"
+           make install
+           popd
+-          make -j8 PREFIX="ccache aarch64-none-elf-"
++
++      - name: Build
++        id: build
++        run: make -j8 PREFIX="ccache aarch64-none-elf-"
+ 
+       - name: Upload built files
+         uses: actions/upload-artifact@v7
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 7f34343..4788da6 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -35,22 +35,22 @@ jobs:
+     - name: Setup ccache
+       uses: hendrikmuhs/ccache-action@v1.2
+ 
+-    - name: Build
+-      id: build
+-      run: make -j8 PREFIX="ccache aarch64-none-elf-"
+-      continue-on-error: true
+-
+-    - name: Install libnx master & Retry build
+-      id: retry
+-      if: ${{ steps.build.outcome == 'failure' }}
++    - name: Install pinned libnx (before building)
+       run: |
++        # Atmosphere-libs(2026-04)使用旧 pgl API(pglEventObserverGetProcessEvent 等);
++        # libnx 2026-09-15(commit a13cd192)将其改名为 GetShellEvent 系,
++        # 镜像自带/最新 libnx 均不兼容,固定到改名前最后一个提交 dbcc1bea(2026-05-04)。
+         pushd /tmp
+         git clone https://github.com/switchbrew/libnx
+         cd libnx
++        git checkout dbcc1bea
+         make -j8 PREFIX="ccache aarch64-none-elf-"
+         make install
+         popd
+-        make -j8 PREFIX="ccache aarch64-none-elf-"
++
++    - name: Build
++      id: build
++      run: make -j8 PREFIX="ccache aarch64-none-elf-"
+ 
+     - name: Pack
+       run: |
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
 index 8e07c19..52a7130 100644
 --- a/overlay/source/main.cpp
