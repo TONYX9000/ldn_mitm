@@ -1,7 +1,7 @@
 From: Patch Port <port@local>
 Subject: [PATCH 00/10] 维护 TONYX9000 relay 分支移植补丁及 overlay 监视器
 
-本次继续维护现有补丁编号，不新增补丁：修复无 tag 构建时 overlay 版本串为空，并把 aylz10/ldn_mitm2 的
+本次继续维护现有补丁编号，不新增补丁：修复无 tag 构建时 overlay 版本串为空、修复 all-F 房间因本机 ProgramId 回退造成的标题错显，并把 aylz10/ldn_mitm2 的
 beta/bsd-broadcast-relay-TONYX9000 分支后续服务器管理改动合并进现有 0009/0010。
 
 0001–0009 为原分支 43 个提交整理出的 9 个逻辑补丁；0010 为既有的 overlay 联机监视器补丁。
@@ -9,7 +9,7 @@ beta/bsd-broadcast-relay-TONYX9000 分支后续服务器管理改动合并进现
 - 0002/0006：版本生成命令在没有可描述 tag 时回退到 commit 短哈希，并保留 -dirty 标记。
 - 0004/0008：保留服务器容量上限 32 与配置模板修改。
 - 0009：保留 PING 修复和精确的 13 条默认服务器配置；新增分支服务器管理 IPC、17 条内置候选目录与 idle 延迟预览。恢复默认仍是原有 13 条，selected=中国·河南；4 条备用候选只进入内置目录。荷兰名称保持“荷兰”/“荷兰(2)”。
-- 0010：整合添加/删除/恢复服务器页及列表重建/焦点恢复，同时保留 MonitorFrame、RoomRow、自绘 ServerRow、在线/房间间距、标题 ID 回退和 monitor.cpp 修正。
+- 0010：整合添加/删除/恢复服务器页及列表重建/焦点恢复，同时保留 MonitorFrame、RoomRow、自绘 ServerRow 和在线/房间间距；all-F `contentId` 按房间 advertiseData 识别五种已知游戏，未知时安全显示“未知游戏”，不以本机前台 ProgramId 标注远端房间。
 
 目标分支 tip：0b83cd3f17f14058d5fdabcdb7dec1faa13ede9d。
 为适配本仓库，仍不改 Atmosphere-libs 子模块指针；CI 相关改动继续放在既有 0010 内，不增加新编号。

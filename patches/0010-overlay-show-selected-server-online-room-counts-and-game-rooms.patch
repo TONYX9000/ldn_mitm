@@ -1,4 +1,4 @@
-From 03799130031a62ff30902580b16df541fec88977 Mon Sep 17 00:00:00 2001
+From 441d728ed37f2240ce5f0b29db9e76f09ac0ae0b Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH 10/10] overlay: online counts/room list and relay management
@@ -8,7 +8,7 @@ Content-Transfer-Encoding: 8bit
 
 联机监视器(0010):
 - 底部按键提示按系统语言显示「返回/确定」(覆盖 libtesla 的英文 Back/OK)
-- 部分游戏将 LDN LocalCommunicationId 写为 FFFFFFFFFFFFFFFF(auto sentinel);用 pm:dmnt 读取前台 ProgramId 作为游戏标题ID回退,失败时显示「未知游戏」
+- 部分游戏将 LDN LocalCommunicationId 写为 FFFFFFFFFFFFFFFF(auto sentinel);按每个房间自己的 advertiseData 识别 Dragon Ball FighterZ、Rocket League、MONSTER HUNTER RISE、Monster Hunter Stories 2 与 Minecraft 的标题 ID;未知模式安全显示「未知游戏」,不再用本机前台 ProgramId 误标远端房间
 - 标题下方两列统计:标签「在线/房间」在上、数字在下;刷新 1s 一次,
   与延迟 ping(sysmodule RelayPingIntervalMs)同节奏,仅可见时轮询,
   周期刷新不重拉订阅、不改目标
@@ -54,7 +54,7 @@ Content-Transfer-Encoding: 8bit
   RelayParseLine(\v \f 空白)/MonitorListRelayServers/ResolveSelectedServer
   (\v 行 noname 复现修复)/HttpsGet(curl stub)/LdnDecompress/
   ParseNetworkInfo/ParseRoomArray(玩家名/房主置顶/sessionId)/Http 解析/
-  DnsInitServers;chinese_db 流式解析 + 标题映射冒烟;FormatGameName(all-F sentinel -> active ProgramId)
+  DnsInitServers;chinese_db 流式解析 + 标题映射冒烟;FormatGameName(all-F sentinel -> room advertiseData);独立 monitor_title_resolver_test 覆盖已知/未知广告模式
 
 CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
 安装 switch-curl(订阅 HTTPS 下载)
@@ -92,23 +92,27 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
 
 本轮合并（仍在既有补丁 0010 内，不新增编号）：
 - 合入分支服务器管理页 AddServerGui、添加/删除/恢复默认操作、列表重建与焦点恢复；服务器列表继续使用 patch 10 的自绘 ServerRow，保留名称/地址布局、右侧延迟和在线/房间数字间距。
-- 监视器标题、RoomRow、MonitorFrame、所选服务器刷新与游戏标题 ID 回退完整保留；MonitorFrame 下方同时显示版本，空版本显示“版本未知”。
+- 监视器标题、RoomRow、MonitorFrame、所选服务器刷新与游戏标题识别完整保留；MonitorFrame 下方同时显示版本，空版本显示“版本未知”。
 - 最大容量统一为 32；默认服务器仍由 0009 的原 13 条配置恢复，4 条备用节点只在 17 条候选目录中。
-- 保留 monitor.cpp 新文件 hunk 的正确行数 2235，以及标题 ProgramId fallback 和用户此前确认的 UI 修改。
+- 在既有补丁 0010 内增加 room advertiseData 标题识别、UDP NetworkInfo 广告数据解析、旧 GraphQL schema 回退及纯主机回归测试；未识别 all-F 房间安全显示「未知游戏」，不读取本机 ProgramId。
 
 Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-TONYX9000
 ---
- .github/workflows/build.yml   |   20 +-
- .github/workflows/nightly.yml |   23 +-
- .github/workflows/release.yml |   30 +-
- Makefile                      |    6 +
- overlay/Makefile              |    9 +-
- overlay/source/main.cpp       | 1125 +++++++++++++++--
- overlay/source/monitor.cpp    | 2235 +++++++++++++++++++++++++++++++++
- overlay/source/monitor.hpp    |   71 ++
- 8 files changed, 3363 insertions(+), 156 deletions(-)
+ .github/workflows/build.yml                   |   20 +-
+ .github/workflows/nightly.yml                 |   23 +-
+ .github/workflows/release.yml                 |   30 +-
+ Makefile                                      |    6 +
+ overlay/Makefile                              |    9 +-
+ overlay/source/main.cpp                       | 1125 +++++++-
+ overlay/source/monitor.cpp                    | 2285 +++++++++++++++++
+ overlay/source/monitor.hpp                    |   71 +
+ overlay/source/monitor_title_resolver.hpp     |  148 ++
+ overlay/tests/monitor_title_resolver_test.cpp |   49 +
+ 10 files changed, 3610 insertions(+), 156 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
+ create mode 100644 overlay/source/monitor_title_resolver.hpp
+ create mode 100644 overlay/tests/monitor_title_resolver_test.cpp
 
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
 index 55e5970..abfa4a8 100644
@@ -1525,10 +1529,10 @@ index 8e07c19..4b78435 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..f52273c
+index 0000000..2c7b866
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2235 @@
+@@ -0,0 +1,2285 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -1538,6 +1542,7 @@ index 0000000..f52273c
 + *   LDN 主动扫描补房间(对应 LanPlayMonitor 的 active-udp-scan)。
 + */
 +#include "monitor.hpp"
++#include "monitor_title_resolver.hpp"
 +
 +#include <switch.h>
 +
@@ -1579,6 +1584,11 @@ index 0000000..f52273c
 +};
 +
 +static const char *kGraphqlQuery =
++    "query PublicRoomSnapshot { serverInfo { online idle } room {"
++    " sessionId contentId advertiseData hostPlayerName nodeCount nodeCountMax nodes { playerName } } }";
++
++/* 兼容较旧的 GraphQL schema:查询 advertiseData 失败时回退旧字段集。 */
++static const char *kGraphqlQueryLegacy =
 +    "query PublicRoomSnapshot { serverInfo { online idle } room {"
 +    " sessionId contentId hostPlayerName nodeCount nodeCountMax nodes { playerName } } }";
 +
@@ -2950,27 +2960,14 @@ index 0000000..f52273c
 +    MonitorRoom rooms[MONITOR_MAX_ROOMS];
 +};
 +
-+/* 部分游戏将 LDN LocalCommunicationId 设为全 1 sentinel;用前台进程 ProgramId 回退。
-+ * libtesla 已在 __appInit 初始化 pm:dmnt;服务不可用时调用方显示「未知游戏」。 */
-+static u64 ActiveApplicationProgramId() {
-+    static std::atomic<u64> cached{0};
-+    u64 id = cached.load(std::memory_order_acquire);
-+    if (id != 0)
-+        return id;
-+    u64 pid = 0;
-+    if (R_FAILED(pmdmntGetApplicationProcessId(&pid)) || pid == 0)
-+        return 0;
-+    if (R_FAILED(pmdmntGetProgramId(&id, pid)) ||
-+        id == 0 || id == ~static_cast<u64>(0))
-+        return 0;
-+    cached.store(id, std::memory_order_release);
-+    return id;
-+}
-+
-+static void FormatGameName(const char *contentId, char *out, size_t n) {
++/* Room-specific advertiseData resolves all-F communication-ID sentinels.
++ * Never substitute the local foreground ProgramId for a remote room: a server
++ * can list several games, and that fallback would mislabel every such room. */
++static void FormatGameName(const char *contentId, const char *advertiseData,
++                           const char *hostPlayerName, char *out, size_t n) {
 +    char up[20] = {};
 +    size_t len = 0;
-+    for (const char *p = contentId; *p && len < 16; p++) {
++    for (const char *p = contentId; p && *p && len < 16; p++) {
 +        char c = *p;
 +        if (c >= 'a' && c <= 'f') c = (char)(c - 'a' + 'A');
 +        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'))
@@ -2981,19 +2978,20 @@ index 0000000..f52273c
 +        snprintf(out, n, "%s", T_STR("未知游戏", "未知遊戲"));
 +        return;
 +    }
-+    /* FFFFFFFFFFFFFFFF is an auto-communication-ID sentinel in some games,
-+     * not the game's title ID. Resolve it from the foreground app process. */
++
 +    bool allOnes = true;
 +    for (size_t i = 0; i < 16; i++)
 +        allOnes &= (up[i] == 'F');
 +    if (allOnes) {
-+        u64 appId = ActiveApplicationProgramId();
-+        if (appId == 0) {
++        char resolved[20] = {};
++        if (!MonitorTitleResolver::ResolveAdvertisedTitleId(
++                advertiseData, hostPlayerName, resolved, sizeof(resolved))) {
 +            snprintf(out, n, "%s", T_STR("未知游戏", "未知遊戲"));
 +            return;
 +        }
-+        snprintf(up, sizeof(up), "%016llX", static_cast<unsigned long long>(appId));
++        snprintf(up, sizeof(up), "%s", resolved);
 +    }
++
 +    u64 key = TitleKeyPack(up);
 +    size_t nameLen = 0;
 +    const char *name = TitleLookup(key, &nameLen);
@@ -3013,8 +3011,14 @@ index 0000000..f52273c
 +        MonitorRoom &r = qr->rooms[qr->roomN];
 +        memset(&r, 0, sizeof(r));
 +        char cid[24] = {};
++        char advertiseData[MonitorTitleResolver::kAdvertiseDataMaxHex + 1] = {};
++        char hostName[MONITOR_PLAYER_LEN + 1] = {};
 +        JsonGetStrAny(p, "contentId", "content_id", cid, sizeof(cid));
-+        FormatGameName(cid, r.game, sizeof(r.game));
++        JsonGetStrAny(p, "advertiseData", "advertise_data",
++                      advertiseData, sizeof(advertiseData));
++        JsonGetStrAny(p, "hostPlayerName", "host_player_name",
++                      hostName, sizeof(hostName));
++        FormatGameName(cid, advertiseData, hostName, r.game, sizeof(r.game));
 +        JsonGetStrAny(p, "sessionId", "session_id", r.sessionId, sizeof(r.sessionId));
 +
 +        u32 v = 0;
@@ -3024,8 +3028,6 @@ index 0000000..f52273c
 +            r.playersMax = v;
 +
 +        /* 玩家名单:hostPlayerName 排最前(UI 异色),再收节点名 */
-+        char hostName[MONITOR_PLAYER_LEN] = {};
-+        JsonGetStrAny(p, "hostPlayerName", "host_player_name", hostName, sizeof(hostName));
 +        const char *nodes = JsonGet(p, "nodes");
 +        if (!nodes)
 +            nodes = JsonGet(p, "players");   /* rest 服务器的同义字段 */
@@ -3085,26 +3087,59 @@ index 0000000..f52273c
 +    }
 +}
 +
-+static bool QueryGraphql(const char *host, u16 port, QueryResult *qr) {
++static bool QueryGraphqlRequest(const char *host, u16 port, const char *query,
++                                QueryResult *qr, bool *retryLegacy) {
++    if (retryLegacy)
++        *retryLegacy = false;
 +    char url[160];
 +    snprintf(url, sizeof(url), "http://%s:%u/", host, (unsigned)port);
 +    std::string payload = "{\"query\":\"";
-+    payload += kGraphqlQuery;            /* 查询串无引号/反斜杠,可直接拼接 */
++    payload += query;                    /* 查询串无引号/反斜杠,可直接拼接 */
 +    payload += "\"}";
 +    std::string resp;
-+    if (!HttpPostJson(url, payload.c_str(), &resp, 6000, kMaxHttpBody))
++    if (!HttpPostJson(url, payload.c_str(), &resp, 6000, kMaxHttpBody)) {
++        /* g_httpErr >= 500 && < 600 表示 HTTP 4xx (错误码 = 100 + status);
++         * 这种响应可能是旧 schema 的字段校验错误,允许旧查询再试一次。 */
++        if (retryLegacy && g_httpErr >= 500 && g_httpErr < 600)
++            *retryLegacy = true;
 +        return false;
++    }
++
++    /* GraphQL 通常以 HTTP 200 返回字段校验错误;网络超时/断连则直接
++     * 交给 REST 回退,避免额外等待一个超时周期。 */
++    const char *errors = JsonGet(resp.c_str(), "errors");
++    if (errors && *errors == '[' && *JsWs(errors + 1) != ']') {
++        if (retryLegacy)
++            *retryLegacy = true;
++        return false;
++    }
 +    const char *data = JsonGet(resp.c_str(), "data");
-+    if (!data)
++    if (!data) {
++        if (retryLegacy)
++            *retryLegacy = true;
 +        return false;
++    }
 +    u32 v = 0;
 +    const char *info = JsonGet(data, "serverInfo");
-+    if (info && JsonGetU32(info, "online", &v))
-+        qr->online = (s32)v;
++    if (!info || !JsonGetU32(info, "online", &v)) {
++        if (retryLegacy)
++            *retryLegacy = true;
++        return false;
++    }
++    qr->online = (s32)v;
 +    const char *rooms = JsonGet(data, "room");
 +    if (rooms)
 +        ParseRoomArray(rooms, qr);
-+    return qr->online >= 0;
++    return true;
++}
++
++static bool QueryGraphql(const char *host, u16 port, QueryResult *qr) {
++    /* 主查询读取 room 自身的 advertiseData；旧 schema 校验失败时重试旧查询。 */
++    bool retryLegacy = false;
++    if (QueryGraphqlRequest(host, port, kGraphqlQuery, qr, &retryLegacy))
++        return true;
++    return retryLegacy &&
++           QueryGraphqlRequest(host, port, kGraphqlQueryLegacy, qr, nullptr);
 +}
 +
 +static bool QueryRest(const char *host, u16 port, QueryResult *qr) {
@@ -3169,7 +3204,26 @@ index 0000000..f52273c
 +    char cid[20];
 +    for (int i = 0; i < 8; i++)
 +        snprintf(cid + i * 2, 3, "%02X", p[7 - i]);   /* 小端 8 字节 -> 标题ID */
-+    FormatGameName(cid, out->game, sizeof(out->game));
++
++    /* NetworkInfo: advertiseDataSize @ 0x26a, data @ 0x26c; the first
++     * NodeInfo's playerName (host) starts at 0x74. */
++    char advertiseHex[MonitorTitleResolver::kAdvertiseDataMaxHex + 1] = {};
++    size_t advertiseSize = (size_t)p[0x26A] | ((size_t)p[0x26B] << 8);
++    if (advertiseSize > MonitorTitleResolver::kAdvertiseDataMaxBytes)
++        advertiseSize = MonitorTitleResolver::kAdvertiseDataMaxBytes;
++    if (0x26C + advertiseSize > len)
++        advertiseSize = 0;
++    static const char kHex[] = "0123456789abcdef";
++    for (size_t i = 0; i < advertiseSize; i++) {
++        const u8 byte = p[0x26C + i];
++        advertiseHex[i * 2] = kHex[byte >> 4];
++        advertiseHex[i * 2 + 1] = kHex[byte & 0x0F];
++    }
++    char hostName[MONITOR_PLAYER_LEN + 1] = {};
++    memcpy(hostName, p + 0x74, MONITOR_PLAYER_LEN);
++    hostName[MONITOR_PLAYER_LEN] = 0;
++    FormatGameName(cid, advertiseHex, hostName, out->game, sizeof(out->game));
++
 +    u32 maxN = p[0x66];
 +    u32 cnt = p[0x67];
 +    if (maxN > 8) maxN = 8;
@@ -3841,6 +3895,215 @@ index 0000000..6d32143
 +
 +/* 诊断日志:写 sdmc:/config/ldn_mitm/monitor.log(UI 侧打点用)。 */
 +void MonitorLog(const char *msg);
+diff --git a/overlay/source/monitor_title_resolver.hpp b/overlay/source/monitor_title_resolver.hpp
+new file mode 100644
+index 0000000..d0ac8cc
+--- /dev/null
++++ b/overlay/source/monitor_title_resolver.hpp
+@@ -0,0 +1,148 @@
++#pragma once
++
++#include <stddef.h>
++#include <string.h>
++
++/* Resolve title IDs for games whose LDN contentId is the all-F sentinel.
++ * advertiseData is the room's own hexadecimal LDN payload; no local process
++ * state is used, so rooms from different games cannot inherit the foreground
++ * application's title by accident. */
++namespace MonitorTitleResolver {
++
++static constexpr size_t kAdvertiseDataMaxBytes = 384;
++static constexpr size_t kAdvertiseDataMaxHex = kAdvertiseDataMaxBytes * 2;
++
++inline int HexDigit(char c) {
++    if (c >= '0' && c <= '9')
++        return c - '0';
++    if (c >= 'a' && c <= 'f')
++        return c - 'a' + 10;
++    if (c >= 'A' && c <= 'F')
++        return c - 'A' + 10;
++    return -1;
++}
++
++inline bool NormalizeAdvertiseHex(const char *src, char *out, size_t outN,
++                                  size_t *outLen) {
++    if (outLen)
++        *outLen = 0;
++    if (!src || !out || outN == 0)
++        return false;
++
++    size_t len = 0;
++    for (const char *p = src; *p; ++p) {
++        const int digit = HexDigit(*p);
++        if (digit >= 0) {
++            if (len + 1 >= outN) {
++                out[0] = 0;
++                return false;
++            }
++            out[len++] = "0123456789abcdef"[digit];
++        } else if (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' ||
++                   *p == ':' || *p == '-') {
++            continue;
++        } else {
++            out[0] = 0;
++            return false;
++        }
++    }
++    out[len] = 0;
++    if (outLen)
++        *outLen = len;
++    return len != 0 && (len & 1) == 0;
++}
++
++inline bool HexSpanContains(const char *begin, const char *end,
++                            const char *needle) {
++    if (!begin || !end || !needle || end < begin)
++        return false;
++    const size_t needleLen = strlen(needle);
++    const size_t spanLen = (size_t)(end - begin);
++    if (needleLen == 0)
++        return true;
++    if (needleLen > spanLen)
++        return false;
++    for (size_t i = 0; i + needleLen <= spanLen; ++i) {
++        if (memcmp(begin + i, needle, needleLen) == 0)
++            return true;
++    }
++    return false;
++}
++
++inline bool CopyTitleId(const char *titleId, char *out, size_t outN) {
++    if (!titleId || !out || outN < 17)
++        return false;
++    memcpy(out, titleId, 17);
++    return true;
++}
++
++/* Returns false when the advertisement is absent or does not match a known
++ * signature. The caller must then show the safe unknown-game fallback. */
++inline bool ResolveAdvertisedTitleId(const char *advertiseData,
++                                     const char *hostPlayerName,
++                                     char *outTitleId, size_t outN) {
++    if (outTitleId && outN > 0)
++        outTitleId[0] = 0;
++    if (!outTitleId || outN < 17)
++        return false;
++
++    char hex[kAdvertiseDataMaxHex + 1] = {};
++    size_t hexLen = 0;
++    if (!NormalizeAdvertiseHex(advertiseData, hex, sizeof(hex), &hexLen))
++        return false;
++
++    /* DRAGON BALL FighterZ: advertiseData == ffff0000. */
++    if (hexLen == 8 && strcmp(hex, "ffff0000") == 0)
++        return CopyTitleId("0100A250097F0000", outTitleId, outN);
++
++    /* Rocket League advertises a JSON object (7b = '{', 7d = '}'). */
++    if (hexLen >= 4 && hex[0] == '7' && hex[1] == 'b' &&
++        hex[hexLen - 2] == '7' && hex[hexLen - 1] == 'd')
++        return CopyTitleId("01005EE0036EC000", outTitleId, outN);
++
++    static const char kDelimiter[] = "00000004";
++    const size_t delimiterLen = sizeof(kDelimiter) - 1;
++    size_t delimiterCount = 0;
++    for (const char *p = hex; (p = strstr(p, kDelimiter)) != nullptr;
++         p += delimiterLen)
++        ++delimiterCount;
++    const char *firstDelimiter = strstr(hex, kDelimiter);
++    const char *firstPartEnd = firstDelimiter ? firstDelimiter : hex + hexLen;
++
++    /* MONSTER HUNTER RISE has player/rank sections after two delimiters. */
++    if (delimiterCount >= 2 &&
++        HexSpanContains(hex, firstPartEnd, "0000000008100000") &&
++        HexSpanContains(hex, firstPartEnd, "8b9000"))
++        return CopyTitleId("0100B04011742000", outTitleId, outN);
++
++    /* Monster Hunter Stories 2 shares the common prefix, but has 0a0000. */
++    if (HexSpanContains(hex, firstPartEnd, "0000000008100000") &&
++        HexSpanContains(hex, firstPartEnd, "0a0000"))
++        return CopyTitleId("0100E21011446000", outTitleId, outN);
++
++    /* Minecraft stores the host name as UTF-8 starting at hex offset 32. */
++    if (hostPlayerName && hostPlayerName[0] && hexLen > 32 &&
++        ((hexLen - 32) & 1) == 0) {
++        char decoded[96] = {};
++        size_t decodedLen = 0;
++        for (size_t i = 32; i + 1 < hexLen; i += 2) {
++            const int hi = HexDigit(hex[i]);
++            const int lo = HexDigit(hex[i + 1]);
++            if (hi < 0 || lo < 0)
++                return false;
++            const unsigned char byte = (unsigned char)((hi << 4) | lo);
++            if (byte == 0)
++                break;
++            if (decodedLen + 1 >= sizeof(decoded))
++                return false;
++            decoded[decodedLen++] = (char)byte;
++        }
++        decoded[decodedLen] = 0;
++        if (decodedLen != 0 && strcmp(decoded, hostPlayerName) == 0)
++            return CopyTitleId("0100D71004694000", outTitleId, outN);
++    }
++
++    return false;
++}
++
++} // namespace MonitorTitleResolver
+diff --git a/overlay/tests/monitor_title_resolver_test.cpp b/overlay/tests/monitor_title_resolver_test.cpp
+new file mode 100644
+index 0000000..f716702
+--- /dev/null
++++ b/overlay/tests/monitor_title_resolver_test.cpp
+@@ -0,0 +1,49 @@
++#include "../source/monitor_title_resolver.hpp"
++
++#include <assert.h>
++#include <string.h>
++
++using MonitorTitleResolver::ResolveAdvertisedTitleId;
++
++static void ExpectResolved(const char *advertiseData, const char *hostName,
++                          const char *expectedTitleId) {
++    char titleId[17] = {};
++    assert(ResolveAdvertisedTitleId(advertiseData, hostName,
++                                    titleId, sizeof(titleId)));
++    assert(strcmp(titleId, expectedTitleId) == 0);
++}
++
++static void ExpectUnresolved(const char *advertiseData, const char *hostName) {
++    char titleId[17] = "not-a-title-id";
++    assert(!ResolveAdvertisedTitleId(advertiseData, hostName,
++                                     titleId, sizeof(titleId)));
++    assert(titleId[0] == 0);
++}
++
++int main() {
++    ExpectResolved("ffff0000", nullptr, "0100A250097F0000");
++    ExpectResolved("7b7d", nullptr, "01005EE0036EC000");
++    ExpectResolved("00000000081000008b9000"
++                   "00000004"
++                   "1234"
++                   "00000004"
++                   "5678",
++                   nullptr, "0100B04011742000");
++    ExpectResolved("00000000081000000a0000"
++                   "00000004"
++                   "1234",
++                   nullptr, "0100E21011446000");
++    ExpectResolved("00112233445566778899aabbccddeeff4d6961", "Mia",
++                   "0100D71004694000");
++
++    /* Case/spacing normalization is harmless, while partial signatures are
++     * not promoted to a title. Unknown sentinels must remain unknown. */
++    ExpectResolved("FF FF 00 00", nullptr, "0100A250097F0000");
++    ExpectUnresolved("00000000081000008b9000"
++                     "00000004"
++                     "1234",
++                     nullptr); // Rise signature is missing its second delimiter.
++    ExpectUnresolved("00112233445566778899aabbccddeeff4d6961", "Not-Mia");
++    ExpectUnresolved("11223344", nullptr);
++    return 0;
++}
 -- 
 2.47.3
 

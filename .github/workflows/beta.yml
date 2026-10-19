@@ -118,6 +118,12 @@ jobs:
           make install
           popd
 
+      - name: Install switch-curl (订阅 HTTPS 下载)
+        run: |
+          # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
+          # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
+          dkp-pacman -Sy --noconfirm switch-curl
+
       - name: Build
         id: build
         run: make -j8 PREFIX="ccache aarch64-none-elf-"
