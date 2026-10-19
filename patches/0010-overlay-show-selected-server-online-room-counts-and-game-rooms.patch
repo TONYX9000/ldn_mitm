@@ -11,6 +11,7 @@ Content-Transfer-Encoding: 8bit
 
 联机监视器(0010):
 - 底部按键提示按系统语言显示「返回/确定」(覆盖 libtesla 的英文 Back/OK)
+- 部分游戏将 LDN LocalCommunicationId 写为 FFFFFFFFFFFFFFFF(auto sentinel);用 pm:dmnt 读取前台 ProgramId 作为游戏标题ID回退,失败时显示「未知游戏」
 - 标题下方两列统计:标签「在线/房间」在上、数字在下;刷新 1s 一次,
   与延迟 ping(sysmodule RelayPingIntervalMs)同节奏,仅可见时轮询,
   周期刷新不重拉订阅、不改目标
@@ -57,7 +58,7 @@ Content-Transfer-Encoding: 8bit
   RelayParseLine(\v \f 空白)/MonitorListRelayServers/ResolveSelectedServer
   (\v 行 noname 复现修复)/HttpsGet(curl stub)/LdnDecompress/
   ParseNetworkInfo/ParseRoomArray(玩家名/房主置顶/sessionId)/Http 解析/
-  DnsInitServers;chinese_db 流式解析 + 标题映射冒烟
+  DnsInitServers;chinese_db 流式解析 + 标题映射冒烟;FormatGameName(all-F sentinel -> active ProgramId)
 
 CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
 安装 switch-curl(订阅 HTTPS 下载)
@@ -97,11 +98,10 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
  .github/workflows/release.yml |   30 -
  Makefile                      |    6
  overlay/Makefile              |    9
- overlay/source/main.cpp       |  668 ++++++++++++
- overlay/source/monitor.cpp    | 2205 +++++++++++++++++++++++++++++++++++++++++
+ overlay/source/main.cpp       |  668 +++++++++++-
+ overlay/source/monitor.cpp    | 2234 +++++++++++++++++++++++++++++++++++++++++
  overlay/source/monitor.hpp    |   71 +
- 8 files changed, 2967 insertions(+), 65 deletions(-)
-
+ 8 files changed, 2996 insertions(+), 65 deletions(-)
 
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
 index 55e5970..abfa4a8 100644
@@ -1072,7 +1072,7 @@ new file mode 100644
 index 0000000..70189b4
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2205 @@
+@@ -0,0 +1,2234 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -2494,6 +2494,23 @@ index 0000000..70189b4
 +    MonitorRoom rooms[MONITOR_MAX_ROOMS];
 +};
 +
++/* 部分游戏将 LDN LocalCommunicationId 设为全 1 sentinel;用前台进程 ProgramId 回退。
++ * libtesla 已在 __appInit 初始化 pm:dmnt;服务不可用时调用方显示「未知游戏」。 */
++static u64 ActiveApplicationProgramId() {
++    static std::atomic<u64> cached{0};
++    u64 id = cached.load(std::memory_order_acquire);
++    if (id != 0)
++        return id;
++    u64 pid = 0;
++    if (R_FAILED(pmdmntGetApplicationProcessId(&pid)) || pid == 0)
++        return 0;
++    if (R_FAILED(pmdmntGetProgramId(&id, pid)) ||
++        id == 0 || id == ~static_cast<u64>(0))
++        return 0;
++    cached.store(id, std::memory_order_release);
++    return id;
++}
++
 +static void FormatGameName(const char *contentId, char *out, size_t n) {
 +    char up[20] = {};
 +    size_t len = 0;
@@ -2507,6 +2524,19 @@ index 0000000..70189b4
 +    if (len != 16) {
 +        snprintf(out, n, "%s", T_STR("未知游戏", "未知遊戲"));
 +        return;
++    }
++    /* FFFFFFFFFFFFFFFF is an auto-communication-ID sentinel in some games,
++     * not the game's title ID. Resolve it from the foreground app process. */
++    bool allOnes = true;
++    for (size_t i = 0; i < 16; i++)
++        allOnes &= (up[i] == 'F');
++    if (allOnes) {
++        u64 appId = ActiveApplicationProgramId();
++        if (appId == 0) {
++            snprintf(out, n, "%s", T_STR("未知游戏", "未知遊戲"));
++            return;
++        }
++        snprintf(up, sizeof(up), "%016llX", static_cast<unsigned long long>(appId));
 +    }
 +    u64 key = TitleKeyPack(up);
 +    size_t nameLen = 0;
