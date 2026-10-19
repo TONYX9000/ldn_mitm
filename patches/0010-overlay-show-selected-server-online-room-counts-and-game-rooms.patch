@@ -1,4 +1,4 @@
-From 1de807482ac0c2bdc5c90598d76b20db482ffdb6 Mon Sep 17 00:00:00 2001
+From 793409dea14e81aa97ad87f07259ab7eda989c2e Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH] overlay: online counts/room list and relay management
@@ -107,6 +107,11 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
 - build/nightly/release 原先无条件运行 dkp-pacman -Sy --noconfirm switch-curl；日志显示 dkp-libs.db 与 dkp-linux.db 返回 403，失败发生在编译启动之前，并非 C++ 编译错误。
 - 先查询 switch-curl 是否已安装；若数据库刷新失败，继续尝试使用镜像缓存数据库安装；最后用 dkp-pacman -Q 验证依赖确实存在，否则明确报缺失并停止，不吞掉真实依赖错误。
 - 三个 workflow 的 YAML 解析与 shell 分支均以 mock 测过：已安装、403 后缓存安装成功、正常刷新安装成功、依赖缺失时清楚失败。
+
+玩家名单切服串台修复（截图反馈）：
+- 对照 slp-server-rust 的 GraphQL NodeInfo，nodes 同时含 player_name 与 is_connected；旧 overlay 只查询 playerName，并把所有非空节点名都加入房间名单，可能把节点槽里已断开的旧昵称显示出来，造成 1/6 却出现多个名字。
+- 主查询增加 isConnected 字段；解析按 connected=true 过滤，去重，并在服务端给出 nodeCount 时以该计数限制名字数。为兼容旧 schema 增加逐级字段回退；旧 schema 没有连接标记时维持原行为。
+- 切换服务器时立即清掉 worker 房间缓存与已发布快照，避免新查询完成前显示上一服务器的名单；新增纯主机测试覆盖 true/false/null/缺字段。
 ---
  .github/workflows/build.yml                   |   34 +-
  .github/workflows/nightly.yml                 |   37 +-
@@ -114,14 +119,18 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
  Makefile                                      |    6 +
  overlay/Makefile                              |    9 +-
  overlay/source/main.cpp                       | 1125 +++++++-
- overlay/source/monitor.cpp                    | 2305 +++++++++++++++++
+ overlay/source/monitor.cpp                    | 2363 +++++++++++++++++
  overlay/source/monitor.hpp                    |   71 +
+ overlay/source/monitor_player_filter.hpp      |   24 +
  overlay/source/monitor_title_resolver.hpp     |  148 ++
+ overlay/tests/monitor_player_filter_test.cpp  |   21 +
  overlay/tests/monitor_title_resolver_test.cpp |   49 +
- 10 files changed, 3672 insertions(+), 156 deletions(-)
+ 12 files changed, 3775 insertions(+), 156 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
+ create mode 100644 overlay/source/monitor_player_filter.hpp
  create mode 100644 overlay/source/monitor_title_resolver.hpp
+ create mode 100644 overlay/tests/monitor_player_filter_test.cpp
  create mode 100644 overlay/tests/monitor_title_resolver_test.cpp
 
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
@@ -1581,10 +1590,10 @@ index 8e07c19..4b78435 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..7e8b9aa
+index 0000000..79381ad
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2305 @@
+@@ -0,0 +1,2363 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -1595,6 +1604,7 @@ index 0000000..7e8b9aa
 + */
 +#include "monitor.hpp"
 +#include "monitor_title_resolver.hpp"
++#include "monitor_player_filter.hpp"
 +
 +#include <switch.h>
 +
@@ -1638,12 +1648,24 @@ index 0000000..7e8b9aa
 +
 +static const char *kGraphqlQuery =
 +    "query PublicRoomSnapshot { serverInfo { online idle } room {"
-+    " sessionId contentId advertiseData hostPlayerName nodeCount nodeCountMax nodes { playerName } } }";
++    " sessionId contentId advertiseData hostPlayerName nodeCount nodeCountMax"
++    " nodes { playerName isConnected } } }";
 +
-+/* 兼容较旧的 GraphQL schema:查询 advertiseData 失败时回退旧字段集。 */
-+static const char *kGraphqlQueryLegacy =
++/* Query variants keep older custom GraphQL schemas working while preferring
++ * both per-room title data and NodeInfo.isConnected. The latter is essential:
++ * servers may retain names in disconnected node slots. */
++static const char *kGraphqlQueryNoAdvert =
 +    "query PublicRoomSnapshot { serverInfo { online idle } room {"
-+    " sessionId contentId hostPlayerName nodeCount nodeCountMax nodes { playerName } } }";
++    " sessionId contentId hostPlayerName nodeCount nodeCountMax"
++    " nodes { playerName isConnected } } }";
++static const char *kGraphqlQueryNoConnection =
++    "query PublicRoomSnapshot { serverInfo { online idle } room {"
++    " sessionId contentId advertiseData hostPlayerName nodeCount nodeCountMax"
++    " nodes { playerName } } }";
++static const char *kGraphqlQueryOldest =
++    "query PublicRoomSnapshot { serverInfo { online idle } room {"
++    " sessionId contentId hostPlayerName nodeCount nodeCountMax"
++    " nodes { playerName } } }";
 +
 +static const char *kSaveDir         = "sdmc:/config/ldn_mitm";
 +static const char *kSaveChinesePath = "sdmc:/config/ldn_mitm/chinese_db.json";
@@ -3075,7 +3097,9 @@ index 0000000..7e8b9aa
 +        JsonGetStrAny(p, "sessionId", "session_id", r.sessionId, sizeof(r.sessionId));
 +
 +        u32 v = 0;
-+        if (JsonGetU32(p, "nodeCount", &v) || JsonGetU32(p, "node_count", &v))
++        const bool hasPlayerCount =
++            JsonGetU32(p, "nodeCount", &v) || JsonGetU32(p, "node_count", &v);
++        if (hasPlayerCount)
 +            r.players = v;
 +        if (JsonGetU32(p, "nodeCountMax", &v) || JsonGetU32(p, "node_count_max", &v))
 +            r.playersMax = v;
@@ -3091,11 +3115,23 @@ index 0000000..7e8b9aa
 +                if (!next)
 +                    break;
 +                if (*q == '{') {
-+                    char nm[MONITOR_PLAYER_LEN] = {};
-+                    if (JsonGetStrAny(q, "playerName", "player_name", nm, sizeof(nm)) ||
-+                        JsonGetStr(q, "name", nm, sizeof(nm))) {
-+                        if (nm[0])
-+                            snprintf(r.player[r.playerN++], MONITOR_PLAYER_LEN, "%s", nm);
++                    const char *connected = JsonGet(q, "isConnected");
++                    if (!connected)
++                        connected = JsonGet(q, "is_connected");
++                    if (MonitorPlayerFilter::IncludeNode(connected != nullptr, connected)) {
++                        char nm[MONITOR_PLAYER_LEN] = {};
++                        if (JsonGetStrAny(q, "playerName", "player_name", nm, sizeof(nm)) ||
++                            JsonGetStr(q, "name", nm, sizeof(nm))) {
++                            bool dup = false;
++                            for (u8 i = 0; i < r.playerN; i++) {
++                                if (strcmp(r.player[i], nm) == 0) {
++                                    dup = true;
++                                    break;
++                                }
++                            }
++                            if (nm[0] && !dup)
++                                snprintf(r.player[r.playerN++], MONITOR_PLAYER_LEN, "%s", nm);
++                        }
 +                    }
 +                } else if (*q == '"') {
 +                    char nm[MONITOR_PLAYER_LEN] = {};
@@ -3121,6 +3157,14 @@ index 0000000..7e8b9aa
 +                snprintf(r.player[0], MONITOR_PLAYER_LEN, "%s", hostName);
 +                r.playerN++;
 +            }
++        }
++        /* The server's count is authoritative. A short-lived/stale nodes array
++         * must not display more names than nodeCount says are connected. */
++        if (hasPlayerCount && r.players > 0 && r.playerN > r.players) {
++            const u8 keep = static_cast<u8>(r.players);
++            for (u8 i = keep; i < r.playerN; i++)
++                memset(r.player[i], 0, MONITOR_PLAYER_LEN);
++            r.playerN = keep;
 +        }
 +        /* 人数兜底放到房主处理之后:房主若不在 nodes 里也计入人数 */
 +        if (r.players == 0)
@@ -3187,12 +3231,26 @@ index 0000000..7e8b9aa
 +}
 +
 +static bool QueryGraphql(const char *host, u16 port, QueryResult *qr) {
-+    /* 主查询读取 room 自身的 advertiseData；旧 schema 校验失败时重试旧查询。 */
-+    bool retryLegacy = false;
-+    if (QueryGraphqlRequest(host, port, kGraphqlQuery, qr, &retryLegacy))
++    /* Prefer title data + connected-node flags. On schema validation errors,
++     * progressively drop optional fields; transport errors still go straight
++     * to REST rather than paying for another timeout. */
++    bool retry = false;
++    if (QueryGraphqlRequest(host, port, kGraphqlQuery, qr, &retry))
 +        return true;
-+    return retryLegacy &&
-+           QueryGraphqlRequest(host, port, kGraphqlQueryLegacy, qr, nullptr);
++    if (!retry)
++        return false;
++
++    const char *fallback[] = { kGraphqlQueryNoAdvert,
++                               kGraphqlQueryNoConnection,
++                               kGraphqlQueryOldest };
++    for (const char *query : fallback) {
++        bool retryNext = false;
++        if (QueryGraphqlRequest(host, port, query, qr, &retryNext))
++            return true;
++        if (!retryNext)
++            return false;
++    }
++    return false;
 +}
 +
 +static bool QueryRest(const char *host, u16 port, QueryResult *qr) {
@@ -3662,12 +3720,21 @@ index 0000000..7e8b9aa
 +                 name[0] ? name : (host[0] ? host : "?"));
 +    }
 +
-+    /* 服务器身份变化:旧服务器的房间/统计缓存整体作废,避免串台。 */
++    /* Server switch: invalidate both the worker cache and the published
++     * snapshot immediately, so the UI cannot show the previous server's names
++     * while the new endpoint is being queried. */
 +    {
 +        char ident[128];
 +        snprintf(ident, sizeof(ident), "%s:%u", host, (unsigned)port);
-+        if (strcmp(ident, g_cacheServer) != 0)
++        if (strcmp(ident, g_cacheServer) != 0) {
 +            RoomCacheReset();
++            std::scoped_lock lk(g_mutex);
++            g_snap.online = -1;
++            g_snap.roomCount = -1;
++            g_snap.roomN = 0;
++            memset(g_snap.rooms, 0, sizeof(g_snap.rooms));
++            g_snap.version++;
++        }
 +        snprintf(g_cacheServer, sizeof(g_cacheServer), "%s", ident);
 +    }
 +
@@ -3967,6 +4034,36 @@ index 0000000..6d32143
 +
 +/* 诊断日志:写 sdmc:/config/ldn_mitm/monitor.log(UI 侧打点用)。 */
 +void MonitorLog(const char *msg);
+diff --git a/overlay/source/monitor_player_filter.hpp b/overlay/source/monitor_player_filter.hpp
+new file mode 100644
+index 0000000..3f79220
+--- /dev/null
++++ b/overlay/source/monitor_player_filter.hpp
+@@ -0,0 +1,24 @@
++#pragma once
++
++#include <cstring>
++
++namespace MonitorPlayerFilter {
++
++/* Missing connection flags mean an older schema/REST shape: preserve its
++ * previous behavior. If the field is present, only an explicit JSON true is
++ * considered an occupied node; false/null/invalid values are stale slots. */
++inline bool IncludeNode(bool hasConnectionFlag, const char *value) {
++    if (!hasConnectionFlag)
++        return true;
++    if (!value)
++        return false;
++    while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n')
++        ++value;
++    if (std::strncmp(value, "true", 4) != 0)
++        return false;
++    const char next = value[4];
++    return next == '\0' || next == ',' || next == '}' || next == ']' ||
++           next == ' ' || next == '\t' || next == '\r' || next == '\n';
++}
++
++} // namespace MonitorPlayerFilter
 diff --git a/overlay/source/monitor_title_resolver.hpp b/overlay/source/monitor_title_resolver.hpp
 new file mode 100644
 index 0000000..d0ac8cc
@@ -4121,6 +4218,33 @@ index 0000000..d0ac8cc
 +}
 +
 +} // namespace MonitorTitleResolver
+diff --git a/overlay/tests/monitor_player_filter_test.cpp b/overlay/tests/monitor_player_filter_test.cpp
+new file mode 100644
+index 0000000..f1576c9
+--- /dev/null
++++ b/overlay/tests/monitor_player_filter_test.cpp
+@@ -0,0 +1,21 @@
++#include "../source/monitor_player_filter.hpp"
++
++#include <cassert>
++
++int main() {
++    using MonitorPlayerFilter::IncludeNode;
++
++    /* Older schemas without the optional field retain their name list. */
++    assert(IncludeNode(false, nullptr));
++    assert(IncludeNode(false, "false"));
++
++    /* Current GraphQL/REST schemas include only live nodes. */
++    assert(IncludeNode(true, "true"));
++    assert(IncludeNode(true, " true ,"));
++    assert(!IncludeNode(true, "false"));
++    assert(!IncludeNode(true, "false}"));
++    assert(!IncludeNode(true, "null"));
++    assert(!IncludeNode(true, nullptr));
++    assert(!IncludeNode(true, "trueish"));
++    return 0;
++}
 diff --git a/overlay/tests/monitor_title_resolver_test.cpp b/overlay/tests/monitor_title_resolver_test.cpp
 new file mode 100644
 index 0000000..f716702
