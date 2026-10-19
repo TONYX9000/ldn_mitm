@@ -1,6 +1,7 @@
 #define TESLA_INIT_IMPL // If you have more than one file using the tesla header, only define this in the main one
 #include <tesla.hpp>    // The Tesla Header
 #include "ldn.h"
+#include "monitor.hpp"  // 房间/在线人数监控（Zero, GPL-2.0）
 #include <vector>
 
 enum class State {
@@ -65,6 +66,34 @@ static int g_focus_retries = 0;
 static bool g_main_list_dirty = false;
 static tsl::elm::ListItem *g_addServerItem = nullptr;
 
+/* --- 房间监控 ---------------------------------------------------------
+   数据抓取在 monitor.cpp 的后台线程里完成，UI 只拷贝快照。
+   GPL-2.0, 来自 Zero（jieluojun/ldn_mitm）的 patch 0010；保留署名与鸣谢。 */
+static bool g_monitor_inited = false;
+static u32 g_monitor_version = 0xFFFFFFFFu;
+static u64 g_monitor_last_poll = 0;
+static tsl::elm::ListItem *g_roomSummaryItem = nullptr;
+
+static void EnsureMonitor() {
+    if (g_monitor_inited) {
+        return;
+    }
+    g_monitor_inited = true;
+    MonitorInit();
+    MonitorInitSockets();
+    MonitorSetTraditional(g_isTraditional);
+}
+
+static void GetSelectedServerName(char *out, size_t n) {
+    out[0] = '\0';
+    u32 sel = 0;
+    if (R_SUCCEEDED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &sel))) {
+        char name[32] = {};
+        ldnMitmGetRelayServerName(&g_ldnConfig, sel, name);
+        snprintf(out, n, "%s", name);
+    }
+}
+
 static void buildList(tsl::elm::List *list);
 static void rebuildUi();
 
@@ -123,6 +152,16 @@ public:
         g_list = new RebuildList();
         buildList(g_list);
 
+        // 房间监控：启动后台线程，并向选中的服务器请求一次刷新。
+        // 首帧数据可能还没回来，房间行先显示「查询中…」。
+        EnsureMonitor();
+        MonitorSetTraditional(g_isTraditional);
+        {
+            char sel[32] = {};
+            GetSelectedServerName(sel, sizeof(sel));
+            MonitorRequestRefresh(sel);
+        }
+
         frame->setContent(g_list);
 
         // Every item was just created with a bare "*". Force the first
@@ -137,6 +176,29 @@ public:
 
     // Called once every frame to update values
     virtual void update() override {
+        // 房间摘要：每 5 秒轮询一次；快照版本变化时刷新右侧文字。
+        {
+            const u64 now = svcGetSystemTick();
+            if (now - g_monitor_last_poll >= 5ull * 19200000ull) {
+                g_monitor_last_poll = now;
+                MonitorRequestPoll();
+            }
+            static MonitorSnapshot msnap = {};
+            MonitorCopySnapshot(&msnap);
+            if (msnap.version != g_monitor_version && g_roomSummaryItem != nullptr) {
+                g_monitor_version = msnap.version;
+                char v[48];
+                if (msnap.online >= 0) {
+                    snprintf(v, sizeof(v), T("在线 %d · %d 间", "線上 %d · %d 間"),
+                             msnap.online, msnap.roomCount);
+                    g_roomSummaryItem->setValue(v);
+                } else {
+                    g_roomSummaryItem->setValue(
+                        msnap.busy ? T("查询中…", "查詢中…") : T("--", "--"), true);
+                }
+            }
+        }
+
         // Coming back from the add page: the relay list changed while this
         // Gui sat underneath it, so rebuild now that it is on top again.
         if (g_main_list_dirty) {
@@ -301,6 +363,80 @@ public:
 };
 
 
+/* 房间列表页：显示当前中继服务器的在线人数与游戏房间。
+   数据来自 monitor 模块，每 5 秒轮询一次；列表在快照版本变化时重建。 */
+class RoomGui : public tsl::Gui {
+public:
+    virtual tsl::elm::Element* createUI() override {
+        EnsureMonitor();
+        MonitorSetTraditional(g_isTraditional);
+        char sel[32] = {};
+        GetSelectedServerName(sel, sizeof(sel));
+        MonitorRequestRefresh(sel);
+
+        auto frame = new tsl::elm::OverlayFrame(T("房间列表", "房間列表"),
+                                                T("A 刷新 · B 返回", "A 重新整理 · B 返回"));
+        m_list = new RebuildList();
+        Rebuild();
+        frame->setContent(m_list);
+        return frame;
+    }
+
+    virtual void update() override {
+        const u64 now = svcGetSystemTick();
+        if (now - m_lastPoll >= 5ull * 19200000ull) {
+            m_lastPoll = now;
+            MonitorRequestPoll();
+        }
+        MonitorCopySnapshot(&m_snap);
+        if (m_snap.version != m_version) {
+            m_version = m_snap.version;
+            Rebuild();
+        }
+    }
+
+private:
+    void Rebuild() {
+        MonitorCopySnapshot(&m_snap);
+        m_list->clear();
+
+        char hdr[96];
+        if (m_snap.online >= 0) {
+            snprintf(hdr, sizeof(hdr), T("%s · 在线 %d · 房间 %d", "%s · 線上 %d · 房間 %d"),
+                     m_snap.server[0] ? m_snap.server : "?", m_snap.online, m_snap.roomCount);
+        } else {
+            snprintf(hdr, sizeof(hdr), "%s", m_snap.server[0] ? m_snap.server : "?");
+        }
+        m_list->addItem(new tsl::elm::CategoryHeader(hdr));
+
+        if (m_snap.roomN == 0) {
+            m_list->addItem(new tsl::elm::ListItem(
+                m_snap.busy ? T("查询中…", "查詢中…") : T("暂无房间", "暫無房間")));
+        } else {
+            for (u32 i = 0; i < m_snap.roomN; i++) {
+                const MonitorRoom &r = m_snap.rooms[i];
+                char val[24];
+                if (r.playersMax > 0) {
+                    snprintf(val, sizeof(val), "%u/%u",
+                             static_cast<unsigned>(r.players), static_cast<unsigned>(r.playersMax));
+                } else {
+                    snprintf(val, sizeof(val), "%u", static_cast<unsigned>(r.players));
+                }
+                auto *item = new tsl::elm::ListItem(r.game);
+                item->setValue(val);
+                m_list->addItem(item);
+            }
+        }
+        m_list->snapToFocus();
+    }
+
+    RebuildList *m_list = nullptr;
+    /* MonitorSnapshot 约 8.6 KB，放静态区，别压在 overlay 的栈上。 */
+    static inline MonitorSnapshot m_snap = {};
+    u32 m_version = 0xFFFFFFFFu;
+    u64 m_lastPoll = 0;
+};
+
 /* Everything below the frame header. Kept out of createUI() so it can be
    called again after the relay list changes: libtesla cannot refresh a
    single row, but it can delete and re-add the whole list on the next
@@ -309,6 +445,7 @@ static void buildList(tsl::elm::List *list) {
     g_serverItems.clear();
     g_restoreItem = nullptr;
     g_addServerItem = nullptr;
+    g_roomSummaryItem = nullptr;
     g_restoreArmed = false;
 
     if (g_state == State::Error) {
@@ -353,6 +490,12 @@ static void buildList(tsl::elm::List *list) {
                         // there with only a star until the overlay is
                         // reopened.
                         g_shown_latency = 0xFFFFFFFFu;
+                        // 房间列表切换到新选中的服务器。
+                        {
+                            char sel[32] = {};
+                            GetSelectedServerName(sel, sizeof(sel));
+                            MonitorRequestSwitch(sel);
+                        }
                         return true;
                     }
                     if (keys & HidNpadButton_X) {
@@ -382,6 +525,19 @@ static void buildList(tsl::elm::List *list) {
                 list->addItem(item);
             }
         }
+
+        // 房间：当前服务器在线人数/房间数，按 A 进房间列表。
+        list->addItem(new tsl::elm::CategoryHeader(T("房间", "房間")));
+        g_roomSummaryItem = new tsl::elm::ListItem(T("房间列表", "房間列表"));
+        g_roomSummaryItem->setValue(T("查询中…", "查詢中…"), true);
+        g_roomSummaryItem->setClickListener([](u64 keys) {
+            if (keys & HidNpadButton_A) {
+                tsl::changeTo<RoomGui>();
+                return true;
+            }
+            return false;
+        });
+        list->addItem(g_roomSummaryItem);
 
         // Undo a mistake without editing relay.cfg on a PC. Two presses on
         // purpose: this rewrites the whole relay list.
