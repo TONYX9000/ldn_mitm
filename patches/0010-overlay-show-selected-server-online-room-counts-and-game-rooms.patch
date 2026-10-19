@@ -1,4 +1,4 @@
-From 798e767acb3af48741816d1ac50c2c05d3a26e43 Mon Sep 17 00:00:00 2001
+From f81c01f9dd3fd5cb7df18d4f68d61e6915065d3f Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
 Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
@@ -38,10 +38,10 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master
  .github/workflows/release.yml |   24 +-
  Makefile                      |    7 +
  overlay/Makefile              |    5 +-
- overlay/source/main.cpp       |  163 +++-
- overlay/source/monitor.cpp    | 1690 +++++++++++++++++++++++++++++++++
+ overlay/source/main.cpp       |  163 ++-
+ overlay/source/monitor.cpp    | 1955 +++++++++++++++++++++++++++++++++
  overlay/source/monitor.hpp    |   52 +
- 8 files changed, 1949 insertions(+), 23 deletions(-)
+ 8 files changed, 2214 insertions(+), 23 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
@@ -451,10 +451,10 @@ index 8e07c19..22c6127 100644
      virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..f64b704
+index 0000000..483a887
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,1690 @@
+@@ -0,0 +1,1955 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -941,6 +941,208 @@ index 0000000..f64b704
 +#define INADDR_NONE ((in_addr_t)0xFFFFFFFFu)
 +#endif
 +
++/* ------------------------------------------------------------------ */
++/* 原始 UDP DNS(与 sysmodule relay_client 同款)。
++ * 真机诊断:覆盖层进程里 getaddrinfo 全部失败(refresh 里所有 e=1),
++ * 而 sysmodule 的延迟测量一直正常——它从来不用 getaddrinfo,而是手工
++ * 构造 DNS 报文发给路由器通告的 DNS(nifmGetCurrentIpConfigInfo)。
++ * 这里照搬该实现;nifm 拿不到 dns 时退公网 DNS(国内 223.5.5.5/
++ * 114.114.114.114,海外 8.8.8.8/1.1.1.1)。 */
++/* ------------------------------------------------------------------ */
++
++static u32 DnsBe32(const u8 *p) {
++    return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
++}
++
++/* 构造 A 查询报文;成功返回长度,失败 0。 */
++static size_t DnsBuildQuery(const char *host, u8 *q, size_t cap, u8 txid0, u8 txid1) {
++    if (host == nullptr || host[0] == '\0' || cap < 18)
++        return 0;
++    q[0] = txid0; q[1] = txid1;
++    q[2] = 0x01; q[3] = 0x00;                 /* RD */
++    q[4] = 0x00; q[5] = 0x01;                 /* qdcount=1 */
++    q[6] = q[7] = q[8] = q[9] = q[10] = q[11] = 0;
++    size_t p = 12;
++    const char *s = host;
++    while (*s != '\0') {
++        const char *dot = strchr(s, '.');
++        size_t len = dot ? (size_t)(dot - s) : strlen(s);
++        if (len == 0 || len > 63 || p + len + 6 > cap)
++            return 0;
++        q[p++] = (u8)len;
++        memcpy(q + p, s, len);
++        p += len;
++        s += len;
++        if (*s == '.')
++            s++;
++    }
++    q[p++] = 0x00;
++    q[p++] = 0x00; q[p++] = 0x01;             /* A    */
++    q[p++] = 0x00; q[p++] = 0x01;             /* IN   */
++    return p;
++}
++
++/* 跳过一个域名(标签串或 0xC0 压缩指针)。 */
++static bool DnsSkipName(const u8 *r, ssize_t n, size_t *off) {
++    for (;;) {
++        if (*off >= (size_t)n)
++            return false;
++        u8 c = r[*off];
++        if ((c & 0xc0) == 0xc0) {
++            *off += 2;
++            return true;
++        }
++        if (c == 0) {
++            *off += 1;
++            return true;
++        }
++        *off += (size_t)c + 1;
++    }
++}
++
++/* 解析应答,取第一个 A 记录;*ipNet 为网络字序。 */
++static bool DnsParseA(const u8 *r, ssize_t n, u8 txid0, u8 txid1, u32 *ipNet) {
++    if (n < 12)
++        return false;
++    if (r[0] != txid0 || r[1] != txid1)
++        return false;
++    if ((r[2] & 0x80) == 0)                   /* QR */
++        return false;
++    if ((r[3] & 0x0f) != 0)                   /* RCODE */
++        return false;
++    int ancount = (r[6] << 8) | r[7];
++    if (ancount < 1)
++        return false;
++
++    size_t off = 12;
++    if (!DnsSkipName(r, n, &off))
++        return false;
++    off += 4;                                 /* qtype + qclass */
++    if (off > (size_t)n)
++        return false;
++
++    for (int i = 0; i < ancount && off + 12 <= (size_t)n; i++) {
++        if (!DnsSkipName(r, n, &off))
++            return false;
++        if (off + 10 > (size_t)n)
++            break;
++        int type  = (r[off] << 8) | r[off + 1];
++        int rdlen = (r[off + 8] << 8) | r[off + 9];
++        off += 10;
++        if (type == 1 && rdlen == 4 && off + 4 <= (size_t)n) {
++            *ipNet = htonl(DnsBe32(r + off));
++            return true;
++        }
++        off += rdlen;
++    }
++    return false;
++}
++
++/* 向单个 DNS 服务器查 A;返回主机字序 IP,0=失败。 */
++static u32 DnsQueryServer(u32 srvHost, const char *host, u8 txid0, u8 txid1) {
++    u8 q[300];
++    size_t qlen = DnsBuildQuery(host, q, sizeof(q), txid0, txid1);
++    if (qlen == 0)
++        return 0;
++    int fd = socket(AF_INET, SOCK_DGRAM, 0);
++    if (fd < 0)
++        return 0;
++    struct sockaddr_in sa;
++    memset(&sa, 0, sizeof(sa));
++    sa.sin_family = AF_INET;
++    sa.sin_port = htons(53);
++    sa.sin_addr.s_addr = htonl(srvHost);
++    struct timeval tv;
++    tv.tv_sec = 2;
++    tv.tv_usec = 0;
++    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++    u32 ip = 0;
++    if (sendto(fd, q, (int)qlen, 0, (struct sockaddr *)&sa, sizeof(sa)) >= 0) {
++        u8 r[512];
++        ssize_t n = recvfrom(fd, r, sizeof(r), 0, nullptr, nullptr);
++        if (n > 0) {
++            u32 net = 0;
++            if (DnsParseA(r, n, txid0, txid1, &net))
++                ip = ntohl(net);
++        }
++    }
++    close(fd);
++    return ip;
++}
++
++static u32 g_dnsSrv[6];
++static int g_dnsSrvN = 0;
++static bool g_dnsSrvReady = false;
++static u32 g_dnsNifmRc = 1;                   /* 0=ok,其它=失败码 */
++
++static void DnsInitServers() {
++    if (g_dnsSrvReady)
++        return;
++    g_dnsSrvReady = true;
++    u32 a = 0, mask = 0, gw = 0, dns1 = 0, dns2 = 0;
++    Result rc = nifmInitialize(NifmServiceType_User);
++    if (R_FAILED(rc))
++        rc = nifmInitialize(NifmServiceType_System);
++    if (R_SUCCEEDED(rc)) {
++        g_dnsNifmRc = 0;
++        if (R_SUCCEEDED(nifmGetCurrentIpConfigInfo(&a, &mask, &gw, &dns1, &dns2))) {
++            if (dns1 != 0)
++                g_dnsSrv[g_dnsSrvN++] = ntohl(dns1);
++            if (dns2 != 0)
++                g_dnsSrv[g_dnsSrvN++] = ntohl(dns2);
++        }
++        nifmExit();
++    } else {
++        g_dnsNifmRc = (u32)rc;
++    }
++    /* 公网兜底:国内两台 + 海外两台 */
++    g_dnsSrv[g_dnsSrvN++] = 0xDF050505u;      /* 223.5.5.5 */
++    g_dnsSrv[g_dnsSrvN++] = 0x72727272u;      /* 114.114.114.114 */
++    g_dnsSrv[g_dnsSrvN++] = 0x08080808u;      /* 8.8.8.8 */
++    g_dnsSrv[g_dnsSrvN++] = 0x01010101u;      /* 1.1.1.1 */
++    char m[96];
++    snprintf(m, sizeof(m), "dns srv nifm=%08x n=%d",
++             (unsigned)g_dnsNifmRc, g_dnsSrvN);
++    MonLog(m);
++}
++
++struct DnsEnt {
++    char host[48];
++    u32 ip;                                   /* 主机字序 */
++};
++static DnsEnt g_dnsCache[8];
++static int g_dnsCacheN = 0;
++
++static bool DnsResolve(const char *host, u32 *ipNet) {
++    DnsInitServers();
++    for (int i = 0; i < g_dnsCacheN; i++) {
++        if (strcasecmp(g_dnsCache[i].host, host) == 0 && g_dnsCache[i].ip != 0) {
++            *ipNet = htonl(g_dnsCache[i].ip);
++            return true;
++        }
++    }
++    for (int s = 0; s < g_dnsSrvN; s++) {
++        u32 ip = DnsQueryServer(g_dnsSrv[s], host, 0x13, 0x37);
++        if (ip != 0) {
++            if (g_dnsCacheN < (int)(sizeof(g_dnsCache) / sizeof(g_dnsCache[0]))) {
++                snprintf(g_dnsCache[g_dnsCacheN].host,
++                         sizeof(g_dnsCache[0].host), "%s", host);
++                g_dnsCache[g_dnsCacheN].ip = ip;
++                g_dnsCacheN++;
++            }
++            *ipNet = htonl(ip);
++            char m[96];
++            snprintf(m, sizeof(m), "dns ok %s %08x", host, (unsigned)ip);
++            MonLog(m);
++            return true;
++        }
++    }
++    char m[64];
++    snprintf(m, sizeof(m), "dns raw fail %s", host);
++    MonLog(m);
++    return false;
++}
++
 +static bool HttpResolve(const char *host, struct sockaddr_in *sa) {
 +    memset(sa, 0, sizeof(*sa));
 +    sa->sin_family = AF_INET;
@@ -949,6 +1151,10 @@ index 0000000..f64b704
 +        sa->sin_addr.s_addr = ip;
 +        return true;
 +    }
++    /* 1) 原始 UDP DNS(sysmodule 同款,真机可用) */
++    if (DnsResolve(host, &sa->sin_addr.s_addr))
++        return true;
++    /* 2) getaddrinfo 兜底(真机通常失败,保留无害) */
 +    /* libnx/newlib 没有 gethostbyname,域名解析用 getaddrinfo */
 +    struct addrinfo hints, *res = nullptr;
 +    memset(&hints, 0, sizeof(hints));
@@ -1218,7 +1424,7 @@ index 0000000..f64b704
 +    for (size_t i = 0; i < sizeof(kUrlPrefixes) / sizeof(kUrlPrefixes[0]); i++) {
 +        char url[512];
 +        snprintf(url, sizeof(url), "%s%s", kUrlPrefixes[i], relPath);
-+        if (HttpGet(url, out, 8000, kMaxDownload)) {
++        if (HttpGet(url, out, 5000, kMaxDownload)) {
 +            MonLog("download ok");
 +            return true;
 +        }
@@ -1459,49 +1665,108 @@ index 0000000..f64b704
 +    return true;
 +}
 +
++/* 解析 relay.cfg 的一行。兼容 sysmodule(relay_client LoadConfig)的两种行:
++ *   <name> <host>[:port]     两 token
++ *   <host>[:port]            单 token,name=host(sysmodule 语义)
++ * 及 <name>=<host>[:port] 变体。名字相符且 host 合法时填输出并返回 true;
++ * isEntry 标记该行是服务器行(指令/注释行不算)。 */
++static bool MatchRelayLine(const std::string &line, const char *want,
++                           char *nameOut, size_t nameN,
++                           char *hostOut, size_t hostN, u16 *portOut,
++                           bool *isEntry = nullptr) {
++    if (isEntry)
++        *isEntry = false;
++    size_t s = line.find_first_not_of(" \t");
++    if (s == std::string::npos || line[s] == '#')
++        return false;
++    std::string tok1, tok2;
++    {
++        size_t sp = line.find_first_of(" \t", s);
++        tok1 = line.substr(s, sp == std::string::npos ? std::string::npos : sp - s);
++        if (sp != std::string::npos) {
++            size_t t = line.find_first_not_of(" \t", sp);
++            if (t != std::string::npos) {
++                size_t te = line.find_first_of(" \t", t);
++                tok2 = line.substr(t, te == std::string::npos ? std::string::npos : te - t);
++            }
++        }
++    }
++    if (tok1.empty())
++        return false;
++    /* 指令行不是服务器行 */
++    if (tok1.compare(0, 8, "enabled=") == 0 || tok1.compare(0, 10, "broadcast=") == 0 ||
++        tok1.compare(0, 3, "id=") == 0 || tok1.compare(0, 9, "selected=") == 0)
++        return false;
++    if (isEntry)
++        *isEntry = true;
++
++    std::string name1 = tok1, hp = tok2;
++    if (hp.empty()) {
++        size_t eq = tok1.find('=');
++        if (eq != std::string::npos && eq + 1 < tok1.size()) {
++            name1 = tok1.substr(0, eq);
++            hp = tok1.substr(eq + 1);
++        } else {
++            hp = tok1;                        /* 单 token:name 也是 host */
++        }
++    }
++    if (name1 != want)
++        return false;
++    snprintf(nameOut, nameN, "%s", want);
++    return ParseHostPort(hp.c_str(), hostOut, hostN, portOut);
++}
++
 +static bool ResolveSelectedServer(const char *nameOverride,
 +                                  char *nameOut, size_t nameN,
 +                                  char *hostOut, size_t hostN, u16 *portOut) {
 +    std::string cfg;
-+    if (!LoadFile(kRelayCfgPath, &cfg))
++    if (!LoadFile(kRelayCfgPath, &cfg)) {
++        MonLog("resolve FAIL cfg-missing");
 +        return false;
++    }
 +
 +    char want[64] = {};
 +    if (nameOverride && nameOverride[0])
 +        snprintf(want, sizeof(want), "%s", nameOverride);
-+    if (!want[0]) {
-+        size_t pos = cfg.find("selected=");
-+        if (pos != std::string::npos) {
-+            size_t e = cfg.find_first_of("\r\n", pos);
-+            std::string line = cfg.substr(pos, e == std::string::npos ? std::string::npos : e - pos);
-+            if (line.size() > 9)
-+                snprintf(want, sizeof(want), "%s", line.c_str() + 9);
++    /* 名字去尾部空白(IPC/配置可能带填充;sysmodule 同样修剪) */
++    for (int pass = 0; pass < 2; pass++) {
++        size_t wl = strlen(want);
++        while (wl > 0 && (want[wl - 1] == ' ' || want[wl - 1] == '\t'))
++            want[--wl] = 0;
++        if (pass == 0 && want[0])
++            break;
++        if (pass == 0 && !want[0]) {
++            size_t pos = cfg.find("selected=");
++            if (pos != std::string::npos) {
++                size_t e = cfg.find_first_of("\r\n", pos);
++                std::string line = cfg.substr(pos, e == std::string::npos ? std::string::npos : e - pos);
++                if (line.size() > 9)
++                    snprintf(want, sizeof(want), "%s", line.c_str() + 9);
++            }
 +        }
 +    }
-+    if (!want[0])
++    if (!want[0]) {
++        MonLog("resolve FAIL no-name");
 +        return false;
++    }
 +
++    int entryN = 0;
 +    size_t i = 0;
 +    while (i < cfg.size()) {
 +        size_t e = cfg.find_first_of("\r\n", i);
 +        std::string line = cfg.substr(i, e == std::string::npos ? std::string::npos : e - i);
 +        i = (e == std::string::npos) ? cfg.size() : e + 1;
 +
-+        size_t s = line.find_first_not_of(" \t");
-+        if (s == std::string::npos || line[s] == '#')
-+            continue;
-+        size_t sp = line.find_first_of(" \t", s);
-+        if (sp == std::string::npos)
-+            continue;
-+        if (line.substr(s, sp - s) != want)
-+            continue;
-+        size_t t = line.find_first_not_of(" \t", sp);
-+        if (t == std::string::npos)
-+            continue;
-+        size_t te = line.find_first_of(" \t", t);
-+        std::string hp = line.substr(t, te == std::string::npos ? std::string::npos : te - t);
-+        snprintf(nameOut, nameN, "%s", want);
-+        return ParseHostPort(hp.c_str(), hostOut, hostN, portOut);
++        bool isEntry = false;
++        if (MatchRelayLine(line, want, nameOut, nameN, hostOut, hostN, portOut, &isEntry))
++            return true;
++        if (isEntry)
++            entryN++;
++    }
++    {
++        char m[96];
++        snprintf(m, sizeof(m), "resolve noname %s n=%d", want, entryN);
++        MonLog(m);
 +    }
 +    snprintf(nameOut, nameN, "%s", want);
 +    return false;
