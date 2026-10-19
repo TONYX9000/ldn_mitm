@@ -1,4 +1,4 @@
-From 8d702079860988dfad6057b95a6a2715751db0da Mon Sep 17 00:00:00 2001
+From 1611cc502d4f5c8ec8f814d5e520e379952fca37 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH] overlay: online counts/room list and relay management
@@ -104,34 +104,36 @@ Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-T
 - 修正 stack-free 的无符号地址相减；仅在 probe 位于传入栈区时显示 used/free，否则记录 probe 和栈区范围，供复测诊断。
 
 CI 构建修复（DevkitPro 包数据库 HTTP 403）：
-- build/nightly/release 原先无条件运行 dkp-pacman -Sy --noconfirm switch-curl；日志显示 dkp-libs.db 与 dkp-linux.db 返回 403，失败发生在编译启动之前，并非 C++ 编译错误。
-- 先查询 switch-curl 是否已安装；若数据库刷新失败，继续尝试使用镜像缓存数据库安装；最后用 dkp-pacman -Q 验证依赖确实存在，否则明确报缺失并停止，不吞掉真实依赖错误。
-- 三个 workflow 的 YAML 解析与 shell 分支均以 mock 测过：已安装、403 后缓存安装成功、正常刷新安装成功、依赖缺失时清楚失败。
+- build/nightly/release 的依赖安装步骤已加入缓存回退；本次用户提供的 beta 构建日志显示 beta.yml 仍直接运行 dkp-pacman -Sy --noconfirm switch-curl，依赖步骤失败，Build 被跳过。
+- beta.yml 现复用同一策略：先检查 switch-curl 是否已安装；索引刷新失败时继续尝试用缓存数据库安装；最后用 dkp-pacman -Q 校验依赖，否则明确报缺失并停止，不吞掉真实依赖错误。
+- 四个 workflow 的 YAML 解析与 shell 分支均以 mock 测过：已安装、403 后缓存安装成功、正常刷新安装成功、依赖缺失时清楚失败。
 
 玩家名单切服串台修复（截图反馈）：
 - 对照 slp-server-rust 的 GraphQL NodeInfo，nodes 同时含 player_name 与 is_connected；旧 overlay 只查询 playerName，并把所有非空节点名都加入房间名单，可能把节点槽里已断开的旧昵称显示出来，造成 1/6 却出现多个名字。
 - 主查询增加 isConnected 字段；解析按 connected=true 过滤，去重，并在服务端给出 nodeCount 时以该计数限制名字数。为兼容旧 schema 增加逐级字段回退；旧 schema 没有连接标记时维持原行为。
-- 切换服务器时立即清掉 worker 房间缓存与已发布快照，避免新查询完成前显示上一服务器的名单；新增纯主机测试覆盖 true/false/null/缺字段。
+- UDP NetworkInfo 的 nodes 是固定 8 槽数组；扫描解析原先遍历全部槽位，nodeCount=1 时也可能读到尾部残留昵称。现只读 nodeCount 范围内的槽并去重，避免切换房间/服务器后偶发串名。
+- 切换服务器时立即清掉 worker 房间缓存与已发布快照，避免新查询完成前显示上一服务器的名单；纯主机测试覆盖连接状态、旧 schema 与 nodeCount 边界。
 
 服务器切换后的房间快照错位修复（反馈）：
 - 每次打开刷新或切换目标时更新请求代次，并立即把已发布的房间列表与新选择解绑、清空；
 - 单 worker 的旧服务器查询返回后，若请求代次已过期，则不写入房间缓存、在线/房间数或快照，避免把旧结果显示到新服务器下；新增纯主机 generation gate 回归测试。
 ---
+ .github/workflows/beta.yml                    |   20 +
  .github/workflows/build.yml                   |   34 +-
  .github/workflows/nightly.yml                 |   37 +-
  .github/workflows/release.yml                 |   44 +-
  Makefile                                      |    6 +
  overlay/Makefile                              |    9 +-
  overlay/source/main.cpp                       | 1125 +++++++-
- overlay/source/monitor.cpp                    | 2420 +++++++++++++++++
+ overlay/source/monitor.cpp                    | 2429 +++++++++++++++++
  overlay/source/monitor.hpp                    |   71 +
- overlay/source/monitor_player_filter.hpp      |   24 +
+ overlay/source/monitor_player_filter.hpp      |   32 +
  overlay/source/monitor_target_generation.hpp  |   22 +
  overlay/source/monitor_title_resolver.hpp     |  148 +
- overlay/tests/monitor_player_filter_test.cpp  |   21 +
+ overlay/tests/monitor_player_filter_test.cpp  |   29 +
  .../tests/monitor_target_generation_test.cpp  |   22 +
  overlay/tests/monitor_title_resolver_test.cpp |   49 +
- 14 files changed, 3876 insertions(+), 156 deletions(-)
+ 15 files changed, 3921 insertions(+), 156 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
  create mode 100644 overlay/source/monitor_player_filter.hpp
@@ -141,6 +143,37 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
  create mode 100644 overlay/tests/monitor_target_generation_test.cpp
  create mode 100644 overlay/tests/monitor_title_resolver_test.cpp
 
+diff --git a/.github/workflows/beta.yml b/.github/workflows/beta.yml
+index 3c7281c..9c225b0 100644
+--- a/.github/workflows/beta.yml
++++ b/.github/workflows/beta.yml
+@@ -118,6 +118,26 @@ jobs:
+           make install
+           popd
+ 
++      - name: Install switch-curl (订阅 HTTPS 下载)
++        run: |
++          set -euo pipefail
++          # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
++          # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
++          if dkp-pacman -Q switch-curl >/dev/null 2>&1; then
++            echo "switch-curl already installed"
++          else
++            # DevkitPro package DB refresh can fail with HTTP 403. Do not
++            # make a mirror refresh failure fatal if cached DBs can install it.
++            if ! dkp-pacman -Sy --noconfirm; then
++              echo "::warning::DevkitPro package DB refresh failed; trying cached metadata."
++            fi
++            dkp-pacman -S --noconfirm --needed switch-curl || true
++          fi
++          if ! dkp-pacman -Q switch-curl >/dev/null 2>&1; then
++            echo "::error::Required package switch-curl is not installed."
++            exit 1
++          fi
++
+       - name: Build
+         id: build
+         run: make -j8 PREFIX="ccache aarch64-none-elf-"
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
 index 55e5970..829b976 100644
 --- a/.github/workflows/build.yml
@@ -1598,10 +1631,10 @@ index 8e07c19..4b78435 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..3cf5275
+index 0000000..df210f2
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2420 @@
+@@ -0,0 +1,2429 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -3373,20 +3406,29 @@ index 0000000..3cf5275
 +        snprintf(out->sessionId, sizeof(out->sessionId), "%s", sessionTag);
 +    }
 +    /* 玩家名单:NetworkInfo 的 nodes[8] 带每个节点的用户名(起始 0x68、
-+     * 步长 0x40:isConnected @+11、userName[33] @+12)。之前只读了人数
-+     * 而忽略整段 nodes,扫描补出来的房间永远 playerN=0,UI 只能显示
-+     * 「该服务器未提供玩家名单」。主机(AP, nodes[0])排最前。 */
-+    if (len >= 0x68 + 8u * 0x40) {
++     * 步长 0x40:isConnected @+11、userName[33] @+12)。只读取 nodeCount
++     * 范围内的槽位;固定数组后面的槽可能保留上一个房间的旧昵称/连接位,
++     * 是切换房间或服务器后偶发串名的来源。主机(AP, nodes[0])排最前。 */
++    if (len >= 0x68 + (size_t)cnt * 0x40) {
 +        u8 pn = 0;
-+        for (u32 i = 0; i < 8 && pn < MONITOR_MAX_PLAYERS; i++) {
++        for (u32 i = 0; i < cnt && pn < MONITOR_MAX_PLAYERS; i++) {
 +            const u8 *nd = p + 0x68 + (size_t)i * 0x40;
-+            if (nd[11] == 0)                     /* isConnected */
++            if (!MonitorPlayerFilter::IncludeConnectedSlot(i, cnt, nd[11] == 1))
 +                continue;
 +            char nm[MONITOR_PLAYER_LEN];
 +            memcpy(nm, nd + 12, MONITOR_PLAYER_LEN - 1);
 +            nm[MONITOR_PLAYER_LEN - 1] = 0;
-+            if (nm[0])
-+                snprintf(out->player[pn++], MONITOR_PLAYER_LEN, "%s", nm);
++            if (nm[0]) {
++                bool dup = false;
++                for (u8 j = 0; j < pn; j++) {
++                    if (strcmp(out->player[j], nm) == 0) {
++                        dup = true;
++                        break;
++                    }
++                }
++                if (!dup)
++                    snprintf(out->player[pn++], MONITOR_PLAYER_LEN, "%s", nm);
++            }
 +        }
 +        out->playerN = pn;
 +    }
@@ -4101,12 +4143,13 @@ index 0000000..6d32143
 +void MonitorLog(const char *msg);
 diff --git a/overlay/source/monitor_player_filter.hpp b/overlay/source/monitor_player_filter.hpp
 new file mode 100644
-index 0000000..3f79220
+index 0000000..a96f729
 --- /dev/null
 +++ b/overlay/source/monitor_player_filter.hpp
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,32 @@
 +#pragma once
 +
++#include <cstddef>
 +#include <cstring>
 +
 +namespace MonitorPlayerFilter {
@@ -4126,6 +4169,13 @@ index 0000000..3f79220
 +    const char next = value[4];
 +    return next == '\0' || next == ',' || next == '}' || next == ']' ||
 +           next == ' ' || next == '\t' || next == '\r' || next == '\n';
++}
++
++/* NetworkInfo has a fixed eight-slot array, but only indices below nodeCount
++ * belong to the current room. Later slots can retain names/flags from old peers. */
++inline bool IncludeConnectedSlot(std::size_t index, std::size_t nodeCount,
++                                 bool isConnected) {
++    return index < nodeCount && isConnected;
 +}
 +
 +} // namespace MonitorPlayerFilter
@@ -4313,10 +4363,10 @@ index 0000000..d0ac8cc
 +} // namespace MonitorTitleResolver
 diff --git a/overlay/tests/monitor_player_filter_test.cpp b/overlay/tests/monitor_player_filter_test.cpp
 new file mode 100644
-index 0000000..f1576c9
+index 0000000..bd1fe8d
 --- /dev/null
 +++ b/overlay/tests/monitor_player_filter_test.cpp
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,29 @@
 +#include "../source/monitor_player_filter.hpp"
 +
 +#include <cassert>
@@ -4336,6 +4386,14 @@ index 0000000..f1576c9
 +    assert(!IncludeNode(true, "null"));
 +    assert(!IncludeNode(true, nullptr));
 +    assert(!IncludeNode(true, "trueish"));
++
++    /* UDP NetworkInfo is a fixed-size node array; stale entries at indices
++     * beyond nodeCount must not leak names from earlier room occupants. */
++    using MonitorPlayerFilter::IncludeConnectedSlot;
++    assert(IncludeConnectedSlot(0, 1, true));
++    assert(!IncludeConnectedSlot(1, 1, true));
++    assert(!IncludeConnectedSlot(0, 1, false));
++    assert(!IncludeConnectedSlot(0, 0, true));
 +    return 0;
 +}
 diff --git a/overlay/tests/monitor_target_generation_test.cpp b/overlay/tests/monitor_target_generation_test.cpp
