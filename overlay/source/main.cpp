@@ -221,18 +221,28 @@ public:
 class AddServerGui : public tsl::Gui {
 public:
     virtual tsl::elm::Element* createUI() override {
-        // The subtitle doubles as a hint: entries are appended, so a re-added
-        // server lands at the bottom instead of its factory position.
-        auto frame = new tsl::elm::OverlayFrame(T("添加服务器", "新增伺服器"),
-                                                T("添加后排在最后", "新增後排在最後"));
-        auto *list = new tsl::elm::List();
-
         u32 builtin = 0;
         if (R_FAILED(ldnMitmGetBuiltinRelayServerCount(&g_ldnConfig, &builtin))) {
             builtin = 0;
         }
         u32 current = 0;
         ldnMitmGetRelayServerCount(&g_ldnConfig, &current);
+
+        // The subtitle carries the capacity state: the list is capped at
+        // LDN_MAX_SERVERS, so backups can only be added after freeing a slot.
+        char subtitle[96];
+        if (current >= LDN_MAX_SERVERS) {
+            snprintf(subtitle, sizeof(subtitle),
+                     T("已满 %u/%u · 先删一台再用备选", "已滿 %u/%u · 先刪一台再用備選"),
+                     static_cast<unsigned>(current), static_cast<unsigned>(LDN_MAX_SERVERS));
+        } else {
+            snprintf(subtitle, sizeof(subtitle),
+                     T("内置 %u 台 · 当前 %u/%u", "內建 %u 台 · 目前 %u/%u"),
+                     static_cast<unsigned>(builtin), static_cast<unsigned>(current),
+                     static_cast<unsigned>(LDN_MAX_SERVERS));
+        }
+        auto frame = new tsl::elm::OverlayFrame(T("添加服务器", "新增伺服器"), subtitle);
+        auto *list = new tsl::elm::List();
 
         list->addItem(new tsl::elm::CategoryHeader(T("内置服务器（按 A 添加）", "內建伺服器（按 A 新增）")));
 
@@ -257,15 +267,21 @@ public:
             item->setValue(present ? T("已添加", "已新增") : addr, present);
 
             auto added = std::make_shared<bool>(present);
-            item->setClickListener([item, info, added](u64 keys) {
+            auto count = std::make_shared<u32>(current);
+            item->setClickListener([item, info, added, count](u64 keys) {
                 if (!(keys & HidNpadButton_A)) {
                     return false;
                 }
                 if (*added) {
                     return true;
                 }
+                if (*count >= LDN_MAX_SERVERS) {
+                    item->setValue(T("先删一台", "先刪一台"), true);
+                    return true;
+                }
                 if (R_SUCCEEDED(ldnMitmAddRelayServer(&g_ldnConfig, &info))) {
                     *added = true;
+                    (*count)++;
                     item->setValue(T("已添加", "已新增"), true);
                     g_main_list_dirty = true;
                 } else {

@@ -84,18 +84,28 @@ namespace ams::mitm::ldn::relay {
         Server g_servers[MaxServers];
         int g_count = 0;
 
-        /* Factory list for RestoreDefaultServers(); keep in sync with the
-           relay.cfg shipped in the release zip. */
+        /* Factory catalog for RestoreDefaultServers() and the overlay's
+           "add server" page. Ordered by measured latency (2026-10-19,
+           from a Zhejiang/China line): the first MaxServers entries are
+           what a fresh relay.cfg gets. Keep in sync with the shipped
+           relay.cfg. */
         struct BuiltinServer { const char *name; const char *host; u16 port; };
         constexpr BuiltinServer g_builtin[] = {
-            { "China-Beijing",    "olunira.fun",          11451 },
-            { "China-Shanghai",   "47.102.121.212",       11451 },
             { "China-Guangdong",  "gugu.mulaosi.cn",      11451 },
             { "China-Zhejiang",   "yordon.cn",            11451 },
+            { "China-Shanghai",   "47.102.121.212",       11451 },
+            { "China-Jiangsu",    "wuaiyi.top",           11451 },
+            { "China-Beijing",    "olunira.fun",          11451 },
             { "China-Henan",      "srv.jaxlewis.top",     11451 },
+            { "China-Henan-2",    "122.114.8.38",         11451 },
             { "USA-SanFrancisco", "tekn0.net",            11451 },
-            { "Netherlands-1",    "switch.jayseateam.nl", 11451 },
             { "Germany-1",        "erdbeerbaerlp.de",     11451 },
+            { "Denmark-1",        "switch.servegame.com", 11451 },
+            { "Netherlands-1b",   "switch.jayseateam.nl", 11453 },
+            { "Netherlands-1",    "switch.jayseateam.nl", 11451 },
+            { "Netherlands-2",    "switch.r3ps4j.nl",     11452 },
+            { "Netherlands-2b",   "switch.r3ps4j.nl",     11453 },
+            { "USA-2",            "muitxobem-lanplay.ddns.net", 11451 },
         };
         constexpr int BuiltinCount = static_cast<int>(sizeof(g_builtin) / sizeof(g_builtin[0]));
         std::atomic_int  g_selected{0};
