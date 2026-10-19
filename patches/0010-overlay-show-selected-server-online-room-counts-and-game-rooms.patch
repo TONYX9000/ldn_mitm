@@ -1,4 +1,4 @@
-From 3584d0ba402109f1b73793da6d7394eceb74e52d Mon Sep 17 00:00:00 2001
+From 798e767acb3af48741816d1ac50c2c05d3a26e43 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
 Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
@@ -38,10 +38,10 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master
  .github/workflows/release.yml |   24 +-
  Makefile                      |    7 +
  overlay/Makefile              |    5 +-
- overlay/source/main.cpp       |  153 ++-
+ overlay/source/main.cpp       |  163 +++-
  overlay/source/monitor.cpp    | 1690 +++++++++++++++++++++++++++++++++
  overlay/source/monitor.hpp    |   52 +
- 8 files changed, 1939 insertions(+), 23 deletions(-)
+ 8 files changed, 1949 insertions(+), 23 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
@@ -191,7 +191,7 @@ index e2cdc19..efd0e47 100644
  LIBS	:= -lnx
  
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..73645e1 100644
+index 8e07c19..22c6127 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,7 @@
@@ -202,7 +202,7 @@ index 8e07c19..73645e1 100644
  #include <vector>
  
  enum class State {
-@@ -34,6 +35,71 @@ static bool g_isTraditional = false;
+@@ -34,6 +35,74 @@ static bool g_isTraditional = false;
  
  #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
  
@@ -216,6 +216,9 @@ index 8e07c19..73645e1 100644
 +static tsl::elm::CategoryHeader *g_roomHeader = nullptr;
 +static std::vector<tsl::elm::Element*> g_roomItems;
 +static u32 g_monitorVersion = 0xFFFFFFFFu;   /* 强制首次重建 */
++/* 游戏房间标题在列表中的下标;动态行用 addItem 的 index 参数插到它正下方
++   (直接 addItem 会被追加到列表末尾,跑到「关于」后面)。 */
++static int g_roomHeaderIndex = -1;
 +
 +/* 不可聚焦的列表行:游戏房间行会被整体删除重建,
 +   保持不可聚焦可避免焦点悬挂在已删除元素上。 */
@@ -274,7 +277,7 @@ index 8e07c19..73645e1 100644
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -70,18 +136,65 @@ static void detectLanguage()
+@@ -70,18 +139,66 @@ static void detectLanguage()
      strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
  }
  
@@ -305,7 +308,8 @@ index 8e07c19..73645e1 100644
 +        else
 +            msg = T("暂无房间", "暫無房間");
 +        auto *item = new PlainListItem(msg);
-+        g_list->addItem(item);
++        /* 插到「游戏房间」标题正下方,而不是追加到列表末尾 */
++        g_list->addItem(item, 0, g_roomHeaderIndex + 1);
 +        g_roomItems.push_back(item);
 +        return;
 +    }
@@ -318,7 +322,7 @@ index 8e07c19..73645e1 100644
 +        else
 +            snprintf(value, sizeof(value), "%u", snap.rooms[i].players);
 +        auto *item = new PlainListItem(snap.rooms[i].game, value);
-+        g_list->addItem(item);
++        g_list->addItem(item, 0, g_roomHeaderIndex + 1 + (int)g_roomItems.size());
 +        g_roomItems.push_back(item);
 +    }
 +}
@@ -341,15 +345,27 @@ index 8e07c19..73645e1 100644
  
          if (g_state == State::Error) {
              list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
-@@ -96,6 +209,7 @@ public:
+@@ -95,7 +212,19 @@ public:
+             list->addItem(new tsl::elm::CategoryHeader(T("互联网中继（跨网联机）", "網際網路中繼（跨網連線）")));
              list->addItem(new ConfigToggleListItem(T("互联网中继", "網際網路中繼"), ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
  
++            // 游戏房间:当前选择的服务器上的房间列表。
++            // 行由 update() 按监视器快照版本动态重建,通过 addItem 的
++            // index 参数插在标题正下方;标题放在服务器列表之前,
++            // 打开插件首屏即可看到查询状态与房间,不必翻页。
++            // 下标 = 前面 5 个条目(启用/广播转发/日志/
++            // 互联网中继分类头/互联网中继开关);在其上方增删条目时
++            // 请同步更新。
++            g_roomHeaderIndex = 5;
++            g_roomHeader = new tsl::elm::CategoryHeader(T("游戏房间", "遊戲房間"));
++            list->addItem(g_roomHeader);
++
              g_serverItems.clear();
 +            g_selectedName[0] = 0;
              u32 count = 0;
              if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count))) {
                  list->addItem(new tsl::elm::ListItem(T("读取服务器列表失败", "讀取伺服器清單失敗")));
-@@ -109,9 +223,11 @@ public:
+@@ -109,9 +238,11 @@ public:
                  for (u32 i = 0; i < count; i++) {
                      char name[32] = {};
                      ldnMitmGetRelayServerName(&g_ldnConfig, i, name);
@@ -362,7 +378,7 @@ index 8e07c19..73645e1 100644
                          if (keys & HidNpadButton_A) {
                              if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
                                  g_serverItems[i]->setValue(T("错误", "錯誤"));
-@@ -126,6 +242,9 @@ public:
+@@ -126,6 +257,9 @@ public:
                              // there with only a star until the overlay is
                              // reopened.
                              g_shown_latency = 0xFFFFFFFFu;
@@ -372,19 +388,7 @@ index 8e07c19..73645e1 100644
                              return true;
                          }
                          return false;
-@@ -135,6 +254,11 @@ public:
-                 }
-             }
- 
-+            // 游戏房间:当前选择的服务器上的房间列表。
-+            // 行由 update() 按监视器快照版本动态重建。
-+            g_roomHeader = new tsl::elm::CategoryHeader(T("游戏房间", "遊戲房間"));
-+            list->addItem(g_roomHeader);
-+
-             // Show this console's relay identity. relay.cfg only stores the
-             // low 16 bits (`id=`), and the plugin assigns one on first use if
-             // the line is absent, so this is the only place to read it back.
-@@ -211,12 +335,23 @@ public:
+@@ -211,12 +345,23 @@ public:
          // cached value made update() return early and the label stayed at
          // just "*" with no "--" and no number.
          g_shown_latency = 0xFFFFFFFFu;
@@ -408,7 +412,7 @@ index 8e07c19..73645e1 100644
          // Show the live relay latency next to the selected server.
          // Only the selected server is connected, so it is the only one
          // whose round-trip time we can actually know.
-@@ -265,9 +400,14 @@ public:
+@@ -265,9 +410,14 @@ public:
      virtual void initServices() override {
          g_state = State::Uninit;
          detectLanguage();
@@ -423,7 +427,7 @@ index 8e07c19..73645e1 100644
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,13 +428,20 @@ public:
+@@ -288,13 +438,20 @@ public:
              g_state = State::Loaded;
          });
  
