@@ -25,7 +25,11 @@ namespace ams::mitm::ldn {
 
         /* Format: docs/relay.cfg.example. */
         constexpr const char RelayConfigPath[] = "sdmc:/config/ldn_mitm/relay.cfg";
-        constexpr int MaxServers    = 8;
+        /* Raised from 8 to 32 on 2026-10-19 (Zero's build tested 32 fine):
+           the list is only a catalog, one connection is open at a time. */
+        constexpr int MaxServers    = 32;
+        /* What "restore defaults" and a fresh relay.cfg get: the fastest 8. */
+        constexpr int DefaultServers = 8;
         constexpr int ServerNameLen = 32;
 
         void LoadConfig();

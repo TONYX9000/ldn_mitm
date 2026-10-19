@@ -86,10 +86,10 @@ namespace ams::mitm::ldn::relay {
 
         /* Factory catalog for RestoreDefaultServers() and the overlay's
            "add server" page. Ordered by measured UDP PING latency
-           (2026-10-19, Zhejiang/China line): the first MaxServers entries
-           are what a fresh relay.cfg gets. The last entry (yordon.cn) is
-           alive but does not echo PING, so it is a backup. Keep in sync
-           with the shipped relay.cfg. */
+           (2026-10-19, Zhejiang/China line): the first DefaultServers
+           entries are what a fresh relay.cfg gets. The last entry
+           (yordon.cn) is alive but does not echo PING, so it is a backup.
+           Keep in sync with the shipped relay.cfg. */
         struct BuiltinServer { const char *name; const char *host; u16 port; };
         constexpr BuiltinServer g_builtin[] = {
             { "China-Guangdong",   "gugu.mulaosi.cn",      11451 },  /*   9ms */
@@ -624,7 +624,7 @@ namespace ams::mitm::ldn::relay {
         {
             std::scoped_lock lk(g_config_mutex);
             g_count = 0;
-            for (int i = 0; i < BuiltinCount && g_count < MaxServers; i++) {
+            for (int i = 0; i < BuiltinCount && g_count < DefaultServers; i++) {
                 Server &s = g_servers[g_count];
                 std::strncpy(s.name, g_builtin[i].name, sizeof(s.name) - 1);
                 s.name[sizeof(s.name) - 1] = '\0';

@@ -10,7 +10,7 @@ typedef struct {
 } LdnMitmConfigService;
 
 /* Must match relay_client.hpp's MaxServers. */
-#define LDN_MAX_SERVERS 8
+#define LDN_MAX_SERVERS 32
 
 Result ldnMitmSaveLogToFile(LdnMitmConfigService *s);
 Result ldnMitmGetVersion(LdnMitmConfigService *s, char *version);
