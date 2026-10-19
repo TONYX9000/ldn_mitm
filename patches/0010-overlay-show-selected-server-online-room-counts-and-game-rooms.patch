@@ -1,17 +1,22 @@
-From f81c01f9dd3fd5cb7df18d4f68d61e6915065d3f Mon Sep 17 00:00:00 2001
+From e8c246fa1dcadebce5e0c51d224cf4759dcb339d Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
-Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
- =?UTF-8?q?=E6=9C=8D=E5=8A=A1=E5=99=A8=E7=9A=84=E5=9C=A8=E7=BA=BF=E4=BA=BA?=
- =?UTF-8?q?=E6=95=B0/=E6=88=BF=E9=97=B4=E6=95=B0=E9=87=8F=E4=B8=8E?=
- =?UTF-8?q?=E6=B8=B8=E6=88=8F=E6=88=BF=E9=97=B4=E5=88=97=E8=A1=A8?=
+Subject: [PATCH 10/10] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80?=
+ =?UTF-8?q?=E9=80=89=E6=9C=8D=E5=8A=A1=E5=99=A8=E7=9A=84=E5=9C=A8=E7=BA=BF?=
+ =?UTF-8?q?=E4=BA=BA=E6=95=B0/=E6=88=BF=E9=97=B4=E6=95=B0=E9=87=8F?=
+ =?UTF-8?q?=E4=B8=8E=E6=B8=B8=E6=88=8F=E6=88=BF=E9=97=B4=E5=88=97=E8=A1=A8?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 联机监视器(0010):
 - 标题下方两列统计:标签「在线/房间」在上、数字在下
-- 「游戏房间」列表:chinese_db.json 标题ID→中文名映射 + N/M 人数
+- 「游戏房间」列表:chinese_db.json 标题ID→中文名映射 + N/M 人数;
+  玩家名单(hostPlayerName 置顶 + nodes 玩家名)随查询解析入库
+- 房间行按 A/触摸展开玩家名单:房主排最前且用高亮色;两行并排尽量
+  塞名字,排不下或名字过长则整条名字带连续滚动(每行 scissor 窗口,
+  停 90 帧后 1px/帧滑动);房间区与「中继服务器(按 A 切换)」用
+  分隔标题隔开;房间行为持久池只增不删(展开只改行高),焦点安全
 - 订阅 servers.json / chinese_db.json 每次打开 overlay 尝试远程刷新,
   失败退回 /config/ldn_mitm/ 缓存;graphql/rest 分型查询(rest 1.0 用
   UDP LDN 主动扫描补房间);切换服务器即时刷新
@@ -30,6 +35,16 @@ Content-Transfer-Encoding: 8bit
   sockets-init rc/soc-probe/resolve ok|fallback|FAIL/query e=/scan/
   download try fail e=/use cache|no cache):日志截断移到最早,避免
   吃掉 sockets-init;查询失败状态文本带错误码,游戏房间区直接显示
+- getaddrinfo 在桌面 23.x 系统 overlay 进程里直接不可用(rc 262-0-1201,
+  不是 DNS 配置问题):overlay 与 sysmodule 一样改为 raw UDP/53 + nifm
+  获取 DNS(srv records 不可用,自动退回 223.5.5.5/114/8/1 台);
+  relay.cfg 解析与 sysmodule LoadConfig 对齐(host:port / = / 制表符,
+  # 全行注释);网络层增加 5 秒超时 + 「查询超时」诊断,日志加 dns
+  标签(dns nifm=/dns srv…/dns ok|fail|timeout host rc=)与名字解析
+  标签(resolve name|noname|nohost/entry|nohost)
+- 测试(主机侧,monitor.cpp 直编):DnsBuildQuery/DnsParseA/MatchRelayLine/
+  LdnDecompress/ParseNetworkInfo/ParseRoomArray(玩家名/房主置顶/sessionId)/
+  Http 解析/DnsInitServers;chinese_db 流式解析 + 标题映射冒烟
 
 CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master
 ---
@@ -38,10 +53,10 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master
  .github/workflows/release.yml |   24 +-
  Makefile                      |    7 +
  overlay/Makefile              |    5 +-
- overlay/source/main.cpp       |  163 ++-
- overlay/source/monitor.cpp    | 1955 +++++++++++++++++++++++++++++++++
- overlay/source/monitor.hpp    |   52 +
- 8 files changed, 2214 insertions(+), 23 deletions(-)
+ overlay/source/main.cpp       |  431 ++++++-
+ overlay/source/monitor.cpp    | 1990 +++++++++++++++++++++++++++++++++
+ overlay/source/monitor.hpp    |   57 +
+ 8 files changed, 2522 insertions(+), 23 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
@@ -191,7 +206,7 @@ index e2cdc19..efd0e47 100644
  LIBS	:= -lnx
  
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..22c6127 100644
+index 8e07c19..990a29c 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,7 @@
@@ -202,7 +217,7 @@ index 8e07c19..22c6127 100644
  #include <vector>
  
  enum class State {
-@@ -34,6 +35,74 @@ static bool g_isTraditional = false;
+@@ -34,6 +35,322 @@ static bool g_isTraditional = false;
  
  #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
  
@@ -211,26 +226,274 @@ index 8e07c19..22c6127 100644
 +/* 当前选中的服务器名,监视器按它查询(切换时立即刷新)。 */
 +static char g_selectedName[48] = {};
 +
-+/* 游戏房间区块:标题 + 动态行。行都不可聚焦,重建(删除)时安全。 */
++/* 游戏房间区块:标题 + 自绘房间行(持久池,只增不删,焦点安全)。 */
 +static tsl::elm::List *g_list = nullptr;
 +static tsl::elm::CategoryHeader *g_roomHeader = nullptr;
-+static std::vector<tsl::elm::Element*> g_roomItems;
 +static u32 g_monitorVersion = 0xFFFFFFFFu;   /* 强制首次重建 */
-+/* 游戏房间标题在列表中的下标;动态行用 addItem 的 index 参数插到它正下方
++/* 游戏房间标题在列表中的下标;房间行用 addItem 的 index 参数插到它正下方
 +   (直接 addItem 会被追加到列表末尾,跑到「关于」后面)。 */
 +static int g_roomHeaderIndex = -1;
++/* 展开的房间 key(sessionId);空 = 全部折叠。 */
++static char g_expandedKey[40] = {};
 +
-+/* 不可聚焦的列表行:游戏房间行会被整体删除重建,
-+   保持不可聚焦可避免焦点悬挂在已删除元素上。 */
-+class PlainListItem : public tsl::elm::ListItem {
++class RoomRow;
++static std::vector<RoomRow *> g_roomRows;
++
++/* 房间行:游戏名 + N/M;按 A 点击展开玩家名单(两行,并排尽量塞名字,
++   排不下或名字过长时整条名字带连续滚动;房主排最前并用高亮色)。
++   行高随展开动态变化;行对象持久不删除,焦点/动画状态不会悬挂。 */
++class RoomRow : public tsl::elm::Element {
 +public:
-+    PlainListItem(const std::string &text, const std::string &value = "")
-+        : tsl::elm::ListItem(text, value) {}
++    static constexpr u16 kRoomH   = 70;   /* 房间行高(与 ListItem 等高) */
++    static constexpr u16 kPlayerH = 42;   /* 玩家行高 */
++    static constexpr float kFontP = 19;   /* 玩家名字号 */
++
++    RoomRow() { memset(&m_room, 0, sizeof(m_room)); }
++
++    void setRoom(const MonitorRoom &room, const char *key) {
++        m_room = room;
++        snprintf(m_key, sizeof(m_key), "%s", key);
++        m_used = true;
++        m_hint = false;
++        m_measured = false;
++    }
++    void setHint(const char *text) {
++        memset(&m_room, 0, sizeof(m_room));
++        snprintf(m_hintText, sizeof(m_hintText), "%s", text);
++        m_key[0] = 0;
++        m_used = true;
++        m_hint = true;
++    }
++    void clearRow() {
++        m_used = false;
++        m_hint = false;
++    }
++
++    bool expanded() const {
++        return m_used && !m_hint && g_expandedKey[0] && m_key[0] &&
++               strcmp(m_key, g_expandedKey) == 0;
++    }
++
++    u16 rowHeight() const {
++        if (!m_used)
++            return 0;
++        if (m_hint)
++            return 44;
++        return (u16)(kRoomH + (expanded() ? 2 * kPlayerH : 0));
++    }
++
++    virtual void layout(u16, u16, u16, u16) override {
++        this->setBoundaries(this->getX(), this->getY(), this->getWidth(), rowHeight());
++    }
++
++    virtual void draw(tsl::gfx::Renderer *renderer) override {
++        using R = tsl::gfx::Renderer;
++        if (!m_used)
++            return;
++        if (m_hint) {
++            renderer->drawString(m_hintText, false, this->getX() + 20, this->getY() + 32, 18,
++                                 R::a(tsl::style::color::ColorDescription));
++            return;
++        }
++
++        /* 房间行:与 ListItem 同风格(上分隔线 + 名称 + 右侧 N/M) */
++        renderer->drawRect(this->getX(), this->getY(), this->getWidth(), 1,
++                           R::a(tsl::style::color::ColorFrame));
++        char val[24];
++        if (m_room.playersMax > 0)
++            snprintf(val, sizeof(val), "%u/%u", m_room.players, m_room.playersMax);
++        else
++            snprintf(val, sizeof(val), "%u", m_room.players);
++        auto [vw, vh] = renderer->drawString(val, false, 0, 0, 20,
++                                             R::a(tsl::style::color::ColorTransparent));
++        renderer->drawString(val, false, this->getX() + this->getWidth() - 20 - (s32)vw,
++                             this->getY() + 45, 20, R::a(tsl::style::color::ColorHighlight));
++        std::string name = renderer->limitStringLength(m_room.game, false, 22,
++                                                       this->getWidth() - (s32)vw - 70);
++        renderer->drawString(name.c_str(), false, this->getX() + 20, this->getY() + 45, 23,
++                             R::a(tsl::style::color::ColorText));
++
++        if (expanded())
++            drawPlayers(renderer);
++    }
 +
 +    virtual tsl::elm::Element *requestFocus(tsl::elm::Element *oldFocus,
 +                                            tsl::FocusDirection direction) override {
-+        return nullptr;
++        return m_used ? this : nullptr;
 +    }
++
++    virtual bool onClick(u64 keys) override {
++        if (keys & HidNpadButton_A) {
++            if (m_used && !m_hint && m_key[0]) {
++                if (strcmp(m_key, g_expandedKey) == 0)
++                    g_expandedKey[0] = 0;
++                else
++                    snprintf(g_expandedKey, sizeof(g_expandedKey), "%s", m_key);
++                if (g_list)
++                    g_list->invalidate();
++            }
++            this->triggerClickAnimation();
++            return true;
++        }
++        return false;
++    }
++
++    virtual bool onTouch(tsl::elm::TouchEvent event, s32 currX, s32 currY,
++                         s32 prevX, s32 prevY, s32 initialX, s32 initialY) override {
++        if (event == tsl::elm::TouchEvent::Touch)
++            m_touched = this->inBounds(currX, currY);
++        if (event == tsl::elm::TouchEvent::Release && m_touched) {
++            m_touched = false;
++            if (tsl::elm::Element::getInputMode() == tsl::InputMode::Touch)
++                return this->onClick(HidNpadButton_A);
++        }
++        return false;
++    }
++
++    virtual void setFocused(bool state) override {
++        m_scrollOff = 0;
++        m_scrollCnt = 0;
++        tsl::elm::Element::setFocused(state);
++    }
++
++private:
++    void measure(tsl::gfx::Renderer *renderer, s32 w) {
++        using R = tsl::gfx::Renderer;
++        m_measured = true;
++        m_strip.clear();
++        m_row1.clear();
++        m_row2.clear();
++        m_hostName = m_room.player[0];
++        for (u8 i = 0; i < m_room.playerN; i++) {
++            if (i)
++                m_strip += "、";
++            m_strip += m_room.player[i];
++        }
++        auto [sw, sh] = renderer->drawString(m_strip.c_str(), false, 0, 0, kFontP,
++                                             R::a(tsl::style::color::ColorTransparent));
++        m_stripW = sw;
++        auto [hw, hh] = renderer->drawString(m_hostName.c_str(), false, 0, 0, kFontP,
++                                             R::a(tsl::style::color::ColorTransparent));
++        m_hostW = hw;
++        auto [gw, gh] = renderer->drawString("        ", false, 0, 0, kFontP,
++                                             R::a(tsl::style::color::ColorTransparent));
++        m_loopW = m_stripW + gw;
++        auto [sepW, seph] = renderer->drawString("、", false, 0, 0, kFontP,
++                                                 R::a(tsl::style::color::ColorTransparent));
++
++        /* 按名字边界填两行;两行塞不下或单名超宽 → 整体滚动 */
++        m_overflow = false;
++        std::string *rows[2] = { &m_row1, &m_row2 };
++        u32 rowW[2] = { 0, 0 };
++        int row = 0;
++        for (u8 i = 0; i < m_room.playerN; i++) {
++            auto [nw, nh] = renderer->drawString(m_room.player[i], false, 0, 0, kFontP,
++                                                 R::a(tsl::style::color::ColorTransparent));
++            if (nw > (u32)w) {
++                m_overflow = true;
++                break;
++            }
++            u32 addW = (rowW[row] ? sepW : 0) + nw;
++            if (rowW[row] && rowW[row] + addW > (u32)w) {
++                if (row == 1) {
++                    m_overflow = true;
++                    break;
++                }
++                row = 1;
++                addW = nw;
++            }
++            if (!rows[row]->empty())
++                *rows[row] += "、";
++            *rows[row] += m_room.player[i];
++            rowW[row] += addW;
++        }
++        if (m_overflow) {
++            m_row1.clear();
++            m_row2.clear();
++        }
++    }
++
++    /* 静止行:房主(行 1)用高亮色 */
++    void drawStaticLine(tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 w,
++                        const std::string &line, bool hostFirst) {
++        using R = tsl::gfx::Renderer;
++        renderer->enableScissoring(x, y - 24, w + 8, kPlayerH);
++        if (hostFirst && m_hostW > 0) {
++            renderer->drawString(m_hostName.c_str(), false, x, y, kFontP,
++                                 R::a(tsl::style::color::ColorHighlight));
++            renderer->drawString(line.c_str() + m_hostName.size(), false, x + (s32)m_hostW,
++                                 y, kFontP, R::a(tsl::style::color::ColorText));
++        } else {
++            renderer->drawString(line.c_str(), false, x, y, kFontP,
++                                 R::a(tsl::style::color::ColorText));
++        }
++        renderer->disableScissoring();
++    }
++
++    /* 整体滚动:两行窗口连续滑过整条名字带(名字过长/人多时) */
++    void drawMarquee(tsl::gfx::Renderer *renderer, s32 x0, s32 y0, s32 w) {
++        using R = tsl::gfx::Renderer;
++        if (m_scrollCnt == 90) {
++            if (m_scrollOff >= m_loopW) {
++                m_scrollOff = 0;
++                m_scrollCnt = 0;
++            } else {
++                m_scrollOff++;
++            }
++        } else {
++            m_scrollCnt++;
++        }
++        s32 o = (s32)m_scrollOff;
++        for (int row = 0; row < 2; row++) {
++            s32 y = y0 + 28 + row * kPlayerH;
++            renderer->enableScissoring(x0, y - 24, w + 8, kPlayerH);
++            for (int copy = 0; copy < 2; copy++) {
++                s32 x = x0 - o - row * w + copy * (s32)m_loopW;
++                if (x > x0 + w)
++                    continue;
++                renderer->drawString(m_hostName.c_str(), false, x, y, kFontP,
++                                     R::a(tsl::style::color::ColorHighlight));
++                renderer->drawString(m_strip.c_str() + m_hostName.size(), false,
++                                     x + (s32)m_hostW, y, kFontP,
++                                     R::a(tsl::style::color::ColorText));
++            }
++            renderer->disableScissoring();
++        }
++    }
++
++    void drawPlayers(tsl::gfx::Renderer *renderer) {
++        using R = tsl::gfx::Renderer;
++        s32 x0 = this->getX() + 20;
++        s32 y0 = this->getY() + kRoomH;
++        s32 w = this->getWidth() - 40;
++        if (m_room.playerN == 0) {
++            renderer->drawString(T("该服务器未提供玩家名单", "該伺服器未提供玩家名單"), false,
++                                 x0, y0 + 28, kFontP,
++                                 R::a(tsl::style::color::ColorDescription));
++            return;
++        }
++        if (!m_measured)
++            measure(renderer, w);
++        if (m_overflow) {
++            drawMarquee(renderer, x0, y0, w);
++            return;
++        }
++        drawStaticLine(renderer, x0, y0 + 28, w, m_row1, true);
++        if (!m_row2.empty())
++            drawStaticLine(renderer, x0, y0 + 28 + kPlayerH, w, m_row2, false);
++    }
++
++    MonitorRoom m_room;
++    char m_key[40] = {};
++    char m_hintText[96] = {};
++    bool m_used = false;
++    bool m_hint = false;
++    bool m_touched = false;
++    bool m_measured = false;
++    bool m_overflow = false;
++    std::string m_strip, m_row1, m_row2, m_hostName;
++    u32 m_stripW = 0, m_hostW = 0, m_loopW = 0;
++    u32 m_scrollOff = 0, m_scrollCnt = 0;
 +};
 +
 +/* 帧:在标题下方常驻显示当前服务器的在线人数与房间数量。
@@ -277,21 +540,18 @@ index 8e07c19..22c6127 100644
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -70,18 +139,66 @@ static void detectLanguage()
+@@ -70,18 +387,82 @@ static void detectLanguage()
      strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
  }
  
-+/* (重)建“游戏房间”区块的动态行。快照 version 变化时由 update() 调用。 */
++/* (重)建“游戏房间”区块的行。快照 version 变化时由 update() 调用。
++   行是持久池(只增不删):不用的行 height=0,焦点永远不会挂在已删除
++   元素上;展开/收起只改高度并重排列表。 */
 +static void rebuildRoomSection(const MonitorSnapshot &snap)
 +{
-+    if (!g_list || !g_roomHeader)
++    if (!g_list || !g_roomHeader || g_roomHeaderIndex < 0)
 +        return;
 +
-+    for (auto *e : g_roomItems)
-+        g_list->removeItem(e);
-+    g_roomItems.clear();
-+
-+    /* 区块标题带上服务器名;空闲时给状态提示 */
 +    char header[80];
 +    if (snap.server[0])
 +        snprintf(header, sizeof(header), "%s · %s", T("游戏房间", "遊戲房間"), snap.server);
@@ -299,32 +559,51 @@ index 8e07c19..22c6127 100644
 +        snprintf(header, sizeof(header), "%s", T("游戏房间", "遊戲房間"));
 +    g_roomHeader->setText(header);
 +
-+    if (snap.roomN == 0) {
-+        const char *msg;
-+        if (snap.busy)
-+            msg = T("正在查询…", "正在查詢…");
-+        else if (snap.status[0])
-+            msg = snap.status;
++    char key[MONITOR_MAX_ROOMS][40];
++    for (u32 i = 0; i < snap.roomN; i++) {
++        if (snap.rooms[i].sessionId[0])
++            snprintf(key[i], sizeof(key[i]), "%s", snap.rooms[i].sessionId);
 +        else
-+            msg = T("暂无房间", "暫無房間");
-+        auto *item = new PlainListItem(msg);
-+        /* 插到「游戏房间」标题正下方,而不是追加到列表末尾 */
-+        g_list->addItem(item, 0, g_roomHeaderIndex + 1);
-+        g_roomItems.push_back(item);
-+        return;
++            snprintf(key[i], sizeof(key[i]), "i%u", (unsigned)i);
 +    }
 +
-+    for (u32 i = 0; i < snap.roomN; i++) {
-+        char value[24];
-+        if (snap.rooms[i].playersMax > 0)
-+            snprintf(value, sizeof(value), "%u/%u",
-+                     snap.rooms[i].players, snap.rooms[i].playersMax);
-+        else
-+            snprintf(value, sizeof(value), "%u", snap.rooms[i].players);
-+        auto *item = new PlainListItem(snap.rooms[i].game, value);
-+        g_list->addItem(item, 0, g_roomHeaderIndex + 1 + (int)g_roomItems.size());
-+        g_roomItems.push_back(item);
++    /* 展开的房间若已消失,收起 */
++    if (g_expandedKey[0]) {
++        bool found = false;
++        for (u32 i = 0; i < snap.roomN; i++)
++            if (strcmp(key[i], g_expandedKey) == 0) { found = true; break; }
++        if (!found)
++            g_expandedKey[0] = 0;
 +    }
++
++    u32 need = snap.roomN > 0 ? snap.roomN : 1;   /* 0 房间时用 1 行提示 */
++    while (g_roomRows.size() < need) {
++        auto *row = new RoomRow();
++        g_roomRows.push_back(row);
++        g_list->addItem(row, 0, g_roomHeaderIndex + 1 + (int)g_roomRows.size() - 1);
++    }
++
++    for (u32 i = 0; i < g_roomRows.size(); i++) {
++        if (snap.roomN == 0) {
++            if (i == 0) {
++                const char *msg;
++                if (snap.busy)
++                    msg = T("正在查询…", "正在查詢…");
++                else if (snap.status[0])
++                    msg = snap.status;
++                else
++                    msg = T("暂无房间", "暫無房間");
++                g_roomRows[i]->setHint(msg);
++            } else {
++                g_roomRows[i]->clearRow();
++            }
++        } else if (i < snap.roomN) {
++            g_roomRows[i]->setRoom(snap.rooms[i], key[i]);
++        } else {
++            g_roomRows[i]->clearRow();
++        }
++    }
++    g_list->invalidate();
 +}
 +
  class MainGui : public tsl::Gui {
@@ -345,7 +624,7 @@ index 8e07c19..22c6127 100644
  
          if (g_state == State::Error) {
              list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
-@@ -95,7 +212,19 @@ public:
+@@ -95,7 +476,23 @@ public:
              list->addItem(new tsl::elm::CategoryHeader(T("互联网中继（跨网联机）", "網際網路中繼（跨網連線）")));
              list->addItem(new ConfigToggleListItem(T("互联网中继", "網際網路中繼"), ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
  
@@ -360,12 +639,16 @@ index 8e07c19..22c6127 100644
 +            g_roomHeader = new tsl::elm::CategoryHeader(T("游戏房间", "遊戲房間"));
 +            list->addItem(g_roomHeader);
 +
++            // 房间区与下方服务器列表用分隔标题隔开。
++            list->addItem(new tsl::elm::CategoryHeader(
++                T("中继服务器（按 A 切换）", "中繼伺服器（按 A 切換）")));
++
              g_serverItems.clear();
 +            g_selectedName[0] = 0;
              u32 count = 0;
              if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count))) {
                  list->addItem(new tsl::elm::ListItem(T("读取服务器列表失败", "讀取伺服器清單失敗")));
-@@ -109,9 +238,11 @@ public:
+@@ -109,9 +506,11 @@ public:
                  for (u32 i = 0; i < count; i++) {
                      char name[32] = {};
                      ldnMitmGetRelayServerName(&g_ldnConfig, i, name);
@@ -378,7 +661,7 @@ index 8e07c19..22c6127 100644
                          if (keys & HidNpadButton_A) {
                              if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
                                  g_serverItems[i]->setValue(T("错误", "錯誤"));
-@@ -126,6 +257,9 @@ public:
+@@ -126,6 +525,9 @@ public:
                              // there with only a star until the overlay is
                              // reopened.
                              g_shown_latency = 0xFFFFFFFFu;
@@ -388,7 +671,7 @@ index 8e07c19..22c6127 100644
                              return true;
                          }
                          return false;
-@@ -211,12 +345,23 @@ public:
+@@ -211,12 +613,23 @@ public:
          // cached value made update() return early and the label stayed at
          // just "*" with no "--" and no number.
          g_shown_latency = 0xFFFFFFFFu;
@@ -412,7 +695,7 @@ index 8e07c19..22c6127 100644
          // Show the live relay latency next to the selected server.
          // Only the selected server is connected, so it is the only one
          // whose round-trip time we can actually know.
-@@ -265,9 +410,14 @@ public:
+@@ -265,9 +678,14 @@ public:
      virtual void initServices() override {
          g_state = State::Uninit;
          detectLanguage();
@@ -427,7 +710,7 @@ index 8e07c19..22c6127 100644
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,13 +438,20 @@ public:
+@@ -288,13 +706,20 @@ public:
              g_state = State::Loaded;
          });
  
@@ -451,10 +734,10 @@ index 8e07c19..22c6127 100644
      virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..483a887
+index 0000000..e5bd8cd
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,1955 @@
+@@ -0,0 +1,1990 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -1817,28 +2100,61 @@ index 0000000..483a887
 +        char cid[24] = {};
 +        JsonGetStrAny(p, "contentId", "content_id", cid, sizeof(cid));
 +        FormatGameName(cid, r.game, sizeof(r.game));
++        JsonGetStrAny(p, "sessionId", "session_id", r.sessionId, sizeof(r.sessionId));
 +
 +        u32 v = 0;
 +        if (JsonGetU32(p, "nodeCount", &v) || JsonGetU32(p, "node_count", &v))
 +            r.players = v;
 +        if (JsonGetU32(p, "nodeCountMax", &v) || JsonGetU32(p, "node_count_max", &v))
 +            r.playersMax = v;
-+        if (r.players == 0) {
-+            const char *nodes = JsonGet(p, "nodes");
-+            if (nodes && *nodes == '[') {
-+                u32 cnt = 0;
-+                const char *q = JsWs(nodes + 1);
-+                while (*q && *q != ']') {
-+                    const char *next = JsonSkip(q, 1);
-+                    if (!next)
-+                        break;
-+                    cnt++;
-+                    q = JsWs(next);
-+                    if (*q == ',') q = JsWs(q + 1);
++
++        /* 玩家名单:hostPlayerName 排最前(UI 异色),再收节点名 */
++        char hostName[MONITOR_PLAYER_LEN] = {};
++        JsonGetStrAny(p, "hostPlayerName", "host_player_name", hostName, sizeof(hostName));
++        const char *nodes = JsonGet(p, "nodes");
++        if (!nodes)
++            nodes = JsonGet(p, "players");   /* rest 服务器的同义字段 */
++        if (nodes && *nodes == '[') {
++            const char *q = JsWs(nodes + 1);
++            while (*q && *q != ']' && r.playerN < MONITOR_MAX_PLAYERS) {
++                const char *next = JsonSkip(q, 1);
++                if (!next)
++                    break;
++                if (*q == '{') {
++                    char nm[MONITOR_PLAYER_LEN] = {};
++                    if (JsonGetStrAny(q, "playerName", "player_name", nm, sizeof(nm)) ||
++                        JsonGetStr(q, "name", nm, sizeof(nm))) {
++                        if (nm[0])
++                            snprintf(r.player[r.playerN++], MONITOR_PLAYER_LEN, "%s", nm);
++                    }
++                } else if (*q == '"') {
++                    char nm[MONITOR_PLAYER_LEN] = {};
++                    const char *s2 = q;
++                    if (JsonString(&s2, nm, sizeof(nm)) && nm[0])
++                        snprintf(r.player[r.playerN++], MONITOR_PLAYER_LEN, "%s", nm);
 +                }
-+                r.players = cnt;
++                q = JsWs(next);
++                if (*q == ',') q = JsWs(q + 1);
 +            }
 +        }
++        /* 房主最前且不重复 */
++        if (hostName[0]) {
++            bool dup = false;
++            for (u8 i = 0; i < r.playerN; i++) {
++                if (strcmp(r.player[i], hostName) == 0) {
++                    dup = true;
++                    break;
++                }
++            }
++            if (!dup && r.playerN < MONITOR_MAX_PLAYERS) {
++                memmove(r.player[1], r.player[0], (size_t)r.playerN * MONITOR_PLAYER_LEN);
++                snprintf(r.player[0], MONITOR_PLAYER_LEN, "%s", hostName);
++                r.playerN++;
++            }
++        }
++        /* 人数兜底放到房主处理之后:房主若不在 nodes 里也计入人数 */
++        if (r.players == 0)
++            r.players = r.playerN ? r.playerN : 1;
 +        if (r.playersMax == 0)
 +            r.playersMax = r.players;
 +        if (r.game[0])
@@ -1934,6 +2250,7 @@ index 0000000..483a887
 +                             char *sessionTag, size_t tagN) {
 +    if (len < 0x480)
 +        return false;
++    memset(out, 0, sizeof(*out));
 +    char cid[20];
 +    for (int i = 0; i < 8; i++)
 +        snprintf(cid + i * 2, 3, "%02X", p[7 - i]);   /* 小端 8 字节 -> 标题ID */
@@ -1962,6 +2279,7 @@ index 0000000..483a887
 +                snprintf(tag + i * 2, 3, "%02x", p[16 + i]);
 +            snprintf(sessionTag, tagN, "%s", tag);
 +        }
++        snprintf(out->sessionId, sizeof(out->sessionId), "%s", sessionTag);
 +    }
 +    return out->game[0] != 0;
 +}
@@ -2412,10 +2730,10 @@ index 0000000..483a887
 +}
 diff --git a/overlay/source/monitor.hpp b/overlay/source/monitor.hpp
 new file mode 100644
-index 0000000..4d606de
+index 0000000..21cf18e
 --- /dev/null
 +++ b/overlay/source/monitor.hpp
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,57 @@
 +#pragma once
 +#include <switch.h>
 +
@@ -2433,11 +2751,16 @@ index 0000000..4d606de
 +
 +#define MONITOR_MAX_ROOMS  32
 +#define MONITOR_MAX_SERVERS 32
++#define MONITOR_MAX_PLAYERS 8
++#define MONITOR_PLAYER_LEN  32
 +
 +struct MonitorRoom {
 +    char game[52];      /* 中文游戏名;未映射时是 16 位标题 ID */
 +    u32  players;       /* 当前人数 */
 +    u32  playersMax;    /* 人数上限,0 = 未知 */
++    u8   playerN;       /* 玩家名有效条数(0 = 服务器未提供名单) */
++    char player[MONITOR_MAX_PLAYERS][MONITOR_PLAYER_LEN]; /* 玩家名,房主在 [0] */
++    char sessionId[33]; /* 房间标识(sessionId hex;扫描房=标题ID),展开状态跟随用 */
 +};
 +
 +struct MonitorSnapshot {
