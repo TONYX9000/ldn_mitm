@@ -1,4 +1,4 @@
-From 2d5fb98bed3134e79e485b7bbbcf9c4efab3f658 Mon Sep 17 00:00:00 2001
+From 8d702079860988dfad6057b95a6a2715751db0da Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH] overlay: online counts/room list and relay management
@@ -93,7 +93,7 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
 本轮合并（仍在既有补丁 0010 内，不新增编号）：
 - 合入分支服务器管理页 AddServerGui、添加/删除/恢复默认操作、列表重建与焦点恢复；服务器列表继续使用 patch 10 的自绘 ServerRow，保留名称/地址布局、右侧延迟和在线/房间数字间距。
 - 监视器标题、RoomRow、MonitorFrame、所选服务器刷新与游戏标题识别完整保留；MonitorFrame 下方同时显示版本，空版本显示“版本未知”。
-- 最大容量统一为 32；默认服务器仍由 0009 的原 13 条配置恢复，4 条备用节点只在 17 条候选目录中。
+- 最大容量统一为 32；出厂及恢复默认列表为 12 条，0009 中移除 relay.cfg 的「中国·江苏(2) yordon.cn:11451」；17 条添加候选目录仍保留该服务器作为可选候选，另有 4 条备用节点。
 - 在既有补丁 0010 内增加 room advertiseData 标题识别、UDP NetworkInfo 广告数据解析、旧 GraphQL schema 回退及纯主机回归测试；未识别 all-F 房间安全显示「未知游戏」，不读取本机 ProgramId。
 
 Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-TONYX9000

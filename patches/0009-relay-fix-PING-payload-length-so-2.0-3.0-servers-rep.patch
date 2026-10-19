@@ -1,42 +1,32 @@
-From 3502b492d662e499484bd2ee911751a15fc9a9f7 Mon Sep 17 00:00:00 2001
+From 8d4478d4d1d98dbd5c3a89f035a63e60c7c2c60e Mon Sep 17 00:00:00 2001
 From: TONYX9000 <tonyx9000@users.noreply.github.com>
 Date: Mon, 19 Oct 2026 13:36:30 +0000
-Subject: [PATCH 9/10] relay: fix PING and merge relay server management
+Subject: [PATCH] relay: manage server catalog and preserve 12 defaults
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-移植 8463704：修复 PING payload，并将目标分支服务器管理改动合并到现有补丁 0009。
+Merge relay management, builtin server candidates, idle latency preview, and local IP support into patch 9 while retaining the PING fix.
 
-- PING 发送缓冲为 5 字节（0x02 命令字节 + `ldnp` 四字节 payload）：
-  兼容只回显前 4 字节的 1.0 服务器，也满足 2.0/3.0 的长度校验。
-- 保留 `relay.cfg` 原有 13 条服务器，顺序、名称及
-  `selected=中国·河南` 不变；荷兰两条仍分别命名 `荷兰`、`荷兰(2)`。
-- 增加服务器信息/添加/删除/恢复默认及内置目录 IPC；上限统一为 32。
-  内置目录有 17 条，其中 4 条分支备用节点仅作为候选，不进入默认配置。
-- 恢复默认使用独立的 13 条配置表，而非 17 条候选目录；idle 状态下
-  增加后台延迟预览，并保留本机 IP 查询。
-
-Squashed from aylz10/ldn_mitm2 commits 8463704 and the server-management,
-capacity/sorting, local-IP, idle-preview commits through 0b83cd3.
+Remove 中国·江苏(2) yordon.cn:11451 from the shipped relay.cfg and restore-default table. Keep it only in the optional built-in add-server catalog; the remaining factory list has 12 entries.
 
 Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-TONYX9000
 ---
- config/ldn_mitm/relay.cfg              |  62 +---
+ config/ldn_mitm/relay.cfg              |  61 +---
  ldn_mitm/source/interfaces/iconfig.hpp |  18 +-
  ldn_mitm/source/ldnmitm_config.cpp     |  46 +++
  ldn_mitm/source/ldnmitm_config.hpp     |  11 +
- ldn_mitm/source/relay_client.cpp       | 463 ++++++++++++++++++++++++-
+ ldn_mitm/source/relay_client.cpp       | 462 ++++++++++++++++++++++++-
  ldn_mitm/source/relay_client.hpp       |  19 +
  overlay/source/ldn.c                   |  45 +++
  overlay/source/ldn.h                   |  17 +
- 8 files changed, 627 insertions(+), 54 deletions(-)
+ 8 files changed, 625 insertions(+), 54 deletions(-)
 
 diff --git a/config/ldn_mitm/relay.cfg b/config/ldn_mitm/relay.cfg
-index d313e3b..3353d59 100644
+index d313e3b..80876c7 100644
 --- a/config/ldn_mitm/relay.cfg
 +++ b/config/ldn_mitm/relay.cfg
-@@ -1,49 +1,17 @@
+@@ -1,49 +1,16 @@
  enabled=1
  broadcast=1
 -selected=China-Beijing
@@ -92,7 +82,6 @@ index d313e3b..3353d59 100644
 +中国·河南(2)    122.114.8.38:11451
 +中国·广东       gugu.mulaosi.cn:11451
 +中国·江苏       wuaiyi.top:11451
-+中国·江苏(2)    yordon.cn:11451
 +中国·北京       olunira.fun:11451
 +中国·上海       47.102.121.212:11451
 +中国·丹麦       switch.r3ps4j.nl:11452
@@ -214,18 +203,18 @@ index 536567c..1fc24dd 100644
      static_assert(ams::mitm::ldn::IsILdnConfig<LdnConfig>);
  
 diff --git a/ldn_mitm/source/relay_client.cpp b/ldn_mitm/source/relay_client.cpp
-index 9cf36fc..12e6216 100644
+index 9cf36fc..98fee85 100644
 --- a/ldn_mitm/source/relay_client.cpp
 +++ b/ldn_mitm/source/relay_client.cpp
-@@ -83,6 +83,52 @@ namespace ams::mitm::ldn::relay {
+@@ -83,6 +83,51 @@ namespace ams::mitm::ldn::relay {
          struct Server { char name[ServerNameLen]; char host[64]; u32 ip; u16 port; };
          Server g_servers[MaxServers];
          int g_count = 0;
 +
 +        /* Factory candidate catalog for the overlay's "add server" page.
 +           This is intentionally separate from g_defaultServers: restoring
-+           defaults must reproduce the shipped 13-entry relay.cfg exactly,
-+           while the catalog also offers four backup relays. Keep candidate
++           defaults must reproduce the shipped 12-entry relay.cfg exactly,
++           while the catalog also offers optional relays. Keep candidate
 +           names unique (especially the Dutch entries). */
 +        struct BuiltinServer { const char *name; const char *host; u16 port; };
 +        constexpr BuiltinServer g_builtin[] = {
@@ -256,7 +245,6 @@ index 9cf36fc..12e6216 100644
 +            { "中国·河南(2)",    "122.114.8.38",                   11451 },
 +            { "中国·广东",       "gugu.mulaosi.cn",                11451 },
 +            { "中国·江苏",       "wuaiyi.top",                     11451 },
-+            { "中国·江苏(2)",    "yordon.cn",                      11451 },
 +            { "中国·北京",       "olunira.fun",                    11451 },
 +            { "中国·上海",       "47.102.121.212",                 11451 },
 +            { "中国·丹麦",       "switch.r3ps4j.nl",               11452 },
@@ -270,7 +258,7 @@ index 9cf36fc..12e6216 100644
          std::atomic_int  g_selected{0};
          std::atomic_bool g_enabled{false};
          /* Low 16 bits of our virtual address 10.13.x.x; 0 = unassigned. */
-@@ -116,6 +162,11 @@ namespace ams::mitm::ldn::relay {
+@@ -116,6 +161,11 @@ namespace ams::mitm::ldn::relay {
          };
          LatencyState g_latency;
  
@@ -282,7 +270,7 @@ index 9cf36fc..12e6216 100644
          /* Guards relay.cfg I/O and its buffers. */
          constinit os::SdkMutex g_config_mutex;
          constexpr size_t ConfigCap = 4096;
-@@ -313,6 +364,12 @@ namespace ams::mitm::ldn::relay {
+@@ -313,6 +363,12 @@ namespace ams::mitm::ldn::relay {
                  if (IsDirectiveLine(p)) {
                      continue;
                  }
@@ -295,7 +283,7 @@ index 9cf36fc..12e6216 100644
                  const size_t need = std::strlen(line) + 1;
                  if (pos + need >= OutCap) {
                      LogFormat("relay: not persisting settings, rewritten config too large");
-@@ -323,6 +380,19 @@ namespace ams::mitm::ldn::relay {
+@@ -323,6 +379,19 @@ namespace ams::mitm::ldn::relay {
                  pos += need;
              }
  
@@ -315,7 +303,7 @@ index 9cf36fc..12e6216 100644
              fs::FileHandle f;
              if (R_FAILED(fs::OpenFile(std::addressof(f), RelayConfigPath, fs::OpenMode_Write | fs::OpenMode_AllowAppend))) {
                  if (R_FAILED(fs::CreateFile(RelayConfigPath, 0)) ||
-@@ -438,6 +508,7 @@ namespace ams::mitm::ldn::relay {
+@@ -438,6 +507,7 @@ namespace ams::mitm::ldn::relay {
             server's 81ms, which is worse than showing nothing. */
          g_latency.ms = 0;
          g_latency.waiting = 0;
@@ -323,7 +311,7 @@ index 9cf36fc..12e6216 100644
          PersistConfig();
      }
  
-@@ -447,6 +518,152 @@ namespace ams::mitm::ldn::relay {
+@@ -447,6 +517,152 @@ namespace ams::mitm::ldn::relay {
         must be validated against. -1 = no transport open yet. */
      int  ActiveServer()       { return g_active_server.load(); }
  
@@ -476,7 +464,7 @@ index 9cf36fc..12e6216 100644
      u32  ServerIp() {
          const int i = g_selected.load();
          return (i >= 0 && i < g_count) ? g_servers[i].ip : 0;
-@@ -464,10 +681,30 @@ namespace ams::mitm::ldn::relay {
+@@ -464,10 +680,30 @@ namespace ams::mitm::ldn::relay {
          return g_id_source.load();
      }
  
@@ -508,7 +496,7 @@ index 9cf36fc..12e6216 100644
          }
          return ntohl(ip);
      }
-@@ -852,7 +1089,20 @@ namespace ams::mitm::ldn::relay {
+@@ -852,7 +1088,20 @@ namespace ams::mitm::ldn::relay {
          LogFormat("relay: ping tx fd=%d armed=%d waiting=%d since=%lldms misses=%u",
                    m_fd, was_waiting == 0, g_latency.waiting.load(), since,
                    m_ping_misses.load());
@@ -530,7 +518,7 @@ index 9cf36fc..12e6216 100644
          const int sent = send(m_fd, p, sizeof(p), 0);
          if (sent != static_cast<int>(sizeof(p))) {
              LogFormat("relay: ping send failed rc=%d errno=%d", sent, errno);
-@@ -860,20 +1110,221 @@ namespace ams::mitm::ldn::relay {
+@@ -860,20 +1109,221 @@ namespace ams::mitm::ldn::relay {
          return sent;
      }
  
