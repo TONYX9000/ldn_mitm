@@ -1,4 +1,4 @@
-From f317813373793051ca8ae59ac04add8ba0e1702e Mon Sep 17 00:00:00 2001
+From decd01f54e4234d1b2a5755d406add83dcb2f3eb Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
 Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
@@ -77,29 +77,16 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
 - 删掉 main.cpp 的 #include <arm/counter.h>(错误路径:libnx 里是
   switch/arm/counter.h,且 <switch.h> 本就传递包含;真实 CI 硬错误
   fatal error: arm/counter.h: No such file or directory)
-
-反馈修复(均在补丁 10 内完成,不新增补丁):
-- 房间 5 秒 TTL 缓存:以 sessionId 为键,命中刷新时间戳、当次未出现
-  再保留 5 秒;查询瞬间失败时 5 秒内沿用最近一次成功的在线/房间数;
-  轮询查询窗口内不再清空统计与列表,消除扫描丢包导致的每秒闪烁;
-  服务器身份(host:port)变化时缓存整体清空防串台
-- 游戏名/游戏标题完整显示、不加省略号(宽度不够时整体缩字号);
-  服务器名/地址仅当会伸进右侧「* 延迟」区域时才截断加省略号
-  (libtesla limitStringLength 会无条件补「…」,原无条件调用把刚好
-  放得下的文本末字符也切掉了)
-- 扫描响应的 NetworkInfo 解析 nodes[] 用户名(0x68 起、步长 0x40,
-  isConnected @+11、userName[33] @+12),主机 nodes[0] 置顶;
-  扫描补出的房间不再永远显示「该服务器未提供玩家名单」
 ---
  .github/workflows/build.yml   |   20 +-
  .github/workflows/nightly.yml |   23 +-
  .github/workflows/release.yml |   30 +-
  Makefile                      |    6 +
  overlay/Makefile              |    9 +-
- overlay/source/main.cpp       |  660 +++++++++-
- overlay/source/monitor.cpp    | 2205 +++++++++++++++++++++++++++++++++
+ overlay/source/main.cpp       |  633 +++++++++-
+ overlay/source/monitor.cpp    | 2068 +++++++++++++++++++++++++++++++++
  overlay/source/monitor.hpp    |   71 ++
- 8 files changed, 2959 insertions(+), 65 deletions(-)
+ 8 files changed, 2795 insertions(+), 65 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
@@ -285,7 +272,7 @@ index e2cdc19..891ccd1 100644
  #---------------------------------------------------------------------------------
  # list of directories containing libraries, this must be the top level containing
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..1ed1604 100644
+index 8e07c19..affa57b 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,8 @@
@@ -320,7 +307,7 @@ index 8e07c19..1ed1604 100644
  /* Traditional / Simplified Chinese switch. The overlay used to hardcode
     Simplified strings, which left Traditional Chinese consoles with the
     wrong glyphs. libtesla already loads both CJK shared fonts, so all we
-@@ -34,6 +43,443 @@ static bool g_isTraditional = false;
+@@ -34,6 +43,416 @@ static bool g_isTraditional = false;
  
  #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
  
@@ -411,22 +398,10 @@ index 8e07c19..1ed1604 100644
 +                                             R::a(tsl::style::color::ColorTransparent));
 +        renderer->drawString(val, false, this->getX() + this->getWidth() - 20 - (s32)vw,
 +                             this->getY() + 45, 20, R::a(tsl::style::color::ColorHighlight));
-+        /* 游戏名/游戏标题完整显示、不加省略号:先按原字号度量,放不下
-+         * 剩余宽度(左边距 20 + 右侧人数 vw + 间隔/右边距 30)时整体
-+         * 等比缩字号(下限 12),任何情况下都不截字、不补「…」。 */
-+        {
-+            const s32 avail = this->getWidth() - 20 - (s32)vw - 30;
-+            float gfont = 23;
-+            auto [gw, gh] = renderer->drawString(m_room.game, false, 0, 0, gfont,
-+                                                 R::a(tsl::style::color::ColorTransparent));
-+            if ((s32)gw > avail && gw > 0) {
-+                gfont = gfont * (float)avail / (float)gw;
-+                if (gfont < 12)
-+                    gfont = 12;
-+            }
-+            renderer->drawString(m_room.game, false, this->getX() + 20, this->getY() + 45,
-+                                 gfont, R::a(tsl::style::color::ColorText));
-+        }
++        std::string name = renderer->limitStringLength(m_room.game, false, 22,
++                                                       this->getWidth() - (s32)vw - 70);
++        renderer->drawString(name.c_str(), false, this->getX() + 20, this->getY() + 45, 23,
++                             R::a(tsl::style::color::ColorText));
 +
 +        if (expanded())
 +            drawPlayers(renderer);
@@ -643,29 +618,14 @@ index 8e07c19..1ed1604 100644
 +        renderer->drawRect(this->getX(), this->getY(), this->getWidth(), 1,
 +                           R::a(tsl::style::color::ColorFrame));
 +        /* 上排:服务器名(选中用高亮色);下排:服务器地址 */
-+        /* 服务器名/地址:默认完整显示;只有会伸进右侧「* 延迟」区域
-+         * (右 margin 20 + 延迟文本宽 + 间隔 10)时才截到该边界加省略号,
-+         * 没超过就一个字符都不截。 */
-+        s32 rightReserve = 20;
-+        if (m_right[0]) {
-+            auto [rw, rh] = renderer->drawString(m_right, false, 0, 0, 20,
-+                                                 R::a(tsl::style::color::ColorTransparent));
-+            rightReserve += (s32)rw + 10;
-+        }
-+        const s32 avail = this->getWidth() - 20 - rightReserve;
-+        auto fit = [&](const char *s, float fs) -> std::string {
-+            auto [w, h] = renderer->drawString(s, false, 0, 0, fs,
-+                                               R::a(tsl::style::color::ColorTransparent));
-+            if ((s32)w <= avail)
-+                return s;
-+            return renderer->limitStringLength(s, false, fs, avail);
-+        };
-+        std::string name = fit(m_name, 22);
++        std::string name = renderer->limitStringLength(
++            m_name, false, 22, this->getWidth() - 180);
 +        renderer->drawString(name.c_str(), false, this->getX() + 20,
 +                             this->getY() + 32, 22,
 +                             R::a(m_selected ? tsl::style::color::ColorHighlight
 +                                             : tsl::style::color::ColorText));
-+        std::string addr = fit(m_addr, 16);
++        std::string addr = renderer->limitStringLength(
++            m_addr, false, 16, this->getWidth() - 180);
 +        renderer->drawString(addr.c_str(), false, this->getX() + 20,
 +                             this->getY() + 58, 16,
 +                             R::a(tsl::style::color::ColorDescription));
@@ -764,7 +724,7 @@ index 8e07c19..1ed1604 100644
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -70,18 +516,82 @@ static void detectLanguage()
+@@ -70,18 +489,82 @@ static void detectLanguage()
      strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
  }
  
@@ -848,7 +808,7 @@ index 8e07c19..1ed1604 100644
  
          if (g_state == State::Error) {
              list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
-@@ -95,43 +605,68 @@ public:
+@@ -95,43 +578,68 @@ public:
              list->addItem(new tsl::elm::CategoryHeader(T("互联网中继（跨网联机）", "網際網路中繼（跨網連線）")));
              list->addItem(new ConfigToggleListItem(T("互联网中继", "網際網路中繼"), ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
  
@@ -949,7 +909,7 @@ index 8e07c19..1ed1604 100644
                  }
              }
  
-@@ -211,16 +746,40 @@ public:
+@@ -211,16 +719,40 @@ public:
          // cached value made update() return early and the label stayed at
          // just "*" with no "--" and no number.
          g_shown_latency = 0xFFFFFFFFu;
@@ -991,7 +951,7 @@ index 8e07c19..1ed1604 100644
              return;
          }
          u32 ms = 0;
-@@ -233,9 +792,8 @@ public:
+@@ -233,9 +765,8 @@ public:
          }
          g_shown_latency = ms;
  
@@ -1003,7 +963,7 @@ index 8e07c19..1ed1604 100644
          char buf[48];
          bool faint = false;
          if (ms == 0) {
-@@ -247,9 +805,9 @@ public:
+@@ -247,9 +778,9 @@ public:
          } else {
              snprintf(buf, sizeof(buf), T("* 延迟 %ums", "* 延遲 %ums"), ms);
          }
@@ -1016,7 +976,7 @@ index 8e07c19..1ed1604 100644
              }
          }
      }
-@@ -265,9 +823,14 @@ public:
+@@ -265,9 +796,14 @@ public:
      virtual void initServices() override {
          g_state = State::Uninit;
          detectLanguage();
@@ -1031,7 +991,7 @@ index 8e07c19..1ed1604 100644
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,14 +851,25 @@ public:
+@@ -288,14 +824,25 @@ public:
              g_state = State::Loaded;
          });
  
@@ -1061,10 +1021,10 @@ index 8e07c19..1ed1604 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..70189b4
+index 0000000..5469217
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2205 @@
+@@ -0,0 +1,2068 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -2702,24 +2662,6 @@ index 0000000..70189b4
 +        }
 +        snprintf(out->sessionId, sizeof(out->sessionId), "%s", sessionTag);
 +    }
-+    /* 玩家名单:NetworkInfo 的 nodes[8] 带每个节点的用户名(起始 0x68、
-+     * 步长 0x40:isConnected @+11、userName[33] @+12)。之前只读了人数
-+     * 而忽略整段 nodes,扫描补出来的房间永远 playerN=0,UI 只能显示
-+     * 「该服务器未提供玩家名单」。主机(AP, nodes[0])排最前。 */
-+    if (len >= 0x68 + 8u * 0x40) {
-+        u8 pn = 0;
-+        for (u32 i = 0; i < 8 && pn < MONITOR_MAX_PLAYERS; i++) {
-+            const u8 *nd = p + 0x68 + (size_t)i * 0x40;
-+            if (nd[11] == 0)                     /* isConnected */
-+                continue;
-+            char nm[MONITOR_PLAYER_LEN];
-+            memcpy(nm, nd + 12, MONITOR_PLAYER_LEN - 1);
-+            nm[MONITOR_PLAYER_LEN - 1] = 0;
-+            if (nm[0])
-+                snprintf(out->player[pn++], MONITOR_PLAYER_LEN, "%s", nm);
-+        }
-+        out->playerN = pn;
-+    }
 +    return out->game[0] != 0;
 +}
 +
@@ -2920,83 +2862,6 @@ index 0000000..70189b4
 +}
 +
 +/* ------------------------------------------------------------------ */
-+/* 房间 5 秒 TTL 缓存                                                   */
-+/* ------------------------------------------------------------------ */
-+
-+/* 查询/UDP 扫描都有偶发丢包与瞬间空列表(日志里 scan rooms=0/1 交替),
-+ * 直接把当次结果写进快照会让房间行每秒闪一下、展开状态被收掉。
-+ * 缓存以 sessionId 为键:命中即刷新时间戳并更新房间数据;当次没出现
-+ * 的条目再保留 5 秒才删除;服务器身份变化时整体清空。
-+ * 在线人数/房间数量同口径:查询失败时沿用最近一次成功值,超过 5 秒
-+ * 仍失败才退回「未知」。 */
-+static constexpr auto kRoomTtl = std::chrono::seconds(5);
-+
-+struct RoomCacheEnt {
-+    bool used = false;
-+    char key[40] = {};
-+    Deadline lastSeen{};
-+    MonitorRoom room;
-+};
-+static RoomCacheEnt g_roomCache[MONITOR_MAX_ROOMS];
-+static char g_cacheServer[128] = {};    /* 缓存归属的服务器 host:port */
-+static Deadline g_lastOk{};             /* 最近一次查询成功时刻 */
-+static bool  g_haveLastOk = false;
-+static s32   g_lastOnline = -1;
-+static s32   g_lastRoomCount = -1;
-+
-+static void RoomCacheKey(const MonitorRoom &r, char *out, size_t n) {
-+    if (r.sessionId[0])
-+        snprintf(out, n, "%s", r.sessionId);
-+    else
-+        snprintf(out, n, "g:%s", r.game);
-+}
-+
-+static void RoomCacheReset() {
-+    for (auto &e : g_roomCache)
-+        e.used = false;
-+    g_cacheServer[0] = 0;
-+    g_haveLastOk = false;
-+    g_lastOnline = -1;
-+    g_lastRoomCount = -1;
-+}
-+
-+static void RoomCacheUpsert(const MonitorRoom &r, const Deadline &now) {
-+    char key[40];
-+    RoomCacheKey(r, key, sizeof(key));
-+    int freeSlot = -1, oldest = -1;
-+    for (u32 i = 0; i < MONITOR_MAX_ROOMS; i++) {
-+        RoomCacheEnt &e = g_roomCache[i];
-+        if (!e.used) {
-+            if (freeSlot < 0)
-+                freeSlot = (int)i;
-+            continue;
-+        }
-+        if (strcmp(e.key, key) == 0) {
-+            e.room = r;
-+            e.lastSeen = now;
-+            return;
-+        }
-+        if (oldest < 0 || e.lastSeen < g_roomCache[oldest].lastSeen)
-+            oldest = (int)i;
-+    }
-+    int slot = (freeSlot >= 0) ? freeSlot : oldest;
-+    if (slot < 0)
-+        return;
-+    RoomCacheEnt &e = g_roomCache[slot];
-+    e.used = true;
-+    snprintf(e.key, sizeof(e.key), "%s", key);
-+    e.lastSeen = now;
-+    e.room = r;
-+}
-+
-+static void RoomCacheExpire(const Deadline &now) {
-+    for (auto &e : g_roomCache) {
-+        if (e.used && (now - e.lastSeen) > kRoomTtl)
-+            e.used = false;
-+    }
-+}
-+
-+/* ------------------------------------------------------------------ */
 +/* 刷新流程                                                            */
 +/* ------------------------------------------------------------------ */
 +
@@ -3014,8 +2879,9 @@ index 0000000..70189b4
 +    {
 +        std::scoped_lock lk(g_mutex);
 +        g_snap.busy = true;
-+        /* 不清空 online/roomCount/rooms:轮询期间继续显示上一次的值,
-+         * 统计数字与房间列表不在查询窗口里闪空(TTL 缓存兜底)。 */
++        g_snap.online = -1;
++        g_snap.roomCount = -1;
++        g_snap.roomN = 0;
 +        snprintf(g_snap.status, sizeof(g_snap.status), "%s",
 +                 T_STR("正在查询…", "正在查詢…"));
 +    }
@@ -3040,15 +2906,6 @@ index 0000000..70189b4
 +        std::scoped_lock lk(g_mutex);
 +        snprintf(g_snap.server, sizeof(g_snap.server), "%.47s",
 +                 name[0] ? name : (host[0] ? host : "?"));
-+    }
-+
-+    /* 服务器身份变化:旧服务器的房间/统计缓存整体作废,避免串台。 */
-+    {
-+        char ident[128];
-+        snprintf(ident, sizeof(ident), "%s:%u", host, (unsigned)port);
-+        if (strcmp(ident, g_cacheServer) != 0)
-+            RoomCacheReset();
-+        snprintf(g_cacheServer, sizeof(g_cacheServer), "%s", ident);
 +    }
 +
 +    /* 2. 订阅(chinese_db.json):开盖/手动刷新时拉取(周期轮询跳过),
@@ -3107,41 +2964,14 @@ index 0000000..70189b4
 +        MonLog(m);
 +    }
 +
-+    /* 7. 并入房间 5 秒 TTL 缓存后写快照:当次查到的房间刷新时间戳,
-+     *    没查到的旧房间再保留 5 秒,列表不再随单次丢包闪烁。 */
-+    u32 mlogN = 0;
-+    s32 mlogOn = -1;
++    /* 7. 写快照 */
 +    {
-+        const Deadline now = std::chrono::steady_clock::now();
-+        if (ok) {
-+            for (u32 i = 0; i < qr.roomN; i++)
-+                RoomCacheUpsert(qr.rooms[i], now);
-+            g_lastOk = now;
-+            g_haveLastOk = true;
-+        }
-+        RoomCacheExpire(now);
-+
 +        std::scoped_lock lk(g_mutex);
-+        u32 n = 0;
-+        for (u32 i = 0; i < MONITOR_MAX_ROOMS; i++) {
-+            if (g_roomCache[i].used)
-+                g_snap.rooms[n++] = g_roomCache[i].room;
-+        }
-+        g_snap.roomN = n;
-+        const bool fresh = g_haveLastOk && (now - g_lastOk) <= kRoomTtl;
-+        if (ok) {
-+            g_snap.online = qr.online;
-+            g_snap.roomCount = (s32)n;
-+            g_lastOnline = qr.online;
-+            g_lastRoomCount = (s32)n;
-+        } else if (fresh) {
-+            /* 瞬间失败:5 秒内沿用最近一次成功的在线/房间数 */
-+            g_snap.online = g_lastOnline;
-+            g_snap.roomCount = g_lastRoomCount;
-+        } else {
-+            g_snap.online = -1;
-+            g_snap.roomCount = -1;
-+        }
++        g_snap.online = qr.online;
++        g_snap.roomCount = ok ? (s32)qr.roomN : -1;
++        g_snap.roomN = qr.roomN;
++        for (u32 i = 0; i < qr.roomN; i++)
++            g_snap.rooms[i] = qr.rooms[i];
 +        if (!ok) {
 +            if (!g_sockInited)
 +                snprintf(g_snap.status, sizeof(g_snap.status), "%s",
@@ -3149,7 +2979,7 @@ index 0000000..70189b4
 +            else
 +                snprintf(g_snap.status, sizeof(g_snap.status), "%s e=%d",
 +                         T_STR("查询失败", "查詢失敗"), g_httpErr);
-+        } else if (n == 0) {
++        } else if (qr.roomN == 0) {
 +            snprintf(g_snap.status, sizeof(g_snap.status), "%s",
 +                     T_STR("暂无房间", "暫無房間"));
 +        } else {
@@ -3157,13 +2987,6 @@ index 0000000..70189b4
 +        }
 +        g_snap.busy = false;
 +        g_snap.version++;
-+        mlogN = n;
-+        mlogOn = g_snap.online;
-+    }
-+    {
-+        char m[48];
-+        snprintf(m, sizeof(m), "cache rooms=%u on=%d", (unsigned)mlogN, (int)mlogOn);
-+        MonLog(m);
 +    }
 +}
 +
