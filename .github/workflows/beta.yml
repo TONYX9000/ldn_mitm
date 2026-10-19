@@ -48,14 +48,17 @@ jobs:
         run: git config --global --add safe.directory '*'
 
       - name: Toolchain versions
+        id: beta_version
         continue-on-error: true
         run: |
           (dkp-pacman -Q 2>/dev/null || pacman -Q 2>/dev/null) \
             | grep -Ei 'devkita64|libnx|newlib|binutils' || true
           "${DEVKITPRO:-/opt/devkitpro}/devkitA64/bin/aarch64-none-elf-gcc" --version | head -1 || true
           git --version || true
-          echo "version string this build will stamp:"
-          echo "  $(git describe --tags 2>/dev/null)$(git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)"
+          short_sha="${GITHUB_SHA:0:7}"
+          version="beta-g${short_sha}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Beta plugin version: ${version}"
           exit 0
 
       - name: Apply port patches (patches/*.patch)
@@ -120,13 +123,29 @@ jobs:
 
       - name: Install switch-curl (订阅 HTTPS 下载)
         run: |
+          set -euo pipefail
           # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
           # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
-          dkp-pacman -Sy --noconfirm switch-curl
+          if dkp-pacman -Q switch-curl >/dev/null 2>&1; then
+            echo "switch-curl already installed"
+          else
+            # DevkitPro package DB refresh can fail with HTTP 403. Do not
+            # make a mirror refresh failure fatal if cached DBs can install it.
+            if ! dkp-pacman -Sy --noconfirm; then
+              echo "::warning::DevkitPro package DB refresh failed; trying cached metadata."
+            fi
+            dkp-pacman -S --noconfirm --needed switch-curl || true
+          fi
+          if ! dkp-pacman -Q switch-curl >/dev/null 2>&1; then
+            echo "::error::Required package switch-curl is not installed."
+            exit 1
+          fi
 
       - name: Build
         id: build
-        run: make -j8 PREFIX="ccache aarch64-none-elf-"
+        env:
+          TARGET_VERSION: ${{ steps.beta_version.outputs.version }}
+        run: make -j8 PREFIX="ccache aarch64-none-elf-" TARGET_VERSION="$TARGET_VERSION"
 
       - name: Upload sdcard
         uses: actions/upload-artifact@v7
