@@ -1,4 +1,4 @@
-From 793409dea14e81aa97ad87f07259ab7eda989c2e Mon Sep 17 00:00:00 2001
+From 2d5fb98bed3134e79e485b7bbbcf9c4efab3f658 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH] overlay: online counts/room list and relay management
@@ -112,6 +112,10 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
 - 对照 slp-server-rust 的 GraphQL NodeInfo，nodes 同时含 player_name 与 is_connected；旧 overlay 只查询 playerName，并把所有非空节点名都加入房间名单，可能把节点槽里已断开的旧昵称显示出来，造成 1/6 却出现多个名字。
 - 主查询增加 isConnected 字段；解析按 connected=true 过滤，去重，并在服务端给出 nodeCount 时以该计数限制名字数。为兼容旧 schema 增加逐级字段回退；旧 schema 没有连接标记时维持原行为。
 - 切换服务器时立即清掉 worker 房间缓存与已发布快照，避免新查询完成前显示上一服务器的名单；新增纯主机测试覆盖 true/false/null/缺字段。
+
+服务器切换后的房间快照错位修复（反馈）：
+- 每次打开刷新或切换目标时更新请求代次，并立即把已发布的房间列表与新选择解绑、清空；
+- 单 worker 的旧服务器查询返回后，若请求代次已过期，则不写入房间缓存、在线/房间数或快照，避免把旧结果显示到新服务器下；新增纯主机 generation gate 回归测试。
 ---
  .github/workflows/build.yml                   |   34 +-
  .github/workflows/nightly.yml                 |   37 +-
@@ -119,18 +123,22 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
  Makefile                                      |    6 +
  overlay/Makefile                              |    9 +-
  overlay/source/main.cpp                       | 1125 +++++++-
- overlay/source/monitor.cpp                    | 2363 +++++++++++++++++
+ overlay/source/monitor.cpp                    | 2420 +++++++++++++++++
  overlay/source/monitor.hpp                    |   71 +
  overlay/source/monitor_player_filter.hpp      |   24 +
- overlay/source/monitor_title_resolver.hpp     |  148 ++
+ overlay/source/monitor_target_generation.hpp  |   22 +
+ overlay/source/monitor_title_resolver.hpp     |  148 +
  overlay/tests/monitor_player_filter_test.cpp  |   21 +
+ .../tests/monitor_target_generation_test.cpp  |   22 +
  overlay/tests/monitor_title_resolver_test.cpp |   49 +
- 12 files changed, 3775 insertions(+), 156 deletions(-)
+ 14 files changed, 3876 insertions(+), 156 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
  create mode 100644 overlay/source/monitor_player_filter.hpp
+ create mode 100644 overlay/source/monitor_target_generation.hpp
  create mode 100644 overlay/source/monitor_title_resolver.hpp
  create mode 100644 overlay/tests/monitor_player_filter_test.cpp
+ create mode 100644 overlay/tests/monitor_target_generation_test.cpp
  create mode 100644 overlay/tests/monitor_title_resolver_test.cpp
 
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
@@ -1590,10 +1598,10 @@ index 8e07c19..4b78435 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..79381ad
+index 0000000..3cf5275
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2363 @@
+@@ -0,0 +1,2420 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -1605,6 +1613,7 @@ index 0000000..79381ad
 +#include "monitor.hpp"
 +#include "monitor_title_resolver.hpp"
 +#include "monitor_player_filter.hpp"
++#include "monitor_target_generation.hpp"
 +
 +#include <switch.h>
 +
@@ -1813,6 +1822,8 @@ index 0000000..79381ad
 +static MonitorSnapshot g_snap;
 +
 +static std::atomic<u32>  g_reqGen{0};
++/* Request epoch used to reject superseded in-flight responses. */
++static MonitorTargetGeneration::Gate g_targetGen;
 +static std::atomic<bool> g_exit{false};
 +static std::atomic<bool> g_traditional{false};
 +static u32   g_doneGen = 0;
@@ -3686,17 +3697,26 @@ index 0000000..79381ad
 +    MonLog(msg);
 +}
 +
-+static void DoRefresh(const char *nameOverride, bool reloadSubs) {
-+    LogWorkerStack("refresh-start");
-+    EnsureSockets();
++static void DoRefresh(const char *nameOverride, bool reloadSubs,
++                      MonitorTargetGeneration::Value targetGen) {
++    bool staleTarget = false;
 +    {
 +        std::scoped_lock lk(g_mutex);
-+        g_snap.busy = true;
-+        /* 不清空 online/roomCount/rooms:轮询期间继续显示上一次的值,
-+         * 统计数字与房间列表不在查询窗口里闪空(TTL 缓存兜底)。 */
-+        snprintf(g_snap.status, sizeof(g_snap.status), "%s",
-+                 T_STR("正在查询…", "正在查詢…"));
++        staleTarget = !g_targetGen.IsCurrent(targetGen);
++        if (!staleTarget) {
++            g_snap.busy = true;
++            /* 同一服务器的轮询继续展示上一结果;切服时由请求入口先清空。 */
++            snprintf(g_snap.status, sizeof(g_snap.status), "%s",
++                     T_STR("正在查询…", "正在查詢…"));
++        }
 +    }
++    if (staleTarget) {
++        MonLog("refresh-discard stale-target-before-start");
++        return;
++    }
++
++    LogWorkerStack("refresh-start");
++    EnsureSockets();
 +
 +    static QueryResult qr;            /* 约 8.7KB:static,不占工作线程栈 */
 +    qr = QueryResult{};
@@ -3709,33 +3729,38 @@ index 0000000..79381ad
 +    {
 +        char m[160];
 +        if (haveServer)
-+            snprintf(m, sizeof(m), "resolve ok %s %s:%u", name, host, (unsigned)port);
++            snprintf(m, sizeof(m), "resolve ok gen=%u %s %s:%u",
++                     static_cast<unsigned>(targetGen), name, host, (unsigned)port);
 +        else
-+            snprintf(m, sizeof(m), "resolve FAIL %s", nameOverride ? nameOverride : "(selected)");
++            snprintf(m, sizeof(m), "resolve FAIL gen=%u %s",
++                     static_cast<unsigned>(targetGen),
++                     nameOverride ? nameOverride : "(selected)");
 +        MonLog(m);
 +    }
-+    {
-+        std::scoped_lock lk(g_mutex);
-+        snprintf(g_snap.server, sizeof(g_snap.server), "%.47s",
-+                 name[0] ? name : (host[0] ? host : "?"));
-+    }
 +
-+    /* Server switch: invalidate both the worker cache and the published
-+     * snapshot immediately, so the UI cannot show the previous server's names
-+     * while the new endpoint is being queried. */
++    /* Publish/clear only if this request still targets the selected server. */
 +    {
 +        char ident[128];
 +        snprintf(ident, sizeof(ident), "%s:%u", host, (unsigned)port);
-+        if (strcmp(ident, g_cacheServer) != 0) {
-+            RoomCacheReset();
-+            std::scoped_lock lk(g_mutex);
-+            g_snap.online = -1;
-+            g_snap.roomCount = -1;
-+            g_snap.roomN = 0;
-+            memset(g_snap.rooms, 0, sizeof(g_snap.rooms));
-+            g_snap.version++;
++        std::scoped_lock lk(g_mutex);
++        staleTarget = !g_targetGen.IsCurrent(targetGen);
++        if (!staleTarget) {
++            snprintf(g_snap.server, sizeof(g_snap.server), "%.47s",
++                     name[0] ? name : (host[0] ? host : "?"));
++            if (strcmp(ident, g_cacheServer) != 0) {
++                RoomCacheReset();
++                g_snap.online = -1;
++                g_snap.roomCount = -1;
++                g_snap.roomN = 0;
++                memset(g_snap.rooms, 0, sizeof(g_snap.rooms));
++                g_snap.version++;
++            }
++            snprintf(g_cacheServer, sizeof(g_cacheServer), "%s", ident);
 +        }
-+        snprintf(g_cacheServer, sizeof(g_cacheServer), "%s", ident);
++    }
++    if (staleTarget) {
++        MonLog("refresh-discard stale-target-after-resolve");
++        return;
 +    }
 +
 +    /* 2. 订阅(chinese_db.json):开盖/手动刷新时拉取(周期轮询跳过),
@@ -3766,11 +3791,24 @@ index 0000000..79381ad
 +    }
 +
 +    if (!haveServer) {
-+        std::scoped_lock lk(g_mutex);
-+        snprintf(g_snap.status, sizeof(g_snap.status), "%s",
-+                 T_STR("找不到选中的服务器", "找不到選中的伺服器"));
-+        g_snap.busy = false;
-+        g_snap.version++;
++        bool stale = false;
++        {
++            std::scoped_lock lk(g_mutex);
++            stale = !g_targetGen.IsCurrent(targetGen);
++            if (!stale) {
++                snprintf(g_snap.status, sizeof(g_snap.status), "%s",
++                         T_STR("找不到选中的服务器", "找不到選中的伺服器"));
++                g_snap.busy = false;
++                g_snap.version++;
++            }
++        }
++        if (stale)
++            MonLog("refresh-discard stale-target-no-server");
++        return;
++    }
++
++    if (!g_targetGen.IsCurrent(targetGen)) {
++        MonLog("refresh-discard stale-target-before-query");
 +        return;
 +    }
 +
@@ -3798,54 +3836,62 @@ index 0000000..79381ad
 +     *    没查到的旧房间再保留 5 秒,列表不再随单次丢包闪烁。 */
 +    u32 mlogN = 0;
 +    s32 mlogOn = -1;
++    bool staleAfterQuery = false;
 +    {
 +        const Deadline now = std::chrono::steady_clock::now();
-+        if (ok) {
-+            for (u32 i = 0; i < qr.roomN; i++)
-+                RoomCacheUpsert(qr.rooms[i], now);
-+            g_lastOk = now;
-+            g_haveLastOk = true;
-+        }
-+        RoomCacheExpire(now);
-+
 +        std::scoped_lock lk(g_mutex);
-+        u32 n = 0;
-+        for (u32 i = 0; i < MONITOR_MAX_ROOMS; i++) {
-+            if (g_roomCache[i].used)
-+                g_snap.rooms[n++] = g_roomCache[i].room;
-+        }
-+        g_snap.roomN = n;
-+        const bool fresh = g_haveLastOk && (now - g_lastOk) <= kRoomTtl;
-+        if (ok) {
-+            g_snap.online = qr.online;
-+            g_snap.roomCount = (s32)n;
-+            g_lastOnline = qr.online;
-+            g_lastRoomCount = (s32)n;
-+        } else if (fresh) {
-+            /* 瞬间失败:5 秒内沿用最近一次成功的在线/房间数 */
-+            g_snap.online = g_lastOnline;
-+            g_snap.roomCount = g_lastRoomCount;
-+        } else {
-+            g_snap.online = -1;
-+            g_snap.roomCount = -1;
-+        }
-+        if (!ok) {
-+            if (!g_sockInited)
++        staleAfterQuery = !g_targetGen.IsCurrent(targetGen);
++        if (!staleAfterQuery) {
++            if (ok) {
++                for (u32 i = 0; i < qr.roomN; i++)
++                    RoomCacheUpsert(qr.rooms[i], now);
++                g_lastOk = now;
++                g_haveLastOk = true;
++            }
++            RoomCacheExpire(now);
++
++            u32 n = 0;
++            for (u32 i = 0; i < MONITOR_MAX_ROOMS; i++) {
++                if (g_roomCache[i].used)
++                    g_snap.rooms[n++] = g_roomCache[i].room;
++            }
++            g_snap.roomN = n;
++            const bool fresh = g_haveLastOk && (now - g_lastOk) <= kRoomTtl;
++            if (ok) {
++                g_snap.online = qr.online;
++                g_snap.roomCount = (s32)n;
++                g_lastOnline = qr.online;
++                g_lastRoomCount = (s32)n;
++            } else if (fresh) {
++                /* 瞬间失败:5 秒内沿用最近一次成功的在线/房间数 */
++                g_snap.online = g_lastOnline;
++                g_snap.roomCount = g_lastRoomCount;
++            } else {
++                g_snap.online = -1;
++                g_snap.roomCount = -1;
++            }
++            if (!ok) {
++                if (!g_sockInited)
++                    snprintf(g_snap.status, sizeof(g_snap.status), "%s",
++                             T_STR("网络初始化失败", "網絡初始化失敗"));
++                else
++                    snprintf(g_snap.status, sizeof(g_snap.status), "%s e=%d",
++                             T_STR("查询失败", "查詢失敗"), g_httpErr);
++            } else if (n == 0) {
 +                snprintf(g_snap.status, sizeof(g_snap.status), "%s",
-+                         T_STR("网络初始化失败", "網絡初始化失敗"));
-+            else
-+                snprintf(g_snap.status, sizeof(g_snap.status), "%s e=%d",
-+                         T_STR("查询失败", "查詢失敗"), g_httpErr);
-+        } else if (n == 0) {
-+            snprintf(g_snap.status, sizeof(g_snap.status), "%s",
-+                     T_STR("暂无房间", "暫無房間"));
-+        } else {
-+            g_snap.status[0] = 0;
++                         T_STR("暂无房间", "暫無房間"));
++            } else {
++                g_snap.status[0] = 0;
++            }
++            g_snap.busy = false;
++            g_snap.version++;
++            mlogN = n;
++            mlogOn = g_snap.online;
 +        }
-+        g_snap.busy = false;
-+        g_snap.version++;
-+        mlogN = n;
-+        mlogOn = g_snap.online;
++    }
++    if (staleAfterQuery) {
++        MonLog("refresh-discard stale-target-after-query");
++        return;
 +    }
 +    {
 +        char m[48];
@@ -3866,13 +3912,15 @@ index 0000000..79381ad
 +            g_doneGen = want;
 +            char name[48];
 +            bool subs;
++            MonitorTargetGeneration::Value targetGen;
 +            {
 +                std::scoped_lock lk(g_mutex);
 +                memcpy(name, g_pendingName, sizeof(name));
 +                subs = g_pendingSubs;
 +                g_pendingSubs = false;
++                targetGen = g_targetGen.Capture();
 +            }
-+            DoRefresh(name[0] ? name : nullptr, subs);
++            DoRefresh(name[0] ? name : nullptr, subs, targetGen);
 +            MonLog("refresh-done");
 +        } else {
 +            svcSleepThread(50'000'000);      /* 50ms */
@@ -3931,20 +3979,37 @@ index 0000000..79381ad
 +    g_inited = false;
 +}
 +
++/* Must be called with g_mutex held. Detach the published room list from the
++ * previous target immediately, before the blocking worker starts its query. */
++static void ResetSnapshotForRequestLocked(const char *serverName,
++                                          const char *status) {
++    snprintf(g_snap.server, sizeof(g_snap.server), "%.47s",
++             serverName ? serverName : "");
++    g_snap.online = -1;
++    g_snap.roomCount = -1;
++    g_snap.roomN = 0;
++    memset(g_snap.rooms, 0, sizeof(g_snap.rooms));
++    snprintf(g_snap.status, sizeof(g_snap.status), "%s", status);
++    g_snap.busy = true;
++    g_snap.version++;
++}
++
 +void MonitorRequestRefresh(const char *serverName) {
-+    {
-+        std::scoped_lock lk(g_mutex);
-+        snprintf(g_pendingName, sizeof(g_pendingName), "%s", serverName ? serverName : "");
-+        g_pendingSubs = true;      /* 开盖/手动刷新:同时重新拉订阅缓存 */
-+    }
++    std::scoped_lock lk(g_mutex);
++    snprintf(g_pendingName, sizeof(g_pendingName), "%s", serverName ? serverName : "");
++    g_pendingSubs = true;      /* 开盖/手动刷新:同时重新拉订阅缓存 */
++    g_targetGen.Advance();
++    ResetSnapshotForRequestLocked(
++        serverName, T_STR("正在刷新服务器…", "正在刷新伺服器…"));
 +    g_reqGen.fetch_add(1);
 +}
 +
 +void MonitorRequestSwitch(const char *serverName) {
-+    {
-+        std::scoped_lock lk(g_mutex);
-+        snprintf(g_pendingName, sizeof(g_pendingName), "%s", serverName ? serverName : "");
-+    }
++    std::scoped_lock lk(g_mutex);
++    snprintf(g_pendingName, sizeof(g_pendingName), "%s", serverName ? serverName : "");
++    g_targetGen.Advance();
++    ResetSnapshotForRequestLocked(
++        serverName, T_STR("正在切换服务器…", "正在切換伺服器…"));
 +    g_reqGen.fetch_add(1);
 +}
 +
@@ -4064,6 +4129,34 @@ index 0000000..3f79220
 +}
 +
 +} // namespace MonitorPlayerFilter
+diff --git a/overlay/source/monitor_target_generation.hpp b/overlay/source/monitor_target_generation.hpp
+new file mode 100644
+index 0000000..a0a3d78
+--- /dev/null
++++ b/overlay/source/monitor_target_generation.hpp
+@@ -0,0 +1,22 @@
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++
++/* A refresh request owns a generation token. Once a newer request is queued,
++ * older blocking network responses must not publish into the shared snapshot. */
++namespace MonitorTargetGeneration {
++
++using Value = std::uint32_t;
++
++class Gate {
++public:
++    Value Advance() { return generation_.fetch_add(1) + 1; }
++    Value Capture() const { return generation_.load(); }
++    bool IsCurrent(Value captured) const { return Capture() == captured; }
++
++private:
++    std::atomic<Value> generation_{0};
++};
++
++} // namespace MonitorTargetGeneration
 diff --git a/overlay/source/monitor_title_resolver.hpp b/overlay/source/monitor_title_resolver.hpp
 new file mode 100644
 index 0000000..d0ac8cc
@@ -4243,6 +4336,34 @@ index 0000000..f1576c9
 +    assert(!IncludeNode(true, "null"));
 +    assert(!IncludeNode(true, nullptr));
 +    assert(!IncludeNode(true, "trueish"));
++    return 0;
++}
+diff --git a/overlay/tests/monitor_target_generation_test.cpp b/overlay/tests/monitor_target_generation_test.cpp
+new file mode 100644
+index 0000000..a0e003f
+--- /dev/null
++++ b/overlay/tests/monitor_target_generation_test.cpp
+@@ -0,0 +1,22 @@
++#include "../source/monitor_target_generation.hpp"
++
++#include <cassert>
++
++int main() {
++    MonitorTargetGeneration::Gate gate;
++
++    /* A response may publish only while it still owns the latest request. */
++    const auto shanghaiRequest = gate.Advance();
++    assert(gate.IsCurrent(shanghaiRequest));
++
++    /* Switching to another server invalidates the in-flight old response. */
++    const auto denmarkRequest = gate.Advance();
++    assert(!gate.IsCurrent(shanghaiRequest));
++    assert(gate.IsCurrent(denmarkRequest));
++
++    /* A later refresh supersedes even a same-target response. */
++    const auto newerRefresh = gate.Advance();
++    assert(!gate.IsCurrent(denmarkRequest));
++    assert(gate.IsCurrent(newerRefresh));
 +    return 0;
 +}
 diff --git a/overlay/tests/monitor_title_resolver_test.cpp b/overlay/tests/monitor_title_resolver_test.cpp
