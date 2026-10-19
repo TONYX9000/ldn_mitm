@@ -3,6 +3,7 @@
 #include "ldn.h"
 #include "monitor.hpp"  // 房间/在线人数监控（Zero, GPL-2.0）
 #include <vector>
+#include <string>
 
 enum class State {
     Uninit,
@@ -367,12 +368,14 @@ public:
    数据来自 monitor 模块，每 5 秒轮询一次；列表在快照版本变化时重建。 */
 class RoomGui : public tsl::Gui {
 public:
+    RoomGui() = default;
+    explicit RoomGui(std::string target) : m_target(std::move(target)) {}
+
     virtual tsl::elm::Element* createUI() override {
         EnsureMonitor();
         MonitorSetTraditional(g_isTraditional);
         char sel[32] = {};
-        GetSelectedServerName(sel, sizeof(sel));
-        MonitorRequestRefresh(sel);
+        MonitorRequestRefresh(TargetName(sel, sizeof(sel)));
 
         auto frame = new tsl::elm::OverlayFrame(T("房间列表", "房間列表"),
                                                 T("A 刷新 · B 返回", "A 重新整理 · B 返回"));
@@ -386,7 +389,9 @@ public:
         const u64 now = svcGetSystemTick();
         if (now - m_lastPoll >= 5ull * 19200000ull) {
             m_lastPoll = now;
-            MonitorRequestPoll();
+            /* 定向刷新：从「全部服务器」点进来时只查那一台，不动主连接。 */
+            char sel[32] = {};
+            MonitorRequestSwitch(TargetName(sel, sizeof(sel)));
         }
         MonitorCopySnapshot(&m_snap);
         if (m_snap.version != m_version) {
@@ -396,6 +401,15 @@ public:
     }
 
 private:
+    const char *TargetName(char *buf, size_t n) {
+        if (!m_target.empty()) {
+            snprintf(buf, n, "%s", m_target.c_str());
+            return buf;
+        }
+        GetSelectedServerName(buf, n);
+        return buf;
+    }
+
     void Rebuild() {
         MonitorCopySnapshot(&m_snap);
         m_list->clear();
@@ -431,10 +445,152 @@ private:
     }
 
     RebuildList *m_list = nullptr;
+    std::string m_target;
     /* MonitorSnapshot 约 8.6 KB，放静态区，别压在 overlay 的栈上。 */
     static inline MonitorSnapshot m_snap = {};
     u32 m_version = 0xFFFFFFFFu;
     u64 m_lastPoll = 0;
+};
+
+/* 全部服务器总览：逐台查在线人数/房间数，按 A 进某台的房间页。
+   只在打开本页时扫描；离开（析构）立即取消。 */
+class AllServersGui : public tsl::Gui {
+public:
+    ~AllServersGui() override { MonitorAllCancel(); }
+
+    virtual tsl::elm::Element* createUI() override {
+        EnsureMonitor();
+        MonitorSetTraditional(g_isTraditional);
+        MonitorRequestAll(m_scope, false);
+        MonitorCopyAllSnapshot(&m_snap);
+        m_limit = m_snap.limit;
+
+        auto frame = new tsl::elm::OverlayFrame(T("全部服务器", "全部伺服器"),
+                                                T("Y 切范围 · X 刷新", "Y 切範圍 · X 重新整理"));
+        m_list = new RebuildList();
+        BuildRows();
+        frame->setContent(m_list);
+        return frame;
+    }
+
+    virtual void update() override {
+        MonitorCopyAllSnapshot(&m_snap);
+        if (m_snap.limit != m_limit || NamesChanged()) {
+            m_limit = m_snap.limit;
+            BuildRows();
+        }
+        UpdateValues();
+    }
+
+    virtual bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos,
+                             HidAnalogStickState joyStickPosLeft, HidAnalogStickState joyStickPosRight) override {
+        (void)keysHeld; (void)touchPos; (void)joyStickPosLeft; (void)joyStickPosRight;
+        if (keysDown & HidNpadButton_Y) {
+            m_scope = (m_scope == 8) ? 0 : 8;
+            MonitorRequestAll(m_scope, true);
+            return true;
+        }
+        if (keysDown & HidNpadButton_X) {
+            MonitorRequestAll(m_scope, true);
+            return true;
+        }
+        return false;
+    }
+
+private:
+    bool NamesChanged() const {
+        if (m_builtNames.size() != m_limit) {
+            return true;
+        }
+        for (u32 i = 0; i < m_limit && i < MONITOR_ALL_MAX; i++) {
+            if (m_builtNames[i] != m_snap.servers[i].name) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void BuildRows() {
+        m_list->clear();
+        m_items.clear();
+        m_last.clear();
+        m_builtNames.clear();
+
+        char hdr[64];
+        snprintf(hdr, sizeof(hdr), T("服务器（%u 台）", "伺服器（%u 台）"),
+                 static_cast<unsigned>(m_limit));
+        m_list->addItem(new tsl::elm::CategoryHeader(hdr));
+
+        if (m_limit == 0) {
+            m_list->addItem(new tsl::elm::ListItem(T("没有服务器", "沒有伺服器")));
+            m_list->snapToFocus();
+            return;
+        }
+
+        for (u32 i = 0; i < m_limit && i < MONITOR_ALL_MAX; i++) {
+            const std::string name = m_snap.servers[i].name;
+            auto *item = new tsl::elm::ListItem(name);
+            item->setClickListener([name](u64 keys) {
+                if (keys & HidNpadButton_A) {
+                    tsl::changeTo<RoomGui>(name);
+                    return true;
+                }
+                return false;
+            });
+            m_items.push_back(item);
+            m_last.push_back(std::string());
+            m_builtNames.push_back(name);
+            m_list->addItem(item);
+        }
+        m_list->snapToFocus();
+    }
+
+    void UpdateValues() {
+        for (u32 i = 0; i < m_items.size() && i < MONITOR_ALL_MAX; i++) {
+            const MonitorAllServer &s = m_snap.servers[i];
+            char v[48] = {};
+            bool faint = false;
+            switch (s.state) {
+                case 0:
+                    snprintf(v, sizeof(v), "%s", T("…", "…"));
+                    faint = true;
+                    break;
+                case 1:
+                    snprintf(v, sizeof(v), "%s", T("查询中…", "查詢中…"));
+                    faint = true;
+                    break;
+                case 2:
+                    if (s.online >= 0) {
+                        snprintf(v, sizeof(v), T("在线 %d · %d 间", "線上 %d · %d 間"),
+                                 static_cast<int>(s.online), static_cast<int>(s.roomCount));
+                    } else {
+                        snprintf(v, sizeof(v), T("%d 间", "%d 間"), static_cast<int>(s.roomCount));
+                    }
+                    break;
+                case 3:
+                    snprintf(v, sizeof(v), "%s", T("超时", "逾時"));
+                    faint = true;
+                    break;
+                default:
+                    snprintf(v, sizeof(v), "%s", T("跳过", "略過"));
+                    faint = true;
+                    break;
+            }
+            if (m_last[i] != v) {
+                m_last[i] = v;
+                m_items[i]->setValue(v, faint);
+            }
+        }
+    }
+
+    RebuildList *m_list = nullptr;
+    std::vector<tsl::elm::ListItem *> m_items;
+    std::vector<std::string> m_last;
+    std::vector<std::string> m_builtNames;
+    /* MonitorAllSnapshot 约 36 KB，放静态区。 */
+    static inline MonitorAllSnapshot m_snap = {};
+    u32 m_limit = 0;
+    u32 m_scope = 8;   /* 8 = 前 8 台；0 = relay.cfg 全部 */
 };
 
 /* Everything below the frame header. Kept out of createUI() so it can be
@@ -538,6 +694,17 @@ static void buildList(tsl::elm::List *list) {
             return false;
         });
         list->addItem(g_roomSummaryItem);
+
+        auto *allRoomsItem = new tsl::elm::ListItem(T("全部服务器", "全部伺服器"));
+        allRoomsItem->setValue(T("多服房间总览", "多服房間總覽"), true);
+        allRoomsItem->setClickListener([](u64 keys) {
+            if (keys & HidNpadButton_A) {
+                tsl::changeTo<AllServersGui>();
+                return true;
+            }
+            return false;
+        });
+        list->addItem(allRoomsItem);
 
         // Undo a mistake without editing relay.cfg on a PC. Two presses on
         // purpose: this rewrites the whole relay list.

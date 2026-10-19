@@ -67,5 +67,34 @@ void MonitorRequestPoll();
 /* 取当前快照的副本。 */
 void MonitorCopySnapshot(MonitorSnapshot *out);
 
+/* --- 全部服务器总览（阿东版新增） ---------------------------------
+   打开「全部服务器」页时，按 relay.cfg 的顺序逐台查询（不常驻）。
+   每查完一台 version+1，UI 边查边填；limit=0 表示 relay.cfg 全部。 */
+#define MONITOR_ALL_MAX        32
+#define MONITOR_ALL_ROOMS_MAX   8
+
+struct MonitorAllServer {
+    char name[32];
+    char addr[64];
+    s32  online;      /* -1 = 未知 */
+    s32  roomCount;   /* -1 = 未知 */
+    u8   state;       /* 0=待查 1=查询中 2=完成 3=失败 4=负缓存跳过 */
+    u32  roomN;
+    MonitorRoom rooms[MONITOR_ALL_ROOMS_MAX];
+};
+
+struct MonitorAllSnapshot {
+    u32 version;
+    bool busy;
+    u32 limit;        /* 本次查询的服务器台数 */
+    u32 done;         /* 已处理台数 */
+    MonitorAllServer servers[MONITOR_ALL_MAX];
+};
+
+/* limit=0: relay.cfg 全部;force=true 时忽略负缓存。非阻塞。 */
+void MonitorRequestAll(u32 limit, bool force);
+void MonitorAllCancel();
+void MonitorCopyAllSnapshot(MonitorAllSnapshot *out);
+
 /* 诊断日志:写 sdmc:/config/ldn_mitm/monitor.log(UI 侧打点用)。 */
 void MonitorLog(const char *msg);
