@@ -526,6 +526,10 @@ namespace ams::mitm::ldn::relay {
         return (index >= 0 && index < g_count) ? static_cast<u16>(g_servers[index].port) : 0;
     }
 
+    u32 ServerIpAt(int index) {
+        return (index >= 0 && index < g_count) ? g_servers[index].ip : 0;
+    }
+
     int BuiltinServerCount() {
         return BuiltinCount;
     }
@@ -859,6 +863,17 @@ namespace ams::mitm::ldn::relay {
     }
 
     Result RelayTransport::OpenSocket() {
+        /* Pin the target before the slow nifm/DNS/connect steps. The user can
+           pick another server (or delete one) while those take seconds; if we
+           read g_selected again halfway through, we would connect to one host
+           and then label the transport as another. That is exactly the
+           "selected server != connected server" bug seen with long lists. */
+        const int open_sel = g_selected.load();
+        char open_host[64] = {};
+        std::strncpy(open_host, ServerHostAt(open_sel), sizeof(open_host) - 1);
+        const u16 open_port = ServerPortAt(open_sel);
+        const u32 open_ip   = ServerIpAt(open_sel);
+
         /* Internet route, not LocalNetworkMode. */
         Result rc = NifmSessionManager::Acquire();
         if (R_FAILED(rc)) {
@@ -894,12 +909,12 @@ namespace ams::mitm::ldn::relay {
         const u32 vsrc = (10u << 24) | (13u << 16) | EnsureClientId();
         const u32 rsrc = R_SUCCEEDED(nifmGetCurrentIpAddress(&ip)) ? ntohl(ip) : 0;
 
-        u32 server_ip = ServerIp();
+        u32 server_ip = open_ip;
         if (server_ip == 0) {
-            server_ip = this->ResolveHostname(ServerHost());
+            server_ip = this->ResolveHostname(open_host);
         }
         if (server_ip == 0) {
-            LogFormat("relay xport: no/unresolvable server address ('%s')", ServerHost());
+            LogFormat("relay xport: no/unresolvable server address ('%s')", open_host);
             this->CloseSocket();
             return MAKERESULT(0xFD, 102);
         }
@@ -913,7 +928,7 @@ namespace ams::mitm::ldn::relay {
 
         struct sockaddr_in srv = {};
         srv.sin_family = AF_INET;
-        srv.sin_port = htons(ServerPort());
+        srv.sin_port = htons(open_port);
         srv.sin_addr.s_addr = htonl(server_ip);
 
         nifmRequestRegisterSocketDescriptor(&m_req, fd);
@@ -951,8 +966,16 @@ namespace ams::mitm::ldn::relay {
             m_rsrc = rsrc;
         }
         /* Record what we actually connected to, so the latency readout can
-           refuse to show it under a different server's name. */
-        g_active_server = g_selected.load();
+           refuse to show it under a different server's name. If the
+           selection (or the list itself) changed while nifm/DNS/connect were
+           running, the pinned target is stale: report "no transport" so the
+           worker reopens for the new selection instead of claiming the wrong
+           server is connected. */
+        const bool still_same =
+            (g_selected.load() == open_sel) &&
+            (ServerPortAt(open_sel) == open_port) &&
+            (std::strcmp(ServerHostAt(open_sel), open_host) == 0);
+        g_active_server = still_same ? open_sel : -1;
         R_SUCCEED();
     }
 
