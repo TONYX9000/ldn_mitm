@@ -1,4 +1,4 @@
-From 5a6947182e73743e8d950b835108f3b2bf878fdb Mon Sep 17 00:00:00 2001
+From ee112dc009c0c0c92309643f6e7acd57ad6068b3 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
 Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
@@ -60,16 +60,30 @@ Content-Transfer-Encoding: 8bit
 
 CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
 安装 switch-curl(订阅 HTTPS 下载)
+
+崩溃修复与构建修复(2026-10-19 真机 2168-0002 排障并入):
+- 死因定位:2168-0002 (0x4a8) 死于首次刷新的下载窗口(resolve ok 之后、
+  curl perform 前后),寄存器 X10=5000(下载超时参数)指向 HttpGet 深度
+- CURLOPT_RESOLVE 收的是 struct curl_slist *,此前误传 char*——字符串
+  地址被当链表头解引用,首次 perform 即崩;现 curl_slist_append 组包、
+  perform 后 curl_slist_free_all
+- 栈上巨结构全部改 static:DoRefresh 的 QueryResult(约 8.7KB)、
+  MonitorFrame::draw/update 的 MonitorSnapshot(约 8.6KB)、createUI 的
+  MonitorServer[32](3KB)——ovlloader 给的小栈被挤爆是另一根因;
+  工作线程栈 32KB→64KB;日志新增 stack-free 便于复测验证
+- overlay/Makefile 补齐 $(PORTLIBS)/include(CI 编译找不到 curl/curl.h
+  即「构建报错」根因)与 -lcurl -lz(链接缺库);诊断日志加
+  subs-start/curl-try/curl-done,再有崩溃日志即可钉死窗口
 ---
  .github/workflows/build.yml   |   20 +-
  .github/workflows/nightly.yml |   23 +-
  .github/workflows/release.yml |   30 +-
  Makefile                      |    6 +
- overlay/Makefile              |    5 +-
- overlay/source/main.cpp       |  632 +++++++++-
- overlay/source/monitor.cpp    | 2044 +++++++++++++++++++++++++++++++++
+ overlay/Makefile              |    9 +-
+ overlay/source/main.cpp       |  634 +++++++++-
+ overlay/source/monitor.cpp    | 2068 +++++++++++++++++++++++++++++++++
  overlay/source/monitor.hpp    |   71 ++
- 8 files changed, 2768 insertions(+), 63 deletions(-)
+ 8 files changed, 2796 insertions(+), 65 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
@@ -220,9 +234,18 @@ index efcb5e7..cd62b35 100644
  
  .PHONY: all clean PACK atmosphere-patch $(SUBFOLDERS)
 diff --git a/overlay/Makefile b/overlay/Makefile
-index e2cdc19..efd0e47 100644
+index e2cdc19..891ccd1 100644
 --- a/overlay/Makefile
 +++ b/overlay/Makefile
+@@ -48,7 +48,7 @@ TARGET		:=	$(notdir $(CURDIR))
+ BUILD		:=	build
+ SOURCES		:=	source
+ DATA		:=	data
+-INCLUDES	:=	include ../libtesla/include
++INCLUDES	:=	include ../libtesla/include $(PORTLIBS)/include
+ 
+ NO_ICON		:=  1
+ 
 @@ -57,7 +57,8 @@ NO_ICON		:=  1
  #---------------------------------------------------------------------------------
  ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
@@ -233,17 +256,20 @@ index e2cdc19..efd0e47 100644
  			$(ARCH) $(DEFINES) $(VERSION_DEFINES)
  
  CFLAGS	+=	$(INCLUDE) -D__SWITCH__
-@@ -65,7 +66,7 @@ CFLAGS	+=	$(INCLUDE) -D__SWITCH__
+@@ -65,9 +66,9 @@ CFLAGS	+=	$(INCLUDE) -D__SWITCH__
  CXXFLAGS	:= $(CFLAGS) -fno-exceptions -std=c++20
  
  ASFLAGS	:=	-g $(ARCH)
 -LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 +LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sections -Wl,--wrap=framebufferCreate
  
- LIBS	:= -lnx
+-LIBS	:= -lnx
++LIBS	:=	-lcurl -lz -lnx
  
+ #---------------------------------------------------------------------------------
+ # list of directories containing libraries, this must be the top level containing
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..17cad09 100644
+index 8e07c19..6361895 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,7 +1,10 @@
@@ -280,7 +306,7 @@ index 8e07c19..17cad09 100644
  /* Traditional / Simplified Chinese switch. The overlay used to hardcode
     Simplified strings, which left Traditional Chinese consoles with the
     wrong glyphs. libtesla already loads both CJK shared fonts, so all we
-@@ -34,6 +44,414 @@ static bool g_isTraditional = false;
+@@ -34,6 +44,416 @@ static bool g_isTraditional = false;
  
  #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
  
@@ -662,7 +688,9 @@ index 8e07c19..17cad09 100644
 +        { static bool once = false; if (!once) { once = true; MonitorLog("first-frame"); } }
 +        tsl::elm::OverlayFrame::draw(renderer);
 +
-+        MonitorSnapshot snap;
++        /* static: MonitorSnapshot 约 8.6KB,放栈上会把 ovlloader 给的
++         * 小栈(配合 libtesla 绘制深度)挤爆——10-19 崩溃根因之一。 */
++        static MonitorSnapshot snap;
 +        MonitorCopySnapshot(&snap);
 +
 +        char online[16], rooms[16];
@@ -695,7 +723,7 @@ index 8e07c19..17cad09 100644
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -70,18 +488,82 @@ static void detectLanguage()
+@@ -70,18 +490,82 @@ static void detectLanguage()
      strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
  }
  
@@ -779,7 +807,7 @@ index 8e07c19..17cad09 100644
  
          if (g_state == State::Error) {
              list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
-@@ -95,43 +577,68 @@ public:
+@@ -95,43 +579,68 @@ public:
              list->addItem(new tsl::elm::CategoryHeader(T("互联网中继（跨网联机）", "網際網路中繼（跨網連線）")));
              list->addItem(new ConfigToggleListItem(T("互联网中继", "網際網路中繼"), ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
  
@@ -808,7 +836,7 @@ index 8e07c19..17cad09 100644
 +            /* 服务器列表直接读 relay.cfg(双排:名称 + 地址),解析与
 +             * sysmodule LoadConfig 同语义、顺序一一对应;servers.json 已
 +             * 彻底移除。读不到文件时退回 IPC 名称(地址留空)。 */
-+            MonitorServer servers[MONITOR_MAX_SERVERS];
++            static MonitorServer servers[MONITOR_MAX_SERVERS];   /* 3KB:不占栈 */
 +            u32 count = MonitorListRelayServers(servers, MONITOR_MAX_SERVERS);
 +            u32 selected = 0;
 +            if (R_FAILED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &selected))) {
@@ -880,7 +908,7 @@ index 8e07c19..17cad09 100644
                  }
              }
  
-@@ -211,16 +718,40 @@ public:
+@@ -211,16 +720,40 @@ public:
          // cached value made update() return early and the label stayed at
          // just "*" with no "--" and no number.
          g_shown_latency = 0xFFFFFFFFu;
@@ -894,7 +922,7 @@ index 8e07c19..17cad09 100644
      // Called once every frame to update values
      virtual void update() override {
 +        // 游戏房间区块:监视器快照 version 变化时重建行。
-+        MonitorSnapshot snap;
++        static MonitorSnapshot snap;   /* 8.6KB:static,别放栈上(见 draw 注释) */
 +        MonitorCopySnapshot(&snap);
 +        if (snap.version != g_monitorVersion) {
 +            g_monitorVersion = snap.version;
@@ -922,7 +950,7 @@ index 8e07c19..17cad09 100644
              return;
          }
          u32 ms = 0;
-@@ -233,9 +764,8 @@ public:
+@@ -233,9 +766,8 @@ public:
          }
          g_shown_latency = ms;
  
@@ -934,7 +962,7 @@ index 8e07c19..17cad09 100644
          char buf[48];
          bool faint = false;
          if (ms == 0) {
-@@ -247,9 +777,9 @@ public:
+@@ -247,9 +779,9 @@ public:
          } else {
              snprintf(buf, sizeof(buf), T("* 延迟 %ums", "* 延遲 %ums"), ms);
          }
@@ -947,7 +975,7 @@ index 8e07c19..17cad09 100644
              }
          }
      }
-@@ -265,9 +795,14 @@ public:
+@@ -265,9 +797,14 @@ public:
      virtual void initServices() override {
          g_state = State::Uninit;
          detectLanguage();
@@ -962,7 +990,7 @@ index 8e07c19..17cad09 100644
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,14 +823,25 @@ public:
+@@ -288,14 +825,25 @@ public:
              g_state = State::Loaded;
          });
  
@@ -992,10 +1020,10 @@ index 8e07c19..17cad09 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..42be3ed
+index 0000000..5469217
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2044 @@
+@@ -0,0 +1,2068 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -2004,7 +2032,15 @@ index 0000000..42be3ed
 +    if (!curl)
 +        return false;
 +    curl_easy_setopt(curl, CURLOPT_URL, url);
-+    curl_easy_setopt(curl, CURLOPT_RESOLVE, resolve);
++    /* CURLOPT_RESOLVE 收的是 struct curl_slist *,不是 char *(curl 7.69 同)。
++     * 传字符串会把地址当链表头解引用,首次 perform 即崩(2168-0002)——
++     * 10-19 设备报错正死在这一窗口。 */
++    struct curl_slist *lst = curl_slist_append(nullptr, resolve);
++    if (!lst) {
++        curl_easy_cleanup(curl);
++        return false;
++    }
++    curl_easy_setopt(curl, CURLOPT_RESOLVE, lst);
 +    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWrite);
 +    curl_easy_setopt(curl, CURLOPT_WRITEDATA, outBody);
 +    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
@@ -2014,7 +2050,14 @@ index 0000000..42be3ed
 +    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeoutMs);
 +    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 +    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ldn-mitm-monitor");
++    MonLog("curl-try");
 +    CURLcode rc = curl_easy_perform(curl);
++    {
++        char m[48];
++        snprintf(m, sizeof(m), "curl-done rc=%d", (int)rc);
++        MonLog(m);
++    }
++    curl_slist_free_all(lst);          /* perform 结束后才可释放 */
 +    long status = 0;
 +    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 +    curl_easy_cleanup(curl);
@@ -2821,8 +2864,16 @@ index 0000000..42be3ed
 +/* 刷新流程                                                            */
 +/* ------------------------------------------------------------------ */
 +
++alignas(0x1000) static u8 g_workerStack[0x10000];
++
 +static void DoRefresh(const char *nameOverride, bool reloadSubs) {
-+    MonLog("refresh-start");
++    {
++        char probe;
++        char m0[80];
++        snprintf(m0, sizeof(m0), "refresh-start stack-free=%dK",
++                 (int)(((size_t)(&probe) - (size_t)g_workerStack) / 1024));
++        MonLog(m0);
++    }
 +    EnsureSockets();
 +    {
 +        std::scoped_lock lk(g_mutex);
@@ -2834,7 +2885,8 @@ index 0000000..42be3ed
 +                 T_STR("正在查询…", "正在查詢…"));
 +    }
 +
-+    QueryResult qr;
++    static QueryResult qr;            /* 约 8.7KB:static,不占工作线程栈 */
++    qr = QueryResult{};
 +
 +    /* 1. 当前选择的服务器 */
 +    char name[48] = {}, host[64] = {};
@@ -2859,6 +2911,7 @@ index 0000000..42be3ed
 +     *    失败退回本地缓存;servers.json 已彻底移除,服务器列表只读 relay.cfg。
 +     *    下载走 HTTPS 加速镜像(https://v6.gh-proxy.org/),删了缓存也能重拉 */
 +    if (reloadSubs) {
++        MonLog("subs-start");
 +        std::string chineseJson;
 +        bool gotChinese = DownloadSubscription(kSubChinesePath, &chineseJson);
 +        if (gotChinese)
@@ -2940,7 +2993,6 @@ index 0000000..42be3ed
 +/* 后台线程(libnx 线程,风格同 libtesla)                               */
 +/* ------------------------------------------------------------------ */
 +
-+alignas(0x1000) static u8 g_workerStack[0x8000];
 +
 +static void MonitorWorker(void *) {
 +    while (!g_exit.load()) {
