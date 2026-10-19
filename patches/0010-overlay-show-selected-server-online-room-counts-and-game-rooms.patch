@@ -752,9 +752,9 @@ index 8e07c19..1ed1604 100644
 +                             tsl::gfx::Renderer::a(tsl::style::color::ColorDescription));
 +        renderer->drawString(T("房间", "房間"), false, colX[1], 88, 15,
 +                             tsl::gfx::Renderer::a(tsl::style::color::ColorDescription));
-+        renderer->drawString(online, false, colX[0], 103, 20,
++        renderer->drawString(online, false, colX[0], 109, 20,
 +                             tsl::gfx::Renderer::a(tsl::style::color::ColorText));
-+        renderer->drawString(rooms, false, colX[1], 103, 20,
++        renderer->drawString(rooms, false, colX[1], 109, 20,
 +                             tsl::gfx::Renderer::a(tsl::style::color::ColorText));
 +
 +        renderer->disableScissoring();
