@@ -1,4 +1,4 @@
-From 1611cc502d4f5c8ec8f814d5e520e379952fca37 Mon Sep 17 00:00:00 2001
+From 219a626dbecfd9a451dd1287219884bb64214299 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH] overlay: online counts/room list and relay management
@@ -14,10 +14,7 @@ Content-Transfer-Encoding: 8bit
   周期刷新不重拉订阅、不改目标
 - 「游戏房间」列表:chinese_db.json 标题ID→中文名映射 + N/M 人数;
   玩家名单(hostPlayerName 置顶 + nodes 玩家名)随查询解析入库
-- 房间行按 A/触摸展开玩家名单:房主排最前且用高亮色;两行并排尽量
-  塞名字,排不下或名字过长则整条名字带连续滚动(每行 scissor 窗口,
-  停 90 帧后 1px/帧滑动);房间区与「中继服务器(按 A 切换)」用
-  分隔标题隔开;房间行为持久池只增不删(展开只改行高),焦点安全
+- 房间行与服务器行一致采用 70px 固定双排布局:上排显示游戏标题、下排常显玩家名单,房主高亮;名单过长时在下排 scissor 窗口内滚动(停 90 帧后 1px/帧滑动);人数在右侧显示;房间区与「中继服务器(按 A 切换)」用分隔标题隔开;行对象持久复用,焦点安全
 - 服务器列表以 sysmodule 加载的 relay.cfg 为真值源,overlay 通过 IPC
   读取名称/地址/端口;servers.json 下载/解析/类型表/名字兜底全部移除。
   服务器行双排布局(上=名称、下=地址 host:port,行高 70 不变,
@@ -92,7 +89,7 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
 
 本轮合并（仍在既有补丁 0010 内，不新增编号）：
 - 合入分支服务器管理页 AddServerGui、添加/删除/恢复默认操作、列表重建与焦点恢复；服务器列表继续使用 patch 10 的自绘 ServerRow，保留名称/地址布局、右侧延迟和在线/房间数字间距。
-- 监视器标题、RoomRow、MonitorFrame、所选服务器刷新与游戏标题识别完整保留；MonitorFrame 下方同时显示版本，空版本显示“版本未知”。
+- 游戏房间行改为与服务器行同高的 70px 固定双排布局：上排游戏标题、下排玩家名常显、人数右对齐；长名单在下排窗口内滚动。MonitorFrame 下方同时显示版本，空版本显示“版本未知”。
 - 最大容量统一为 32；出厂及恢复默认列表为 12 条，0009 中移除 relay.cfg 的「中国·江苏(2) yordon.cn:11451」；17 条添加候选目录仍保留该服务器作为可选候选，另有 4 条备用节点。
 - 在既有补丁 0010 内增加 room advertiseData 标题识别、UDP NetworkInfo 广告数据解析、旧 GraphQL schema 回退及纯主机回归测试；未识别 all-F 房间安全显示「未知游戏」，不读取本机 ProgramId。
 
@@ -117,31 +114,6 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
 服务器切换后的房间快照错位修复（反馈）：
 - 每次打开刷新或切换目标时更新请求代次，并立即把已发布的房间列表与新选择解绑、清空；
 - 单 worker 的旧服务器查询返回后，若请求代次已过期，则不写入房间缓存、在线/房间数或快照，避免把旧结果显示到新服务器下；新增纯主机 generation gate 回归测试。
----
- .github/workflows/beta.yml                    |   20 +
- .github/workflows/build.yml                   |   34 +-
- .github/workflows/nightly.yml                 |   37 +-
- .github/workflows/release.yml                 |   44 +-
- Makefile                                      |    6 +
- overlay/Makefile                              |    9 +-
- overlay/source/main.cpp                       | 1125 +++++++-
- overlay/source/monitor.cpp                    | 2429 +++++++++++++++++
- overlay/source/monitor.hpp                    |   71 +
- overlay/source/monitor_player_filter.hpp      |   32 +
- overlay/source/monitor_target_generation.hpp  |   22 +
- overlay/source/monitor_title_resolver.hpp     |  148 +
- overlay/tests/monitor_player_filter_test.cpp  |   29 +
- .../tests/monitor_target_generation_test.cpp  |   22 +
- overlay/tests/monitor_title_resolver_test.cpp |   49 +
- 15 files changed, 3921 insertions(+), 156 deletions(-)
- create mode 100644 overlay/source/monitor.cpp
- create mode 100644 overlay/source/monitor.hpp
- create mode 100644 overlay/source/monitor_player_filter.hpp
- create mode 100644 overlay/source/monitor_target_generation.hpp
- create mode 100644 overlay/source/monitor_title_resolver.hpp
- create mode 100644 overlay/tests/monitor_player_filter_test.cpp
- create mode 100644 overlay/tests/monitor_target_generation_test.cpp
- create mode 100644 overlay/tests/monitor_title_resolver_test.cpp
 
 diff --git a/.github/workflows/beta.yml b/.github/workflows/beta.yml
 index 3c7281c..9c225b0 100644
@@ -398,7 +370,7 @@ index e2cdc19..891ccd1 100644
  #---------------------------------------------------------------------------------
  # list of directories containing libraries, this must be the top level containing
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..4b78435 100644
+index 8e07c19..8eea790 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,8 @@
@@ -433,7 +405,7 @@ index 8e07c19..4b78435 100644
  /* Traditional / Simplified Chinese switch. The overlay used to hardcode
     Simplified strings, which left Traditional Chinese consoles with the
     wrong glyphs. libtesla already loads both CJK shared fonts, so all we
-@@ -34,6 +43,497 @@ static bool g_isTraditional = false;
+@@ -34,6 +43,416 @@ static bool g_isTraditional = false;
  
  #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
  
@@ -488,26 +460,24 @@ index 8e07c19..4b78435 100644
 +/* 游戏房间标题在列表中的下标;房间行用 addItem 的 index 参数插到它正下方
 +   (直接 addItem 会被追加到列表末尾,跑到「关于」后面)。 */
 +static int g_roomHeaderIndex = -1;
-+/* 展开的房间 key(sessionId);空 = 全部折叠。 */
-+static char g_expandedKey[40] = {};
 +
 +class RoomRow;
 +static std::vector<RoomRow *> g_roomRows;
 +
-+/* 房间行:游戏名 + N/M;按 A 点击展开玩家名单(两行,并排尽量塞名字,
-+   排不下或名字过长时整条名字带连续滚动;房主排最前并用高亮色)。
-+   行高随展开动态变化;行对象持久不删除,焦点/动画状态不会悬挂。 */
++/* 房间行:与中继服务器列表相同的双排布局(上=游戏标题,下=玩家名),
++   始终显示玩家名;固定行高与 ServerRow 一致。 */
++static constexpr u16 kMonitorListRowHeight = 70;
++
 +class RoomRow : public tsl::elm::Element {
 +public:
-+    static constexpr u16 kRoomH   = 70;   /* 房间行高(与 ListItem 等高) */
-+    static constexpr u16 kPlayerH = 42;   /* 玩家行高 */
-+    static constexpr float kFontP = 19;   /* 玩家名字号 */
++    static constexpr u16 kHeight = kMonitorListRowHeight;
++    static constexpr float kTitleFont = 22;
++    static constexpr float kPlayerFont = 16;
 +
 +    RoomRow() { memset(&m_room, 0, sizeof(m_room)); }
 +
-+    void setRoom(const MonitorRoom &room, const char *key) {
++    void setRoom(const MonitorRoom &room) {
 +        m_room = room;
-+        snprintf(m_key, sizeof(m_key), "%s", key);
 +        m_used = true;
 +        m_hint = false;
 +        m_measured = false;
@@ -515,7 +485,6 @@ index 8e07c19..4b78435 100644
 +    void setHint(const char *text) {
 +        memset(&m_room, 0, sizeof(m_room));
 +        snprintf(m_hintText, sizeof(m_hintText), "%s", text);
-+        m_key[0] = 0;
 +        m_used = true;
 +        m_hint = true;
 +    }
@@ -524,17 +493,10 @@ index 8e07c19..4b78435 100644
 +        m_hint = false;
 +    }
 +
-+    bool expanded() const {
-+        return m_used && !m_hint && g_expandedKey[0] && m_key[0] &&
-+               strcmp(m_key, g_expandedKey) == 0;
-+    }
-+
 +    u16 rowHeight() const {
 +        if (!m_used)
 +            return 0;
-+        if (m_hint)
-+            return 44;
-+        return (u16)(kRoomH + (expanded() ? 2 * kPlayerH : 0));
++        return m_hint ? 44 : kHeight;
 +    }
 +
 +    virtual void layout(u16, u16, u16, u16) override {
@@ -551,9 +513,9 @@ index 8e07c19..4b78435 100644
 +            return;
 +        }
 +
-+        /* 房间行:与 ListItem 同风格(上分隔线 + 名称 + 右侧 N/M) */
 +        renderer->drawRect(this->getX(), this->getY(), this->getWidth(), 1,
 +                           R::a(tsl::style::color::ColorFrame));
++
 +        char val[24];
 +        if (m_room.playersMax > 0)
 +            snprintf(val, sizeof(val), "%u/%u", m_room.players, m_room.playersMax);
@@ -561,60 +523,56 @@ index 8e07c19..4b78435 100644
 +            snprintf(val, sizeof(val), "%u", m_room.players);
 +        auto [vw, vh] = renderer->drawString(val, false, 0, 0, 20,
 +                                             R::a(tsl::style::color::ColorTransparent));
-+        renderer->drawString(val, false, this->getX() + this->getWidth() - 20 - (s32)vw,
-+                             this->getY() + 45, 20, R::a(tsl::style::color::ColorHighlight));
-+        /* 游戏名/游戏标题完整显示、不加省略号:先按原字号度量,放不下
-+         * 剩余宽度(左边距 20 + 右侧人数 vw + 间隔/右边距 30)时整体
-+         * 等比缩字号(下限 12),任何情况下都不截字、不补「…」。 */
-+        {
-+            const s32 avail = this->getWidth() - 20 - (s32)vw - 30;
-+            float gfont = 23;
-+            auto [gw, gh] = renderer->drawString(m_room.game, false, 0, 0, gfont,
-+                                                 R::a(tsl::style::color::ColorTransparent));
-+            if ((s32)gw > avail && gw > 0) {
-+                gfont = gfont * (float)avail / (float)gw;
-+                if (gfont < 12)
-+                    gfont = 12;
-+            }
-+            renderer->drawString(m_room.game, false, this->getX() + 20, this->getY() + 45,
-+                                 gfont, R::a(tsl::style::color::ColorText));
++        renderer->drawString(val, false,
++                             this->getX() + this->getWidth() - 20 - (s32)vw,
++                             this->getY() + 45, 20,
++                             R::a(tsl::style::color::ColorHighlight));
++
++        const s32 rightReserve = 20 + (s32)vw + 10;
++        const s32 avail = this->getWidth() - 20 - rightReserve;
++        const s32 textX = this->getX() + 20;
++
++        /* 上排标题完整显示:宽度不足时整体缩字号,不截标题。 */
++        float titleFont = kTitleFont;
++        auto [titleW, titleH] = renderer->drawString(m_room.game, false, 0, 0,
++                                                      titleFont,
++                                                      R::a(tsl::style::color::ColorTransparent));
++        if ((s32)titleW > avail && titleW > 0) {
++            titleFont *= (float)avail / (float)titleW;
++            if (titleFont < 12)
++                titleFont = 12;
++        }
++        renderer->enableScissoring(textX, this->getY() + 6, avail, 30);
++        renderer->drawString(m_room.game, false, textX, this->getY() + 32, titleFont,
++                             R::a(tsl::style::color::ColorText));
++        renderer->disableScissoring();
++
++        /* 下排玩家名:房主高亮,其余名字正常;过长时只在本行窗口内滚动。 */
++        const s32 playerY = this->getY() + 58;
++        if (m_room.playerN == 0) {
++            const char *empty = T("该服务器未提供玩家名单", "該伺服器未提供玩家名單");
++            auto [emptyW, emptyH] = renderer->drawString(empty, false, 0, 0,
++                                                          kPlayerFont,
++                                                          R::a(tsl::style::color::ColorTransparent));
++            std::string fit = empty;
++            if ((s32)emptyW > avail)
++                fit = renderer->limitStringLength(empty, false, kPlayerFont, avail);
++            renderer->drawString(fit.c_str(), false, textX, playerY, kPlayerFont,
++                                 R::a(tsl::style::color::ColorDescription));
++            return;
 +        }
 +
-+        if (expanded())
-+            drawPlayers(renderer);
++        if (!m_measured)
++            measure(renderer, avail);
++        if (m_playerOverflow)
++            drawPlayerMarquee(renderer, textX, playerY, avail);
++        else
++            drawPlayerLine(renderer, textX, playerY, avail);
 +    }
 +
-+    virtual tsl::elm::Element *requestFocus(tsl::elm::Element *oldFocus,
-+                                            tsl::FocusDirection direction) override {
++    virtual tsl::elm::Element *requestFocus(tsl::elm::Element *,
++                                            tsl::FocusDirection) override {
 +        return m_used ? this : nullptr;
-+    }
-+
-+    virtual bool onClick(u64 keys) override {
-+        if (keys & HidNpadButton_A) {
-+            if (m_used && !m_hint && m_key[0]) {
-+                if (strcmp(m_key, g_expandedKey) == 0)
-+                    g_expandedKey[0] = 0;
-+                else
-+                    snprintf(g_expandedKey, sizeof(g_expandedKey), "%s", m_key);
-+                if (g_list)
-+                    g_list->invalidate();
-+            }
-+            this->triggerClickAnimation();
-+            return true;
-+        }
-+        return false;
-+    }
-+
-+    virtual bool onTouch(tsl::elm::TouchEvent event, s32 currX, s32 currY,
-+                         s32 prevX, s32 prevY, s32 initialX, s32 initialY) override {
-+        if (event == tsl::elm::TouchEvent::Touch)
-+            m_touched = this->inBounds(currX, currY);
-+        if (event == tsl::elm::TouchEvent::Release && m_touched) {
-+            m_touched = false;
-+            if (tsl::elm::Element::getInputMode() == tsl::InputMode::Touch)
-+                return this->onClick(HidNpadButton_A);
-+        }
-+        return false;
 +    }
 +
 +    virtual void setFocused(bool state) override {
@@ -624,142 +582,75 @@ index 8e07c19..4b78435 100644
 +    }
 +
 +private:
-+    void measure(tsl::gfx::Renderer *renderer, s32 w) {
++    void measure(tsl::gfx::Renderer *renderer, s32 avail) {
 +        using R = tsl::gfx::Renderer;
 +        m_measured = true;
-+        m_strip.clear();
-+        m_row1.clear();
-+        m_row2.clear();
 +        m_hostName = m_room.player[0];
-+        for (u8 i = 0; i < m_room.playerN; i++) {
-+            if (i)
-+                m_strip += "、";
-+            m_strip += m_room.player[i];
++        m_playerSuffix.clear();
++        for (u8 i = 1; i < m_room.playerN; i++) {
++            m_playerSuffix += "、";
++            m_playerSuffix += m_room.player[i];
 +        }
-+        auto [sw, sh] = renderer->drawString(m_strip.c_str(), false, 0, 0, kFontP,
-+                                             R::a(tsl::style::color::ColorTransparent));
-+        m_stripW = sw;
-+        auto [hw, hh] = renderer->drawString(m_hostName.c_str(), false, 0, 0, kFontP,
-+                                             R::a(tsl::style::color::ColorTransparent));
-+        m_hostW = hw;
-+        auto [gw, gh] = renderer->drawString("        ", false, 0, 0, kFontP,
-+                                             R::a(tsl::style::color::ColorTransparent));
-+        m_loopW = m_stripW + gw;
-+        auto [sepW, seph] = renderer->drawString("、", false, 0, 0, kFontP,
++        m_playerStrip = m_hostName + m_playerSuffix;
++        auto [hostW, hostH] = renderer->drawString(m_hostName.c_str(), false, 0, 0,
++                                                    kPlayerFont,
++                                                    R::a(tsl::style::color::ColorTransparent));
++        auto [stripW, stripH] = renderer->drawString(m_playerStrip.c_str(), false, 0, 0,
++                                                      kPlayerFont,
++                                                      R::a(tsl::style::color::ColorTransparent));
++        auto [gapW, gapH] = renderer->drawString("    ", false, 0, 0, kPlayerFont,
 +                                                 R::a(tsl::style::color::ColorTransparent));
-+
-+        /* 按名字边界填两行;两行塞不下或单名超宽 → 整体滚动 */
-+        m_overflow = false;
-+        std::string *rows[2] = { &m_row1, &m_row2 };
-+        u32 rowW[2] = { 0, 0 };
-+        int row = 0;
-+        for (u8 i = 0; i < m_room.playerN; i++) {
-+            auto [nw, nh] = renderer->drawString(m_room.player[i], false, 0, 0, kFontP,
-+                                                 R::a(tsl::style::color::ColorTransparent));
-+            if (nw > (u32)w) {
-+                m_overflow = true;
-+                break;
-+            }
-+            u32 addW = (rowW[row] ? sepW : 0) + nw;
-+            if (rowW[row] && rowW[row] + addW > (u32)w) {
-+                if (row == 1) {
-+                    m_overflow = true;
-+                    break;
-+                }
-+                row = 1;
-+                addW = nw;
-+            }
-+            if (!rows[row]->empty())
-+                *rows[row] += "、";
-+            *rows[row] += m_room.player[i];
-+            rowW[row] += addW;
-+        }
-+        if (m_overflow) {
-+            m_row1.clear();
-+            m_row2.clear();
-+        }
++        m_hostWidth = hostW;
++        m_stripWidth = stripW;
++        m_loopWidth = stripW + gapW;
++        m_playerOverflow = (s32)stripW > avail;
++        if (m_loopWidth == 0)
++            m_loopWidth = 1;
++        m_scrollOff %= m_loopWidth;
 +    }
 +
-+    /* 静止行:房主(行 1)用高亮色 */
-+    void drawStaticLine(tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 w,
-+                        const std::string &line, bool hostFirst) {
++    void drawPlayerLine(tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 avail) {
 +        using R = tsl::gfx::Renderer;
-+        renderer->enableScissoring(x, y - 24, w + 8, kPlayerH);
-+        if (hostFirst && m_hostW > 0) {
-+            renderer->drawString(m_hostName.c_str(), false, x, y, kFontP,
-+                                 R::a(tsl::style::color::ColorHighlight));
-+            renderer->drawString(line.c_str() + m_hostName.size(), false, x + (s32)m_hostW,
-+                                 y, kFontP, R::a(tsl::style::color::ColorText));
++        renderer->enableScissoring(x, y - 21, avail, 27);
++        renderer->drawString(m_hostName.c_str(), false, x, y, kPlayerFont,
++                             R::a(tsl::style::color::ColorHighlight));
++        if (!m_playerSuffix.empty())
++            renderer->drawString(m_playerSuffix.c_str(), false, x + (s32)m_hostWidth, y,
++                                 kPlayerFont, R::a(tsl::style::color::ColorText));
++        renderer->disableScissoring();
++    }
++
++    void drawPlayerMarquee(tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 avail) {
++        using R = tsl::gfx::Renderer;
++        if (m_scrollCnt < 90) {
++            m_scrollCnt++;
 +        } else {
-+            renderer->drawString(line.c_str(), false, x, y, kFontP,
-+                                 R::a(tsl::style::color::ColorText));
++            m_scrollCnt = 0;
++            m_scrollOff = (m_scrollOff + 1) % m_loopWidth;
++        }
++        renderer->enableScissoring(x, y - 21, avail, 27);
++        for (int copy = 0; copy < 2; copy++) {
++            const s32 left = x - (s32)m_scrollOff + copy * (s32)m_loopWidth;
++            if (left > x + avail || left + (s32)m_stripWidth < x)
++                continue;
++            renderer->drawString(m_hostName.c_str(), false, left, y, kPlayerFont,
++                                 R::a(tsl::style::color::ColorHighlight));
++            if (!m_playerSuffix.empty())
++                renderer->drawString(m_playerSuffix.c_str(), false,
++                                     left + (s32)m_hostWidth, y, kPlayerFont,
++                                     R::a(tsl::style::color::ColorText));
 +        }
 +        renderer->disableScissoring();
 +    }
 +
-+    /* 整体滚动:两行窗口连续滑过整条名字带(名字过长/人多时) */
-+    void drawMarquee(tsl::gfx::Renderer *renderer, s32 x0, s32 y0, s32 w) {
-+        using R = tsl::gfx::Renderer;
-+        if (m_scrollCnt == 90) {
-+            if (m_scrollOff >= m_loopW) {
-+                m_scrollOff = 0;
-+                m_scrollCnt = 0;
-+            } else {
-+                m_scrollOff++;
-+            }
-+        } else {
-+            m_scrollCnt++;
-+        }
-+        s32 o = (s32)m_scrollOff;
-+        for (int row = 0; row < 2; row++) {
-+            s32 y = y0 + 28 + row * kPlayerH;
-+            renderer->enableScissoring(x0, y - 24, w + 8, kPlayerH);
-+            for (int copy = 0; copy < 2; copy++) {
-+                s32 x = x0 - o - row * w + copy * (s32)m_loopW;
-+                if (x > x0 + w)
-+                    continue;
-+                renderer->drawString(m_hostName.c_str(), false, x, y, kFontP,
-+                                     R::a(tsl::style::color::ColorHighlight));
-+                renderer->drawString(m_strip.c_str() + m_hostName.size(), false,
-+                                     x + (s32)m_hostW, y, kFontP,
-+                                     R::a(tsl::style::color::ColorText));
-+            }
-+            renderer->disableScissoring();
-+        }
-+    }
-+
-+    void drawPlayers(tsl::gfx::Renderer *renderer) {
-+        using R = tsl::gfx::Renderer;
-+        s32 x0 = this->getX() + 20;
-+        s32 y0 = this->getY() + kRoomH;
-+        s32 w = this->getWidth() - 40;
-+        if (m_room.playerN == 0) {
-+            renderer->drawString(T("该服务器未提供玩家名单", "該伺服器未提供玩家名單"), false,
-+                                 x0, y0 + 28, kFontP,
-+                                 R::a(tsl::style::color::ColorDescription));
-+            return;
-+        }
-+        if (!m_measured)
-+            measure(renderer, w);
-+        if (m_overflow) {
-+            drawMarquee(renderer, x0, y0, w);
-+            return;
-+        }
-+        drawStaticLine(renderer, x0, y0 + 28, w, m_row1, true);
-+        if (!m_row2.empty())
-+            drawStaticLine(renderer, x0, y0 + 28 + kPlayerH, w, m_row2, false);
-+    }
-+
 +    MonitorRoom m_room;
-+    char m_key[40] = {};
 +    char m_hintText[96] = {};
 +    bool m_used = false;
 +    bool m_hint = false;
-+    bool m_touched = false;
 +    bool m_measured = false;
-+    bool m_overflow = false;
-+    std::string m_strip, m_row1, m_row2, m_hostName;
-+    u32 m_stripW = 0, m_hostW = 0, m_loopW = 0;
++    bool m_playerOverflow = false;
++    std::string m_hostName, m_playerSuffix, m_playerStrip;
++    u32 m_hostWidth = 0, m_stripWidth = 0, m_loopWidth = 1;
 +    u32 m_scrollOff = 0, m_scrollCnt = 0;
 +};
 +
@@ -767,7 +658,7 @@ index 8e07c19..4b78435 100644
 + * ListItem 等高(70)。右侧沿用「* 延迟 Nms」文本;按 A/触摸 = 切换服务器。 */
 +class ServerRow : public tsl::elm::Element {
 +public:
-+    static constexpr u16 kHeight = 70;
++    static constexpr u16 kHeight = kMonitorListRowHeight;
 +
 +    void setServer(u32 index, const char *name, const char *addr) {
 +        m_index = index;
@@ -931,7 +822,7 @@ index 8e07c19..4b78435 100644
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -70,140 +570,84 @@ static void detectLanguage()
+@@ -70,140 +489,67 @@ static void detectLanguage()
      strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
  }
  
@@ -940,7 +831,7 @@ index 8e07c19..4b78435 100644
 -    MainGui() { }
 +/* (重)建“游戏房间”区块的行。快照 version 变化时由 update() 调用。
 +   行是持久池(只增不删):不用的行 height=0,焦点永远不会挂在已删除
-+   元素上;展开/收起只改高度并重排列表。 */
++   元素上;有效房间行固定为 70px,快照变化时更新标题与玩家名。 */
 +static void rebuildRoomSection(const MonitorSnapshot &snap)
 +{
 +    if (!g_list || !g_roomHeader || g_roomHeaderIndex < 0)
@@ -960,12 +851,11 @@ index 8e07c19..4b78435 100644
 +    g_roomHeader->setText(header);
  
 -        auto list = new tsl::elm::List();
-+    char key[MONITOR_MAX_ROOMS][40];
-+    for (u32 i = 0; i < snap.roomN; i++) {
-+        if (snap.rooms[i].sessionId[0])
-+            snprintf(key[i], sizeof(key[i]), "%s", snap.rooms[i].sessionId);
-+        else
-+            snprintf(key[i], sizeof(key[i]), "i%u", (unsigned)i);
++    u32 need = snap.roomN > 0 ? snap.roomN : 1;   /* 0 房间时用 1 行提示 */
++    while (g_roomRows.size() < need) {
++        auto *row = new RoomRow();
++        g_roomRows.push_back(row);
++        g_list->addItem(row, 0, g_roomHeaderIndex + 1 + (int)g_roomRows.size() - 1);
 +    }
  
 -        if (g_state == State::Error) {
@@ -986,7 +876,18 @@ index 8e07c19..4b78435 100644
 -                list->addItem(new tsl::elm::ListItem(T("读取服务器列表失败", "讀取伺服器清單失敗")));
 -            } else if (count == 0) {
 -                list->addItem(new tsl::elm::ListItem(T("没有服务器，请编辑 relay.cfg", "沒有伺服器，請編輯 relay.cfg")));
--            } else {
++    for (u32 i = 0; i < g_roomRows.size(); i++) {
++        if (snap.roomN == 0) {
++            if (i == 0) {
++                const char *msg;
++                if (snap.busy)
++                    msg = T("正在查询…", "正在查詢…");
++                else if (snap.status[0])
++                    msg = snap.status;
++                else
++                    msg = T("暂无房间", "暫無房間");
++                g_roomRows[i]->setHint(msg);
+             } else {
 -                u32 selected = 0;
 -                if (R_FAILED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &selected))) {
 -                    selected = count;
@@ -1018,15 +919,16 @@ index 8e07c19..4b78435 100644
 -                    g_serverItems.push_back(item);
 -                    list->addItem(item);
 -                }
--            }
-+    /* 展开的房间若已消失,收起 */
-+    if (g_expandedKey[0]) {
-+        bool found = false;
-+        for (u32 i = 0; i < snap.roomN; i++)
-+            if (strcmp(key[i], g_expandedKey) == 0) { found = true; break; }
-+        if (!found)
-+            g_expandedKey[0] = 0;
++                g_roomRows[i]->clearRow();
+             }
++        } else if (i < snap.roomN) {
++            g_roomRows[i]->setRoom(snap.rooms[i]);
++        } else {
++            g_roomRows[i]->clearRow();
++        }
 +    }
++    g_list->invalidate();
++}
  
 -            // Show this console's relay identity. relay.cfg only stores the
 -            // low 16 bits (`id=`), and the plugin assigns one on first use if
@@ -1048,12 +950,9 @@ index 8e07c19..4b78435 100644
 -            } else {
 -                list->addItem(new tsl::elm::ListItem(T("本机 IP", "本機 IP"), T("建立房间后显示", "建立房間後顯示")));
 -            }
-+    u32 need = snap.roomN > 0 ? snap.roomN : 1;   /* 0 房间时用 1 行提示 */
-+    while (g_roomRows.size() < need) {
-+        auto *row = new RoomRow();
-+        g_roomRows.push_back(row);
-+        g_list->addItem(row, 0, g_roomHeaderIndex + 1 + (int)g_roomRows.size() - 1);
-+    }
++class MainGui : public tsl::Gui {
++public:
++    MainGui() { }
  
 -            u32 vaddr = 0;
 -            const bool addr_ok = R_SUCCEEDED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr));
@@ -1061,33 +960,20 @@ index 8e07c19..4b78435 100644
 -                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), T("读取失败", "讀取失敗")));
 -            } else if (vaddr == 0) {
 -                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), T("建立房间后分配", "建立房間後分配")));
-+    for (u32 i = 0; i < g_roomRows.size(); i++) {
-+        if (snap.roomN == 0) {
-+            if (i == 0) {
-+                const char *msg;
-+                if (snap.busy)
-+                    msg = T("正在查询…", "正在查詢…");
-+                else if (snap.status[0])
-+                    msg = snap.status;
-+                else
-+                    msg = T("暂无房间", "暫無房間");
-+                g_roomRows[i]->setHint(msg);
-             } else {
+-            } else {
 -                char buf[48];
 -                snprintf(buf, sizeof(buf), "%u.%u.%u.%u  (id=%u)",
 -                         (vaddr >> 24) & 0xff, (vaddr >> 16) & 0xff,
 -                         (vaddr >> 8) & 0xff, vaddr & 0xff, vaddr & 0xffff);
 -                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), buf));
-+                g_roomRows[i]->clearRow();
-             }
-+        } else if (i < snap.roomN) {
-+            g_roomRows[i]->setRoom(snap.rooms[i], key[i]);
-+        } else {
-+            g_roomRows[i]->clearRow();
-+        }
-+    }
-+    g_list->invalidate();
-+}
+-            }
++    virtual tsl::elm::Element* createUI() override {
++        MonitorLog("ui-begin");
++        // This overlay ships inside a Chinese integration package and the
++        // bundled font has CJK glyphs, so the UI is localised in place.
++        // The header subtitle carries the release brand and resolved build
++        // version; the full version is also repeated in the About block.
++        auto frame = new MonitorFrame(T("联机插件", "連線插件"), g_brand);
  
 -            // Tell the user whether the address is stable. T("硬件派生", "硬體衍生") is
 -            // derived from this console's LAN address, so it is the same on
@@ -1113,10 +999,7 @@ index 8e07c19..4b78435 100644
 -            }
 -            list->addItem(new tsl::elm::ListItem(T("两台机器的地址必须不同", "兩台機器的位址必須不同")));
 -            list->addItem(new tsl::elm::ListItem(T("重启后地址不变即正常", "重新啟動後位址不變即正常")));
-+class MainGui : public tsl::Gui {
-+public:
-+    MainGui() { }
- 
+-
 -            // Release signature. Kept at the very bottom so it never gets in
 -            // the way of the settings, but every user scrolling down sees it.
 -            list->addItem(new tsl::elm::CategoryHeader(T("关于", "關於")));
@@ -1124,23 +1007,15 @@ index 8e07c19..4b78435 100644
 -            list->addItem(new tsl::elm::ListItem(T("版本", "版本"), g_version));
 -            list->addItem(new tsl::elm::ListItem(T("声明", "聲明"), T("免费分享 禁止倒卖", "免費分享 禁止轉賣")));
 -        }
-+    virtual tsl::elm::Element* createUI() override {
-+        MonitorLog("ui-begin");
-+        // This overlay ships inside a Chinese integration package and the
-+        // bundled font has CJK glyphs, so the UI is localised in place.
-+        // The header subtitle carries the release brand and resolved build
-+        // version; the full version is also repeated in the About block.
-+        auto frame = new MonitorFrame(T("联机插件", "連線插件"), g_brand);
- 
--        frame->setContent(list);
 +        g_list = new RebuildList();
 +        buildList(g_list);
-+
+ 
+-        frame->setContent(list);
 +        frame->setContent(g_list);
  
          // Every item was just created with a bare "*". Force the first
          // update() to paint the latency text even if the reading has not
-@@ -211,16 +655,75 @@ public:
+@@ -211,16 +557,75 @@ public:
          // cached value made update() return early and the label stayed at
          // just "*" with no "--" and no number.
          g_shown_latency = 0xFFFFFFFFu;
@@ -1217,7 +1092,7 @@ index 8e07c19..4b78435 100644
              return;
          }
          u32 ms = 0;
-@@ -233,9 +736,8 @@ public:
+@@ -233,9 +638,8 @@ public:
          }
          g_shown_latency = ms;
  
@@ -1229,7 +1104,7 @@ index 8e07c19..4b78435 100644
          char buf[48];
          bool faint = false;
          if (ms == 0) {
-@@ -247,9 +749,9 @@ public:
+@@ -247,9 +651,9 @@ public:
          } else {
              snprintf(buf, sizeof(buf), T("* 延迟 %ums", "* 延遲 %ums"), ms);
          }
@@ -1242,7 +1117,7 @@ index 8e07c19..4b78435 100644
              }
          }
      }
-@@ -260,14 +762,349 @@ public:
+@@ -260,14 +664,349 @@ public:
      }
  };
  
@@ -1592,7 +1467,7 @@ index 8e07c19..4b78435 100644
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,14 +1125,34 @@ public:
+@@ -288,14 +1027,34 @@ public:
              g_state = State::Loaded;
          });
  
@@ -1631,7 +1506,7 @@ index 8e07c19..4b78435 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..df210f2
+index 0000000..4e82f4c
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
 @@ -0,0 +1,2429 @@
@@ -3639,7 +3514,7 @@ index 0000000..df210f2
 +/* ------------------------------------------------------------------ */
 +
 +/* 查询/UDP 扫描都有偶发丢包与瞬间空列表(日志里 scan rooms=0/1 交替),
-+ * 直接把当次结果写进快照会让房间行每秒闪一下、展开状态被收掉。
++ * 直接把当次结果写进快照会让房间列表每秒闪一下。
 + * 缓存以 sessionId 为键:命中即刷新时间戳并更新房间数据;当次没出现
 + * 的条目再保留 5 秒才删除;服务器身份变化时整体清空。
 + * 在线人数/房间数量同口径:查询失败时沿用最近一次成功值,超过 5 秒
@@ -4066,7 +3941,7 @@ index 0000000..df210f2
 +}
 diff --git a/overlay/source/monitor.hpp b/overlay/source/monitor.hpp
 new file mode 100644
-index 0000000..6d32143
+index 0000000..3e9ee8a
 --- /dev/null
 +++ b/overlay/source/monitor.hpp
 @@ -0,0 +1,71 @@
@@ -4097,7 +3972,7 @@ index 0000000..6d32143
 +    u32  playersMax;    /* 人数上限,0 = 未知 */
 +    u8   playerN;       /* 玩家名有效条数(0 = 服务器未提供名单) */
 +    char player[MONITOR_MAX_PLAYERS][MONITOR_PLAYER_LEN]; /* 玩家名,房主在 [0] */
-+    char sessionId[33]; /* 房间标识(sessionId hex;扫描房=标题ID),展开状态跟随用 */
++    char sessionId[33]; /* 房间标识(sessionId hex;扫描房=标题ID),缓存和去重用 */
 +};
 +
 +struct MonitorSnapshot {

@@ -9,7 +9,7 @@ beta/bsd-broadcast-relay-TONYX9000 分支后续服务器管理改动合并进现
 - 0002/0006：版本生成命令在没有可描述 tag 时回退到 commit 短哈希，并保留 -dirty 标记。
 - 0004/0008：保留服务器容量上限 32 与配置模板修改。
 - 0009：保留 PING 修复；出厂/恢复默认列表为 12 条，并从 relay.cfg 与恢复默认表移除“中国·江苏(2) yordon.cn:11451”。新增分支服务器管理 IPC、17 条内置候选目录与 idle 延迟预览；该项仍可在“添加服务器”页手动选用，另有 4 条备用候选。selected=中国·河南；荷兰名称保持“荷兰”/“荷兰(2)”。
-- 0010：整合添加/删除/恢复服务器页及列表重建/焦点恢复，同时保留 MonitorFrame、RoomRow、自绘 ServerRow 和在线/房间间距；all-F `contentId` 按房间 advertiseData 识别五种已知游戏，未知时安全显示“未知游戏”，不以本机前台 ProgramId 标注远端房间。针对旧固件 19.0.1 的崩溃日志，将 monitor 工作线程栈由 64 KiB 扩至 256 KiB、把 8 KiB LDN 解压缓冲移出线程栈，并将原先可能溢出的负数栈余量日志改为有边界检查的诊断；玩家名单按 isConnected 过滤断开节点、限制 UDP NetworkInfo 只读取 nodeCount 范围内的槽位并在切服时立即清空旧快照；CI 的 build/nightly/release/beta 四个 workflow 对 switch-curl 依赖安装增加 DevkitPro 包数据库 HTTP 403 缓存回退与安装结果校验；针对 beta 手动构建仍使用旧式 -Sy 一步失败的问题已补齐同一处理。
+- 0010：整合添加/删除/恢复服务器页及列表重建/焦点恢复；游戏房间行改为与服务器行同高的 70px 固定双排布局（上排游戏标题、下排玩家名常显，过长名单在下排滚动），同时保留 MonitorFrame、自绘 ServerRow 和在线/房间间距；all-F `contentId` 按房间 advertiseData 识别五种已知游戏，未知时安全显示“未知游戏”，不以本机前台 ProgramId 标注远端房间。针对旧固件 19.0.1 的崩溃日志，将 monitor 工作线程栈由 64 KiB 扩至 256 KiB、把 8 KiB LDN 解压缓冲移出线程栈，并将原先可能溢出的负数栈余量日志改为有边界检查的诊断；玩家名单按 isConnected 过滤断开节点、限制 UDP NetworkInfo 只读取 nodeCount 范围内的槽位并在切服时立即清空旧快照；CI 的 build/nightly/release/beta 四个 workflow 对 switch-curl 依赖安装增加 DevkitPro 包数据库 HTTP 403 缓存回退与安装结果校验；针对 beta 手动构建仍使用旧式 -Sy 一步失败的问题已补齐同一处理。
 
 目标分支 tip：0b83cd3f17f14058d5fdabcdb7dec1faa13ede9d。
 为适配本仓库，仍不改 Atmosphere-libs 子模块指针；CI 相关改动继续放在既有 0010 内，不增加新编号。
