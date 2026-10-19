@@ -1,4 +1,4 @@
-From 219a626dbecfd9a451dd1287219884bb64214299 Mon Sep 17 00:00:00 2001
+From c0fd175f3c14865da5e333b98a03fd34e435c039 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH] overlay: online counts/room list and relay management
@@ -147,7 +147,7 @@ index 3c7281c..9c225b0 100644
          id: build
          run: make -j8 PREFIX="ccache aarch64-none-elf-"
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
-index 55e5970..829b976 100644
+index 3d7bc8b..b37dab7 100644
 --- a/.github/workflows/build.yml
 +++ b/.github/workflows/build.yml
 @@ -38,8 +38,20 @@ jobs:
@@ -335,7 +335,7 @@ index efcb5e7..cd62b35 100644
  
  .PHONY: all clean PACK atmosphere-patch $(SUBFOLDERS)
 diff --git a/overlay/Makefile b/overlay/Makefile
-index e2cdc19..891ccd1 100644
+index da2bd21..788dac7 100644
 --- a/overlay/Makefile
 +++ b/overlay/Makefile
 @@ -48,7 +48,7 @@ TARGET		:=	$(notdir $(CURDIR))

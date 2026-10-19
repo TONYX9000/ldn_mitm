@@ -42,7 +42,7 @@ Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-T
  create mode 100644 tools/relay_steal_test.py
 
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
-index 8be8bd5..55e5970 100644
+index 8be8bd5..3d7bc8b 100644
 --- a/.github/workflows/build.yml
 +++ b/.github/workflows/build.yml
 @@ -7,7 +7,8 @@ jobs:
