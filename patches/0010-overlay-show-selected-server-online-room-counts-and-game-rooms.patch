@@ -1072,7 +1072,7 @@ new file mode 100644
 index 0000000..70189b4
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2234 @@
+@@ -0,0 +1,2235 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
