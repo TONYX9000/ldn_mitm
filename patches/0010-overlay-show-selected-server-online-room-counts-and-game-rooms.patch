@@ -1,7 +1,7 @@
-From 441d728ed37f2240ce5f0b29db9e76f09ac0ae0b Mon Sep 17 00:00:00 2001
+From 8a4809d37775fff50ae12d1bbc88a341df3539bb Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
-Subject: [PATCH 10/10] overlay: online counts/room list and relay management
+Subject: [PATCH] overlay: online counts/room list and relay management
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -97,6 +97,11 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
 - 在既有补丁 0010 内增加 room advertiseData 标题识别、UDP NetworkInfo 广告数据解析、旧 GraphQL schema 回退及纯主机回归测试；未识别 all-F 房间安全显示「未知游戏」，不读取本机 ProgramId。
 
 Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-TONYX9000
+
+旧系统兼容性（2026-10-19，HOS 19.0.1 / Atmosphère 1.9.5-pre 日志；根因待实机确认）：
+- 附件记录 2168-0001 Instruction Abort；查询和 UDP 扫描曾成功，崩溃线程 SP 靠近 User Exception Address。该信息值得排查线程栈/内存边界，但不能单独证实栈溢出。
+- 为降低旧运行环境下的线程栈压力，monitor worker 栈从 64 KiB 增至 256 KiB；LDN 解压 8 KiB 临时缓冲移为单 worker 专用静态缓冲。
+- 修正 stack-free 的无符号地址相减；仅在 probe 位于传入栈区时显示 used/free，否则记录 probe 和栈区范围，供复测诊断。
 ---
  .github/workflows/build.yml                   |   20 +-
  .github/workflows/nightly.yml                 |   23 +-
@@ -104,11 +109,11 @@ Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-T
  Makefile                                      |    6 +
  overlay/Makefile                              |    9 +-
  overlay/source/main.cpp                       | 1125 +++++++-
- overlay/source/monitor.cpp                    | 2285 +++++++++++++++++
+ overlay/source/monitor.cpp                    | 2305 +++++++++++++++++
  overlay/source/monitor.hpp                    |   71 +
  overlay/source/monitor_title_resolver.hpp     |  148 ++
  overlay/tests/monitor_title_resolver_test.cpp |   49 +
- 10 files changed, 3610 insertions(+), 156 deletions(-)
+ 10 files changed, 3630 insertions(+), 156 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
  create mode 100644 overlay/source/monitor_title_resolver.hpp
@@ -1529,10 +1534,10 @@ index 8e07c19..4b78435 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..2c7b866
+index 0000000..7e8b9aa
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2285 @@
+@@ -0,0 +1,2305 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -1560,6 +1565,7 @@ index 0000000..2c7b866
 +
 +#include <atomic>
 +#include <chrono>
++#include <cstdint>
 +#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
@@ -3304,7 +3310,10 @@ index 0000000..2c7b866
 +    if (bodyLen > body - 12)
 +        return false;
 +
-+    u8 tmp[8192];
++    /* This parser is only called by the single monitor worker. Keep the
++     * decompression scratch off its stack; older ovlloader builds provide a
++     * smaller/less forgiving thread stack than current builds. */
++    static u8 tmp[8192];
 +    const u8 *info = ldn + 12;
 +    size_t infoLen = bodyLen;
 +    if (ldn[5] == 1) {                     /* 压缩 */
@@ -3548,16 +3557,32 @@ index 0000000..2c7b866
 +/* 刷新流程                                                            */
 +/* ------------------------------------------------------------------ */
 +
-+alignas(0x1000) static u8 g_workerStack[0x10000];
++/* TLS/curl and JSON parsing can nest more deeply on older runtimes. Reserve
++ * 256 KiB instead of 64 KiB; this is static overlay memory, not heap. */
++alignas(0x1000) static u8 g_workerStack[0x40000];
++
++static void LogWorkerStack(const char *phase) {
++    volatile u8 probe = 0;
++    const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(g_workerStack);
++    const std::uintptr_t end = base + sizeof(g_workerStack);
++    const std::uintptr_t current = reinterpret_cast<std::uintptr_t>(&probe);
++    char msg[128];
++    if (current >= base && current < end) {
++        snprintf(msg, sizeof(msg), "%s worker-stack used=%uK free=%uK", phase,
++                 static_cast<unsigned>((end - current) / 1024),
++                 static_cast<unsigned>((current - base) / 1024));
++    } else {
++        /* Never print a wrapped/negative "free stack" number. This also
++         * diagnoses a runtime that did not use the supplied stack buffer. */
++        snprintf(msg, sizeof(msg), "%s worker-stack range-mismatch sp=%p range=%p..%p",
++                 phase, reinterpret_cast<void *>(current),
++                 reinterpret_cast<void *>(base), reinterpret_cast<void *>(end));
++    }
++    MonLog(msg);
++}
 +
 +static void DoRefresh(const char *nameOverride, bool reloadSubs) {
-+    {
-+        char probe;
-+        char m0[80];
-+        snprintf(m0, sizeof(m0), "refresh-start stack-free=%dK",
-+                 (int)(((size_t)(&probe) - (size_t)g_workerStack) / 1024));
-+        MonLog(m0);
-+    }
++    LogWorkerStack("refresh-start");
 +    EnsureSockets();
 +    {
 +        std::scoped_lock lk(g_mutex);
