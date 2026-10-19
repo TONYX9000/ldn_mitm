@@ -261,10 +261,13 @@ public:
                 }
             }
 
-            char addr[96];
-            snprintf(addr, sizeof(addr), "%s:%u", info.host, static_cast<unsigned>(info.port));
+            /* Do not paint host:port here. libtesla's ListItem does not
+               truncate the value, and a long address (e.g.
+               muitxobem-lanplay.ddns.net:11451) is wider than the row, so it
+               was drawn on top of the left-hand name. A short status word
+               keeps the name readable; the addresses live in the README. */
             auto *item = new tsl::elm::ListItem(info.name);
-            item->setValue(present ? T("已添加", "已新增") : addr, present);
+            item->setValue(present ? T("已添加", "已新增") : T("可添加", "可新增"), present);
 
             auto added = std::make_shared<bool>(present);
             auto count = std::make_shared<u32>(current);
