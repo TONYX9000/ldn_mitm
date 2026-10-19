@@ -1,4 +1,4 @@
-From 809459a12500c4866c94d82f455a2d24109b0be9 Mon Sep 17 00:00:00 2001
+From 6aa1d7739761e9fe87efdf25806434f85c653638 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
 Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
@@ -9,45 +9,38 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-- 标题下方常驻显示当前选择服务器的在线人数、房间数量
-  (标签「在线/房间」,数字在下;繁体「線上/房間」,简繁自适应)
-- 新增「游戏房间」区块:列出所选服务器的房间,标题ID 经
-  chinese_db.json 映射为中文游戏名,人数显示 N/M
-- 订阅文件 servers.json / chinese_db.json 每次点开 overlay 从远程下载,
-  保存到 sdmc:/config/ldn_mitm/,失败退回本地缓存;直连
-  raw.githubusercontent.com,v6.gh-proxy.org / gh-proxy.com / ghfast.top 镜像兜底
-- graphql 服务器 POST / 取 serverInfo+room;rest(1.0)服务器 GET /info 取在线数;
-  /info 不含房间时用 lan-play 中继协议 UDP LDN 主动扫描补房间
-  (11452 广播,1.5s 收集,type 0x01/0x03 分片重组,RLE 解压 NetworkInfo)
-- 每次点开 overlay(Overlay::onShow)与切换服务器时重新下载订阅并刷新
-- 后台线程刷新(libnx thread,不阻塞 UI),UI 按快照 version 重建列表
-- 域名解析用 getaddrinfo(libnx/newlib 无 gethostbyname);INADDR_NONE 兼容定义
-- 内存优化(修复 ovlloader 堆溢出 0x559 OutOfMemory):
-  标题表(哈希 16384 桶 + 288KB 名称池,约 512KB)延迟到首次解析订阅时
-  才分配;chinese_db.json 落盘后先释放字符串,再 1KB 窗口流式解析入库
-  (峰值约 512KB,不再与约 0.5MB 订阅字符串同驻);HTTP 响应按
-  Content-Length 精确预留,避免 std::string 几何增长翻倍瞬时占用;
-  overlay 启用 --gc-sections/-fdata-sections/-fno-unwind-tables/-Os
-  减小镜像(libtesla 用 dynamic_cast,不能加 -fno-rtti)
-- 诊断日志 sdmc:/config/ldn_mitm/monitor.log(worker-init /
-  initServices-done / first-frame / refresh-start / refresh-done),
-  堆不足复现时可直接定位爆点
-- CI 修复(适配最新系统):构建前把 Atmosphere-libs 顶到 master(与上游
-  nightly.yml 相同,跟踪 23.0.1+ 固件适配,否则插件在新系统启动报错),
-  并安装 libnx master 与其配套(新 pgl 命名);三个工作流统一此流程,
-  移除失效的"装 libnx master 重试"兜底与旧 pgl 固定
-- 参考 jieluojun/LanPlayMonitor 的服务器 API 口径(main.py)
+联机监视器(0010):
+- 标题下方两列统计:标签「在线/房间」在上、数字在下
+- 「游戏房间」列表:chinese_db.json 标题ID→中文名映射 + N/M 人数
+- 订阅 servers.json / chinese_db.json 每次打开 overlay 重新下载到
+  sdmc:/config/ldn_mitm/,失败退回缓存;graphql/rest 分型查询,
+  rest 1.0 用 UDP LDN 主动扫描补房间;切换服务器即时刷新
 
-Reference: https://github.com/jieluojun/LanPlayMonitor
+内存与稳定性(真机 23.0.1 排障并入):
+- EnsureSd():tesla 覆盖 __appInit 后 sdmc 未挂载,曾致 fclose(NULL)
+  崩溃(2168-0002/0x428)与全部文件 I/O 静默失效;现幂等挂载 + 日志截断判空
+- 标题表懒加载 + chinese_db 1KB 窗口流式解析 + HTTP Content-Length
+  预留,消除 ovlloader 0x559 OutOfMemory(表缺失时回退显示标题ID)
+- bsd socket 延迟到首次查询再初始化并缩容,挪出帧缓冲关键窗口
+- 帧缓冲降级兜底(-Wl,--wrap=framebufferCreate):双缓冲 1.34MB 分配
+  失败时自动改单缓冲 672KB,小堆 loader 不再 0x559 直接崩
+- 堆余量探针 + 阶段日志(worker-init/probe-*/initServices-done/fb:/
+  ui-begin/ui-ready/first-frame/refresh-*):崩溃时 monitor.log 直接定位
+- sdcard 包内置 /config/nx-ovlloader/heap_size.bin=8MB(ppkantorski/
+  Ultrahand loader 提堆;官方 loader 忽略无害)
+
+CI(适配最新系统):构建前 Atmosphere-libs 顶到 master(同上游 nightly
+机制,跟踪 23.0.1+ 固件),安装 libnx master 配套(新 pgl 命名)
 ---
  .github/workflows/build.yml   |   14 +-
  .github/workflows/nightly.yml |   17 +-
  .github/workflows/release.yml |   24 +-
+ Makefile                      |    2 +
  overlay/Makefile              |    5 +-
- overlay/source/main.cpp       |  151 +++-
- overlay/source/monitor.cpp    | 1516 +++++++++++++++++++++++++++++++++
+ overlay/source/main.cpp       |  152 +++-
+ overlay/source/monitor.cpp    | 1584 +++++++++++++++++++++++++++++++++
  overlay/source/monitor.hpp    |   51 ++
- 7 files changed, 1755 insertions(+), 23 deletions(-)
+ 8 files changed, 1826 insertions(+), 23 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
@@ -155,8 +148,21 @@ index 7f34343..b34daa5 100644
  
      - name: Pack
        run: |
+diff --git a/Makefile b/Makefile
+index efcb5e7..75d337a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -57,6 +57,8 @@ PACK: $(SUBFOLDERS)
+ 	@ cp ldn_mitm/res/toolbox.json $(TITLE_DIR)/toolbox.json
+ 	@ touch $(TITLE_DIR)/flags/boot2.flag
+ 	@ cp config/ldn_mitm/relay.cfg $(SD_ROOT)/config/ldn_mitm/relay.cfg
++	@ mkdir -p $(SD_ROOT)/config/nx-ovlloader
++	@ printf '\000\000\200\000\000\000\000\000' > $(SD_ROOT)/config/nx-ovlloader/heap_size.bin
+ #---------------------------------------------------------------------------------
+ 
+ .PHONY: all clean PACK atmosphere-patch $(SUBFOLDERS)
 diff --git a/overlay/Makefile b/overlay/Makefile
-index e2cdc19..168940f 100644
+index e2cdc19..efd0e47 100644
 --- a/overlay/Makefile
 +++ b/overlay/Makefile
 @@ -57,7 +57,8 @@ NO_ICON		:=  1
@@ -174,12 +180,12 @@ index e2cdc19..168940f 100644
  
  ASFLAGS	:=	-g $(ARCH)
 -LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
-+LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sections
++LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sections -Wl,--wrap=framebufferCreate
  
  LIBS	:= -lnx
  
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..8bc36f6 100644
+index 8e07c19..6073fb8 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,7 @@
@@ -262,7 +268,7 @@ index 8e07c19..8bc36f6 100644
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -70,6 +136,51 @@ static void detectLanguage()
+@@ -70,18 +136,65 @@ static void detectLanguage()
      strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
  }
  
@@ -314,7 +320,10 @@ index 8e07c19..8bc36f6 100644
  class MainGui : public tsl::Gui {
  public:
      MainGui() { }
-@@ -79,9 +190,10 @@ public:
+ 
+     virtual tsl::elm::Element* createUI() override {
++        MonitorLog("ui-begin");
+         // This overlay ships inside a Chinese integration package and the
          // bundled font has CJK glyphs, so the UI is localised in place.
          // The header subtitle carries the release brand; the full version
          // string is repeated in the T("关于", "關於") block at the bottom.
@@ -326,7 +335,7 @@ index 8e07c19..8bc36f6 100644
  
          if (g_state == State::Error) {
              list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
-@@ -96,6 +208,7 @@ public:
+@@ -96,6 +209,7 @@ public:
              list->addItem(new ConfigToggleListItem(T("互联网中继", "網際網路中繼"), ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
  
              g_serverItems.clear();
@@ -334,7 +343,7 @@ index 8e07c19..8bc36f6 100644
              u32 count = 0;
              if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count))) {
                  list->addItem(new tsl::elm::ListItem(T("读取服务器列表失败", "讀取伺服器清單失敗")));
-@@ -109,9 +222,11 @@ public:
+@@ -109,9 +223,11 @@ public:
                  for (u32 i = 0; i < count; i++) {
                      char name[32] = {};
                      ldnMitmGetRelayServerName(&g_ldnConfig, i, name);
@@ -347,7 +356,7 @@ index 8e07c19..8bc36f6 100644
                          if (keys & HidNpadButton_A) {
                              if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
                                  g_serverItems[i]->setValue(T("错误", "錯誤"));
-@@ -126,6 +241,9 @@ public:
+@@ -126,6 +242,9 @@ public:
                              // there with only a star until the overlay is
                              // reopened.
                              g_shown_latency = 0xFFFFFFFFu;
@@ -357,7 +366,7 @@ index 8e07c19..8bc36f6 100644
                              return true;
                          }
                          return false;
-@@ -135,6 +253,11 @@ public:
+@@ -135,6 +254,11 @@ public:
                  }
              }
  
@@ -369,13 +378,14 @@ index 8e07c19..8bc36f6 100644
              // Show this console's relay identity. relay.cfg only stores the
              // low 16 bits (`id=`), and the plugin assigns one on first use if
              // the line is absent, so this is the only place to read it back.
-@@ -211,12 +334,22 @@ public:
+@@ -211,12 +335,23 @@ public:
          // cached value made update() return early and the label stayed at
          // just "*" with no "--" and no number.
          g_shown_latency = 0xFFFFFFFFu;
 +        // 同理:强制首次重建游戏房间区块。
 +        g_monitorVersion = 0xFFFFFFFFu;
  
++        MonitorLog("ui-ready");
          return frame;
      }
  
@@ -392,7 +402,7 @@ index 8e07c19..8bc36f6 100644
          // Show the live relay latency next to the selected server.
          // Only the selected server is connected, so it is the only one
          // whose round-trip time we can actually know.
-@@ -265,9 +398,14 @@ public:
+@@ -265,9 +400,14 @@ public:
      virtual void initServices() override {
          g_state = State::Uninit;
          detectLanguage();
@@ -400,14 +410,14 @@ index 8e07c19..8bc36f6 100644
          tsl::hlp::doWithSmSession([&] {
              Result rc;
  
-+            /* 监视器的 HTTP/UDP 需要 bsd socket;失败(无网络)时
-+               MonitorWorker 会在查询阶段报错,不影响本地设置功能。 */
-+            socketInitializeDefault();
++            /* bsd socket 由监视器在首次网络查询时按需初始化(见 monitor.cpp
++               EnsureSockets):把缓冲分配挪出 initScreen 的帧缓冲关键窗口,
++               避免 ovlloader 小堆上 0x559;失败(无网络)只影响查询不影响设置。 */
 +
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,13 +426,20 @@ public:
+@@ -288,13 +428,19 @@ public:
              g_state = State::Loaded;
          });
  
@@ -415,8 +425,7 @@ index 8e07c19..8bc36f6 100644
 +        MonitorLog("initServices-done");
      }
      virtual void exitServices() override {
-+        MonitorExit();
-+        socketExit();
++        MonitorExit();          /* 内部负责 socketExit(延迟初始化的 socket) */
          serviceClose(&g_ldnConfig.s);
          serviceClose(&g_ldnSrv);
      }
@@ -431,10 +440,10 @@ index 8e07c19..8bc36f6 100644
      virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..cd6ff91
+index 0000000..40d1bef
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,1516 @@
+@@ -0,0 +1,1584 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -514,6 +523,65 @@ index 0000000..cd6ff91
 +    fputc('\n', f);
 +    fclose(f);
 +}
++
++/* bsd socket 延迟到首次网络查询才初始化:
++ * 1) 把 ~114KB 的 bsd 缓冲分配挪出 initScreen 的帧缓冲(1.34MB)关键窗口,
++ *    避免 ovlloader 小堆上触发 0x559 OutOfMemory;
++ * 2) 缓冲按实际需要缩容(HTTP 响应按 8KB 流式读,LDN 扫描包 < 2KB)。 */
++static bool g_sockInited = false;
++static void EnsureSockets() {
++    if (g_sockInited)
++        return;
++    SocketInitConfig cfg = *socketGetDefaultInitConfig();
++    cfg.tcp_tx_buf_size = 0x4000;
++    cfg.tcp_rx_buf_size = 0x8000;
++    cfg.tcp_tx_buf_max_size = 0x10000;
++    cfg.tcp_rx_buf_max_size = 0x10000;
++    cfg.udp_tx_buf_size = 0x1400;
++    cfg.udp_rx_buf_size = 0x4000;
++    cfg.sb_efficiency = 2;
++    cfg.num_bsd_sessions = 1;      /* 只有工作线程用 socket */
++    Result rc = socketInitialize(&cfg);
++    g_sockInited = R_SUCCEEDED(rc);
++    MonLog(g_sockInited ? "sockets-init ok" : "sockets-init FAIL");
++}
++
++/* 堆余量探针:试分配与帧缓冲同量级的块并立即释放。
++ * 崩溃时日志里的 probe 结果直接告诉我们堆还剩多少余量。 */
++static void ProbeHeap() {
++    static const size_t kProbes[] = { 256u * 1024, 700u * 1024, 1400u * 1024 };
++    char msg[48];
++    for (size_t sz : kProbes) {
++        void *p = malloc(sz);
++        snprintf(msg, sizeof(msg), "probe-%uK %s",
++                 (unsigned)(sz / 1024), p ? "ok" : "FAIL");
++        MonLog(msg);
++        if (p)
++            free(p);
++    }
++}
++
++#ifdef __SWITCH__
++/* 帧缓冲降级兜底(-Wl,--wrap=framebufferCreate):
++ * libtesla 固定双缓冲(448×720 RGBA4444×2 ≈ 1.34MB),在小堆 loader 上
++ * 分配失败即 ASSERT_FATAL → 0x559 直接崩。这里失败时自动改单缓冲
++ * (≈672KB,少一半),代价是重绘时可能轻微撕裂,插件仍可正常使用。 */
++extern "C" Result __real_framebufferCreate(Framebuffer *fb, NWindow *win,
++                                           u32 width, u32 height,
++                                           u32 format, u32 num_fbs);
++extern "C" Result __wrap_framebufferCreate(Framebuffer *fb, NWindow *win,
++                                           u32 width, u32 height,
++                                           u32 format, u32 num_fbs) {
++    Result rc = __real_framebufferCreate(fb, win, width, height, format, num_fbs);
++    if (R_FAILED(rc) && num_fbs > 1) {
++        MonLog("fb: fallback to 1 buffer");
++        rc = __real_framebufferCreate(fb, win, width, height, format, 1);
++    }
++    if (R_SUCCEEDED(rc))
++        MonLog("fb: ready");
++    return rc;
++}
++#endif
 +
 +void MonitorLog(const char *msg) {
 +    MonLog(msg);
@@ -1217,6 +1285,9 @@ index 0000000..cd6ff91
 + * ovlloader 仅几 MB 的堆挤爆(0x559 OutOfMemory)。 */
 +static bool ParseChineseDbFile(const char *path) {
 +    EnsureSd();
++    EnsureTitleTables();          /* 幂等:不依赖调用方先建表 */
++    if (!g_titleKey)
++        return false;
 +    FILE *f = fopen(path, "rb");
 +    if (!f)
 +        return false;
@@ -1757,6 +1828,7 @@ index 0000000..cd6ff91
 +
 +static void DoRefresh(const char *nameOverride) {
 +    MonLog("refresh-start");
++    EnsureSockets();
 +    {
 +        std::scoped_lock lk(g_mutex);
 +        g_snap.busy = true;
@@ -1923,6 +1995,7 @@ index 0000000..cd6ff91
 +    if (lf)
 +        fclose(lf);
 +    MonLog("worker-init");
++    ProbeHeap();
 +
 +    Result rc = threadCreate(&g_thread, MonitorWorker, nullptr, g_workerStack,
 +                             sizeof(g_workerStack), 0x2C, -2);
@@ -1936,6 +2009,10 @@ index 0000000..cd6ff91
 +    g_exit.store(true);
 +    threadWaitForExit(&g_thread);
 +    threadClose(&g_thread);
++    if (g_sockInited) {
++        socketExit();
++        g_sockInited = false;
++    }
 +    g_inited = false;
 +}
 +
