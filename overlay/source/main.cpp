@@ -1,4 +1,4 @@
-#define TESLA_INIT_IMPL // If you have more than one file using the tesla header, only define this in the main one
+﻿#define TESLA_INIT_IMPL // If you have more than one file using the tesla header, only define this in the main one
 #include <tesla.hpp>    // The Tesla Header
 #include "ldn.h"
 #include "monitor.hpp"  // 房间/在线人数监控（Zero, GPL-2.0）
@@ -682,36 +682,8 @@ static void buildList(tsl::elm::List *list) {
             }
         }
 
-        // 房间：旧系统（19.0.1 及以下）overlay 堆太小，直接隐藏入口。
-        list->addItem(new tsl::elm::CategoryHeader(T("房间", "房間")));
-        if (RoomsSupported()) {
-            g_roomSummaryItem = new tsl::elm::ListItem(T("房间列表", "房間列表"));
-            g_roomSummaryItem->setValue(T("按 A 查看", "按 A 查看"), true);
-            g_roomSummaryItem->setClickListener([](u64 keys) {
-                if (keys & HidNpadButton_A) {
-                    tsl::changeTo<RoomGui>();
-                    return true;
-                }
-                return false;
-            });
-            list->addItem(g_roomSummaryItem);
-
-            auto *allRoomsItem = new tsl::elm::ListItem(T("全部服务器", "全部伺服器"));
-            allRoomsItem->setValue(T("多服房间总览", "多服房間總覽"), true);
-            allRoomsItem->setClickListener([](u64 keys) {
-                if (keys & HidNpadButton_A) {
-                    tsl::changeTo<AllServersGui>();
-                    return true;
-                }
-                return false;
-            });
-            list->addItem(allRoomsItem);
-        } else {
-            auto *unsupported = new tsl::elm::ListItem(
-                T("旧系统不支持房间查询", "舊系統不支援房間查詢"));
-            unsupported->setValue(T("19.0.1 及以下", "19.0.1 及以下"), true);
-            list->addItem(unsupported);
-        }
+        // 标准版：房间功能整体关闭（房间模块在某些系统上会崩，另行发布测试版）。
+        // 这里不创建任何房间入口，monitor 也就不会被初始化。
 
         // Undo a mistake without editing relay.cfg on a PC. Two presses on
         // purpose: this rewrites the whole relay list.
