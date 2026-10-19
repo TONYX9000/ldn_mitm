@@ -144,6 +144,11 @@ namespace ams::mitm::ldn::relay {
         };
         LatencyState g_latency;
 
+        /* Preview latency measured while no LDN session is open (no room
+           yet). The overlay shows this instead of "--" until a real relay
+           transport exists. 0 = not measured / unknown. */
+        std::atomic<u32> g_preview_ms{0};
+
         /* Guards relay.cfg I/O and its buffers. */
         constinit os::SdkMutex g_config_mutex;
         constexpr size_t ConfigCap = 4096;
@@ -485,6 +490,7 @@ namespace ams::mitm::ldn::relay {
            server's 81ms, which is worse than showing nothing. */
         g_latency.ms = 0;
         g_latency.waiting = 0;
+        g_preview_ms = 0;
         PersistConfig();
     }
 
@@ -603,6 +609,7 @@ namespace ams::mitm::ldn::relay {
             g_selected = sel;
             g_latency.ms = 0;
             g_latency.waiting = 0;
+            g_preview_ms = 0;
             /* Removing an entry shifts every index after it. The open
                transport's index may now point at a different host, and
                ActiveServer() == SelectedServer() would keep it open, so
@@ -630,6 +637,7 @@ namespace ams::mitm::ldn::relay {
             g_selected = 0;
             g_latency.ms = 0;
             g_latency.waiting = 0;
+            g_preview_ms = 0;
             /* Index 0 may now be a different host than the one the open
                transport is talking to; force a reconnect. */
             g_active_server = -1;
@@ -1083,15 +1091,205 @@ namespace ams::mitm::ldn::relay {
         return sent;
     }
 
+    namespace {
+        /* --- latency preview (no room yet) ------------------------------
+           Before a game creates/joins a room there is no relay transport, so
+           the overlay used to show "--" until the user opened a room once.
+           Relays answer a bare 5-byte PING from any source (verified
+           2026-10-19 against 1.0 and 2.0/3.0 servers), so a small background
+           thread pings the selected relay every two seconds and the overlay
+           shows that reading until a real transport exists. It never touches
+           the relay connection itself, so it cannot disturb a session. */
+        std::atomic<bool> g_preview_thread_started{false};
+        os::ThreadType g_preview_thread;
+        alignas(os::MemoryPageSize) u8 g_preview_stack[0x4000];
+
+        char g_preview_host[64] = {};
+        u16  g_preview_port = 0;
+        u32  g_preview_ip = 0;
+
+        u32 ResolveHostProbe(const char *host) {
+            /* Same query as RelayTransport::ResolveHostname, minus the nifm
+               socket registration: a one-shot probe does not need it. */
+            if (host == nullptr || host[0] == '\0') {
+                return 0;
+            }
+            u32 a = 0, mask = 0, gw = 0, dns1 = 0, dns2 = 0;
+            nifmGetCurrentIpConfigInfo(&a, &mask, &gw, &dns1, &dns2);
+
+            struct sockaddr_in srv = {};
+            srv.sin_family = AF_INET;
+            srv.sin_port = htons(53);
+            srv.sin_addr.s_addr = (dns1 != 0) ? dns1 : htonl(0x08080808u);
+
+            const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+            if (fd < 0) {
+                return 0;
+            }
+            struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+            constexpr u8 QueryId0 = 0x13, QueryId1 = 0x37;
+            u8 q[300];
+            size_t p = 0;
+            q[p++] = QueryId0; q[p++] = QueryId1;
+            q[p++] = 0x01; q[p++] = 0x00;
+            q[p++] = 0x00; q[p++] = 0x01;
+            q[p++] = 0; q[p++] = 0; q[p++] = 0; q[p++] = 0; q[p++] = 0; q[p++] = 0;
+            const char *s = host;
+            while (*s != '\0') {
+                const char *dot = std::strchr(s, '.');
+                const size_t len = dot ? static_cast<size_t>(dot - s) : std::strlen(s);
+                if (len == 0 || len > 63 || p + len + 6 >= sizeof(q)) {
+                    close(fd);
+                    return 0;
+                }
+                q[p++] = static_cast<u8>(len);
+                std::memcpy(q + p, s, len);
+                p += len;
+                s += len;
+                if (*s == '.') { s++; }
+            }
+            q[p++] = 0x00;
+            q[p++] = 0x00; q[p++] = 0x01;
+            q[p++] = 0x00; q[p++] = 0x01;
+
+            if (::sendto(fd, q, p, 0, reinterpret_cast<struct sockaddr *>(&srv), sizeof(srv)) < 0) {
+                close(fd);
+                return 0;
+            }
+            u8 r[512];
+            const ssize_t n = ::recvfrom(fd, r, sizeof(r), 0, nullptr, nullptr);
+            close(fd);
+            if (n < 12) {
+                return 0;
+            }
+            if (r[0] != QueryId0 || r[1] != QueryId1 || (r[2] & 0x80) == 0 || (r[3] & 0x0f) != 0) {
+                return 0;
+            }
+            const int ancount = (r[6] << 8) | r[7];
+            if (ancount < 1) {
+                return 0;
+            }
+            size_t off = 12;
+            while (off < static_cast<size_t>(n) && r[off] != 0) {
+                if ((r[off] & 0xc0) == 0xc0) { off += 1; break; }
+                off += r[off] + 1;
+            }
+            off += 1 + 4;
+            for (int i = 0; i < ancount && off + 12 <= static_cast<size_t>(n); i++) {
+                if ((r[off] & 0xc0) == 0xc0) {
+                    off += 2;
+                } else {
+                    while (off < static_cast<size_t>(n) && r[off] != 0) { off += r[off] + 1; }
+                    off += 1;
+                }
+                if (off + 10 > static_cast<size_t>(n)) {
+                    break;
+                }
+                const int type  = (r[off] << 8) | r[off + 1];
+                const int rdlen = (r[off + 8] << 8) | r[off + 9];
+                off += 10;
+                if (type == 1 && rdlen == 4 && off + 4 <= static_cast<size_t>(n)) {
+                    return Be32(r + off);
+                }
+                off += rdlen;
+            }
+            return 0;
+        }
+
+        u32 ProbeSelectedLatency() {
+            const char *host = ServerHost();
+            const u16 port = ServerPort();
+            if (host[0] == '\0' || port == 0) {
+                return 0;
+            }
+            if (std::strcmp(g_preview_host, host) != 0 || g_preview_port != port) {
+                std::strncpy(g_preview_host, host, sizeof(g_preview_host) - 1);
+                g_preview_host[sizeof(g_preview_host) - 1] = '\0';
+                g_preview_port = port;
+                g_preview_ip = ServerIp();
+                if (g_preview_ip == 0) {
+                    g_preview_ip = ResolveHostProbe(host);
+                }
+            }
+            if (g_preview_ip == 0) {
+                return 0;
+            }
+
+            const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+            if (fd < 0) {
+                return 0;
+            }
+            struct sockaddr_in srv = {};
+            srv.sin_family = AF_INET;
+            srv.sin_port = htons(port);
+            srv.sin_addr.s_addr = htonl(g_preview_ip);
+            struct timeval tv = { .tv_sec = 0, .tv_usec = 250000 };
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+            u32 ms = 0;
+            if (::connect(fd, reinterpret_cast<struct sockaddr *>(&srv), sizeof(srv)) == 0) {
+                static const u8 Ping[5] = { 0x02, 'l', 'd', 'n', 'p' };
+                for (int attempt = 0; attempt < 2 && ms == 0; attempt++) {
+                    struct timeval before = {};
+                    gettimeofday(&before, nullptr);
+                    if (::send(fd, Ping, sizeof(Ping), 0) == static_cast<int>(sizeof(Ping))) {
+                        u8 reply[16];
+                        const ssize_t n = ::recv(fd, reply, sizeof(reply), 0);
+                        if (n >= 4 && reply[0] == 0x02) {
+                            struct timeval after = {};
+                            gettimeofday(&after, nullptr);
+                            const s64 us = (static_cast<s64>(after.tv_sec) - before.tv_sec) * 1000000LL +
+                                           (static_cast<s64>(after.tv_usec) - before.tv_usec);
+                            ms = (us <= 0) ? 1 : static_cast<u32>(us / 1000);
+                        }
+                    }
+                }
+            }
+            close(fd);
+            return ms;
+        }
+
+        void PreviewThread(void *) {
+            while (true) {
+                if (IsEnabled() && ActiveServer() < 0) {
+                    g_preview_ms = ProbeSelectedLatency();
+                } else {
+                    g_preview_ms = 0;
+                }
+                svcSleepThread(2000000000L);
+            }
+        }
+
+        void EnsurePreviewThread() {
+            bool expected = false;
+            if (!g_preview_thread_started.compare_exchange_strong(expected, true)) {
+                return;
+            }
+            const Result rc = os::CreateThread(std::addressof(g_preview_thread), &PreviewThread, nullptr,
+                                               static_cast<void *>(g_preview_stack), sizeof(g_preview_stack), 0x20, 2);
+            if (R_FAILED(rc)) {
+                LogFormat("relay preview: CreateThread failed %x", rc);
+                g_preview_thread_started = false;
+                return;
+            }
+            os::StartThread(std::addressof(g_preview_thread));
+        }
+    }
+
     u32 RelayGetLatencyMs() {
+        /* No transport (no room yet): fall back to the background preview,
+           started on first request. */
+        if (g_active_server.load() != g_selected.load()) {
+            EnsurePreviewThread();
+            return g_preview_ms.load();
+        }
         /* Only trust the reading when the open transport is talking to the
            server the menu is showing. Selecting a different server rewrites
            the config immediately but the socket keeps talking to the old host
            until the worker reopens it, and field screenshots showed one
            server's latency displayed under every other server's name. */
-        if (g_active_server.load() != g_selected.load()) {
-            return 0;
-        }
         return g_latency.ms.load();
     }
 
