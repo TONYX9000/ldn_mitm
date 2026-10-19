@@ -801,7 +801,6 @@ static void buildList(tsl::elm::List *list) {
         // the way of the settings, but every user scrolling down sees it.
         list->addItem(new tsl::elm::CategoryHeader(T("关于", "關於")));
         list->addItem(new tsl::elm::ListItem(T("制作", "製作"), T("阿东 & 大肥鱼", "阿東 & 大肥魚")));
-        list->addItem(new tsl::elm::ListItem(T("房间监控", "房間監控"), T("Zero（jieluojun）", "Zero（jieluojun）")));
         list->addItem(new tsl::elm::ListItem(T("版本", "版本"), g_version));
         list->addItem(new tsl::elm::ListItem(T("声明", "聲明"), T("免费分享 禁止倒卖", "免費分享 禁止轉賣")));
     }
