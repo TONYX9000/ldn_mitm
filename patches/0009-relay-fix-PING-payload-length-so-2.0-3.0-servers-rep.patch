@@ -1,8 +1,7 @@
 From 713c16de61b6b7548c5107e4aad72f0f5a3629cf Mon Sep 17 00:00:00 2001
 From: TONYX9000 <TONYX9000@users.noreply.github.com>
 Date: Thu, 10 Sep 2026 12:00:00 +0200
-Subject: [PATCH 9/9] relay: fix PING payload length so 2.0/3.0 servers report
- latency
+Subject: [PATCH 9/9] relay: fix PING payload length and refresh relay.cfg
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -12,33 +11,40 @@ Content-Transfer-Encoding: 8bit
 - 1.0 服务器(olunira.fun)只回显 msg[0..4] 不检查长度;
   2.0/3.0(slp-server-rust)严格要求 payload==4 字节,3 字节会被当作
   NotParseable 丢弃——这就是之前只有北京能看延迟的原因
-- relay.cfg:新增 China-Shanghai (47.102.121.212, 3.0.0, 实测 33ms)
-  替换挂掉的 Netherlands-2
+- relay.cfg:替换为 13 条中文命名的服务器配置,名称唯一且默认选中
+  中国·河南;其中包括 47.102.121.212:11451 与新增的各区域节点
 
 Squashed from aylz10/ldn_mitm2 commit 8463704 (author: TONYX9000).
 
 Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-TONYX9000
 ---
- config/ldn_mitm/relay.cfg        | 43 +++++++++++++++++++-------------
- ldn_mitm/source/relay_client.cpp | 15 ++++++++++-
- 2 files changed, 40 insertions(+), 18 deletions(-)
+ config/ldn_mitm/relay.cfg        |   62 +++++++++-----------------------------
+ ldn_mitm/source/relay_client.cpp |   15 +++++++++
+ 2 files changed, 29 insertions(+), 48 deletions(-)
 
 diff --git a/config/ldn_mitm/relay.cfg b/config/ldn_mitm/relay.cfg
-index 873ad0a..974d57c 100644
+index d313e3b..3353d59 100644
 --- a/config/ldn_mitm/relay.cfg
 +++ b/config/ldn_mitm/relay.cfg
-@@ -11,24 +11,33 @@ selected=China-Beijing
- #     · # 开头的行是注释，不读取
- #     · 两台机器必须选同一台服务器
- # ------------------------------------------------------------
+@@ -1,49 +1,17 @@
+ enabled=1
+ broadcast=1
+-selected=China-Beijing
+-# ============================================================
+-#  联机中继服务器列表  （8 台）
+-# ------------------------------------------------------------
+-#  格式： <名称> <主机:端口>
+-#     · 名称必须【纯英文】—— 插件字体没有中文字形，中文会显示成方块
+-#     · 名称不能带空格（空格是名称和地址的分隔符）
+-#     · 最多 32 台，超出的会被忽略
+-#     · # 开头的行是注释，不读取
+-#     · 两台机器必须选同一台服务器
+-# ------------------------------------------------------------
 -#  【关于延迟显示】
 -#  延迟靠服务器回显 PING 包，有些中继不回显（省资源/限流），
 -#  那些服务器菜单里会一直显示「* 延迟 --」，但【联机功能完全正常】。
 -#  所以：能联机 ≠ 能看延迟，这两个是独立的事。
-+#  【关于延迟显示】—— 2026-10-18 查明
-+#  延迟靠服务器回显 PING 包。以前只有 China-Beijing 能显示，
-+#  不是那些服务器"不回显"，而是【PING 包的 payload 长度不对】：
- #
+-#
 -#  2026-10-17 18:40 实测（4 次探测）：
 -#    名称              PING 回显
 -#    China-Beijing     4/4  40ms   ★ 唯一回显的，已设为默认
@@ -49,46 +55,42 @@ index 873ad0a..974d57c 100644
 -#    Netherlands-1     0/4  ——     不回显
 -#    Germany-1         0/4  ——     不回显
 -#    Netherlands-2     0/4  ——     不回显
-+#    服务器 1.0.x（olunira.fun）：只回显 msg[0..4]，不检查长度
-+#    服务器 2.0.x/3.0.x（Rust）：严格检查 payload 必须正好 4 字节，
-+#                                3 字节的包会被当作损坏直接丢弃
- #
+-#
 -#  说明：服务器状态会变（IP 也可能换），想重新看延迟就把服务器
 -#  切到 China-Beijing 试试。
-+#  旧版插件发的是 {02 6c 64 6e}（payload 3 字节），
-+#  所以只有 1.0 的北京能回，2.0/3.0 全部静默丢弃。
-+#
-+#  2026-10-18 已修复：改成 {02 6c 64 6e 70}（payload 4 字节）。
-+#  1.0 会截前 4 字节回显，2.0/3.0 原样回 5 字节，两边都认。
-+#  修复后 8 台服务器（理论）全部能显示延迟。
-+#
-+#  实测（2026-10-18）：
-+#    名称              版本                   PING
-+#    China-Beijing     1.0.0-alpha.2          ✅ 40-100ms
-+#    China-Shanghai    3.0.0                  ✅ 33ms   ← 新增
-+#    China-Guangdong   2.0.0-rust.alpha.11    ✅（修复后）
-+#    China-Zhejiang    2.0.0-rust.alpha.11    ✅（修复后）
-+#    China-Henan       2.0.0-rust.alpha.11    ✅（修复后）
-+#    USA-SanFrancisco  2.0.0-rust.alpha.11    ✅（修复后）
-+#    Netherlands-1     2.0.0-rust.alpha.11    ✅（修复后）
-+#    Germany-1         3.0.0                  ✅（修复后）
-+#
-+#  查服务器版本：浏览器打开 http://<地址>/info
- # ------------------------------------------------------------
- #  【重要】关于 id=（本机虚拟地址 10.13.x.x）
- #     · 这里故意【不写】id=
-@@ -40,10 +49,10 @@ selected=China-Beijing
- # ============================================================
- 
- China-Beijing     olunira.fun:11451
-+China-Shanghai    47.102.121.212:11451
- China-Guangdong   gugu.mulaosi.cn:11451
- China-Zhejiang    yordon.cn:11451
- China-Henan       srv.jaxlewis.top:11451
- USA-SanFrancisco  tekn0.net:11451
- Netherlands-1     switch.jayseateam.nl:11451
- Germany-1         erdbeerbaerlp.de:11451
+-# ------------------------------------------------------------
+-#  【重要】关于 id=（本机虚拟地址 10.13.x.x）
+-#     · 这里故意【不写】id=
+-#     · 插件第一次连上中继时会自动分配一个唯一的 id，
+-#       并自动写回本文件（之后就一直沿用它）
+-#     · 所以：铺新卡时【不要】把 id= 复制到第二台机器上，
+-#       否则两台会拿到同一个虚拟地址 → 房间看得到但进不去
+-#     · 想重新分配：删掉下面自动生成的那行 id= 即可
+-# ============================================================
+-
+-China-Beijing     olunira.fun:11451
+-China-Guangdong   gugu.mulaosi.cn:11451
+-China-Zhejiang    yordon.cn:11451
+-China-Henan       srv.jaxlewis.top:11451
+-USA-SanFrancisco  tekn0.net:11451
+-Netherlands-1     switch.jayseateam.nl:11451
+-Germany-1         erdbeerbaerlp.de:11451
 -Netherlands-2     switch.r3ps4j.nl:11451
++selected=中国·河南
++########### 服务器列表 ############
++中国·河南       srv.jaxlewis.top:11451
++中国·河南(2)    122.114.8.38:11451
++中国·广东       gugu.mulaosi.cn:11451
++中国·江苏       wuaiyi.top:11451
++中国·江苏(2)    yordon.cn:11451
++中国·北京       olunira.fun:11451
++中国·上海       47.102.121.212:11451
++中国·丹麦       switch.r3ps4j.nl:11452
++美国            tekn0.net:11451
++美国(2)         muitxobem-lanplay.ddns.net:11451
++荷兰            switch.jayseateam.nl:11451
++荷兰(2)         switch.jayseateam.nl:11453
++德国·萨克森    erdbeerbaerlp.de:11451
 diff --git a/ldn_mitm/source/relay_client.cpp b/ldn_mitm/source/relay_client.cpp
 index 9cf36fc..051bf5f 100644
 --- a/ldn_mitm/source/relay_client.cpp

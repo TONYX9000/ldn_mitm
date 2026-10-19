@@ -120,7 +120,7 @@ index a778e28..bad8642 100644
 +   public     relay.example.com
 +   ```
 +
-+   See [`docs/relay.cfg.example`](docs/relay.cfg.example). Up to 8 servers;
++   See [`docs/relay.cfg.example`](docs/relay.cfg.example). Up to 32 servers;
 +   lines starting with `#` are ignored. Just listing servers does **not** turn
 +   the relay on.
 +
@@ -2330,7 +2330,7 @@ index 0000000..7899d40
 +
 +        /* Format: docs/relay.cfg.example. */
 +        constexpr const char RelayConfigPath[] = "sdmc:/config/ldn_mitm/relay.cfg";
-+        constexpr int MaxServers    = 8;
++        constexpr int MaxServers    = 32;
 +        constexpr int ServerNameLen = 32;
 +
 +        void LoadConfig();

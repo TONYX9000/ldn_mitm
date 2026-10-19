@@ -10,6 +10,7 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 联机监视器(0010):
+- 底部按键提示按系统语言显示「返回/确定」(覆盖 libtesla 的英文 Back/OK)
 - 标题下方两列统计:标签「在线/房间」在上、数字在下;刷新 1s 一次,
   与延迟 ping(sysmodule RelayPingIntervalMs)同节奏,仅可见时轮询,
   周期刷新不重拉订阅、不改目标
@@ -91,17 +92,16 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
   isConnected @+11、userName[33] @+12),主机 nodes[0] 置顶;
   扫描补出的房间不再永远显示「该服务器未提供玩家名单」
 ---
- .github/workflows/build.yml   |   20 +-
- .github/workflows/nightly.yml |   23 +-
- .github/workflows/release.yml |   30 +-
- Makefile                      |    6 +
- overlay/Makefile              |    9 +-
- overlay/source/main.cpp       |  660 +++++++++-
- overlay/source/monitor.cpp    | 2205 +++++++++++++++++++++++++++++++++
- overlay/source/monitor.hpp    |   71 ++
- 8 files changed, 2959 insertions(+), 65 deletions(-)
- create mode 100644 overlay/source/monitor.cpp
- create mode 100644 overlay/source/monitor.hpp
+ .github/workflows/build.yml   |   20
+ .github/workflows/nightly.yml |   23
+ .github/workflows/release.yml |   30 -
+ Makefile                      |    6
+ overlay/Makefile              |    9
+ overlay/source/main.cpp       |  668 ++++++++++++
+ overlay/source/monitor.cpp    | 2205 +++++++++++++++++++++++++++++++++++++++++
+ overlay/source/monitor.hpp    |   71 +
+ 8 files changed, 2967 insertions(+), 65 deletions(-)
+
 
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
 index 55e5970..abfa4a8 100644
@@ -320,7 +320,7 @@ index 8e07c19..1ed1604 100644
  /* Traditional / Simplified Chinese switch. The overlay used to hardcode
     Simplified strings, which left Traditional Chinese consoles with the
     wrong glyphs. libtesla already loads both CJK shared fonts, so all we
-@@ -34,6 +43,443 @@ static bool g_isTraditional = false;
+@@ -34,6 +43,451 @@ static bool g_isTraditional = false;
  
  #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
  
@@ -728,6 +728,14 @@ index 8e07c19..1ed1604 100644
 +    virtual void draw(tsl::gfx::Renderer *renderer) override {
 +        { static bool once = false; if (!once) { once = true; MonitorLog("first-frame"); } }
 +        tsl::elm::OverlayFrame::draw(renderer);
++
++        /* OverlayFrame 的底部提示固定为英文;覆盖后按系统语言重绘。 */
++        renderer->drawRect(20, 670, 400, 45,
++                           tsl::gfx::Renderer::a(tsl::style::color::ColorFrameBackground));
++        renderer->drawString(T("\uE0E1  返回     \uE0E0  确定",
++                               "\uE0E1  返回     \uE0E0  確定"),
++                             false, 30, 693, 23,
++                             tsl::gfx::Renderer::a(tsl::style::color::ColorText));
 +
 +        /* static: MonitorSnapshot 约 8.6KB,放栈上会把 ovlloader 给的
 +         * 小栈(配合 libtesla 绘制深度)挤爆——10-19 崩溃根因之一。 */
