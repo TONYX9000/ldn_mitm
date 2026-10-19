@@ -133,10 +133,15 @@ Result ldnMitmGetBuiltinRelayServerInfo(LdnMitmConfigService *s, u32 index, LdnR
 }
 
 Result ldnMitmGetVersion(LdnMitmConfigService *s, char *version) {
-    char version_s[32];
+    /* 以 0 填满:即使服务端漏了结尾 NUL,strnlen 也不会越界读。 */
+    char version_s[32] = {};
     Result rc = serviceDispatchOut(&s->s, 65001, version_s);
     if (R_SUCCEEDED(rc)) {
-        strcpy(version, version_s);
+        size_t n = 0;
+        while (n < sizeof(version_s) && version_s[n] != 0)
+            n++;
+        memcpy(version, version_s, n);
+        version[n] = 0;
     }
     return rc;
 }

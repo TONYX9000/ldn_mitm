@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <cstring>
 #include "ldnmitm_config.hpp"
 #include "relay_client.hpp"
@@ -8,8 +9,13 @@ namespace ams::mitm::ldn {
     std::atomic_bool LdnConfig::BroadcastRelay = true;
 
     Result LdnConfig::GetVersion(sf::Out<LdnMitmVersion> version) {
-        std::strcpy(version.GetPointer()->raw, GITDESCVER);
-        
+        /* 必须截断:LdnMitmVersion::raw 只有 32 字节,而 GITDESCVER 来自
+         * `git describe --tags --always`——在没有 tag 的浅克隆/CI 里会是
+         * 40 位完整 SHA(还可能带 -dirty),strcpy 会直接写穿 SF 输出结构,
+         * 客户端读到的就是后面命令缓冲里的残留字节(界面标题下那行看不懂的
+         * 乱码就是这么来的)。 */
+        std::snprintf(version.GetPointer()->raw, sizeof(version.GetPointer()->raw),
+                      "%s", GITDESCVER);
         R_SUCCEED();
     }
     Result LdnConfig::GetLogging(sf::Out<u32> enabled) {

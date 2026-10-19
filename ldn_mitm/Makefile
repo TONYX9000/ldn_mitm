@@ -7,7 +7,9 @@ include $(dir $(abspath $(lastword $(MAKEFILE_LIST))))/../Atmosphere-libs/config
 # version control constants
 #---------------------------------------------------------------------------------
 # Ignore submodules for -dirty: Atmosphere-libs carries the docs/ patch.
-TARGET_VERSION := $(shell git describe --tags --always 2>/dev/null || echo unknown)$(shell git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)
+# 版本串最终会经 IPC 塞进 32 字节的 LdnMitmVersion::raw,这里先截到 31 字符:
+# 浅克隆/CI 里 git describe 会退回 40 位 SHA,加上 -dirty 必然溢出。
+TARGET_VERSION := $(shell (git describe --tags --always 2>/dev/null || echo unknown)$(git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty) | cut -c1-31)
 
 #---------------------------------------------------------------------------------
 # options for code generation
