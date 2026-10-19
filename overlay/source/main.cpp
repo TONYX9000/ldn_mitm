@@ -293,6 +293,10 @@ public:
 
         list->addItem(new tsl::elm::CategoryHeader(T("内置服务器（按 A 添加）", "內建伺服器（按 A 新增）")));
 
+        /* 所有行共享同一个计数：添加成功后同步刷新副标题和容量判断，
+           否则「当前 X/32」要退出重进才会更新。 */
+        auto count = std::make_shared<u32>(current);
+
         for (u32 i = 0; i < builtin; i++) {
             LdnRelayServerInfo info = {};
             if (R_FAILED(ldnMitmGetBuiltinRelayServerInfo(&g_ldnConfig, i, &info))) {
@@ -317,8 +321,7 @@ public:
             item->setValue(present ? T("已添加", "已新增") : T("可添加", "可新增"), present);
 
             auto added = std::make_shared<bool>(present);
-            auto count = std::make_shared<u32>(current);
-            item->setClickListener([item, info, added, count](u64 keys) {
+            item->setClickListener([item, info, added, count, frame, builtin](u64 keys) {
                 if (!(keys & HidNpadButton_A)) {
                     return false;
                 }
@@ -333,6 +336,20 @@ public:
                     *added = true;
                     (*count)++;
                     item->setValue(T("已添加", "已新增"), true);
+                    /* 实时刷新副标题里的「当前 X/32」。 */
+                    char sub[96];
+                    if (*count >= LDN_MAX_SERVERS) {
+                        snprintf(sub, sizeof(sub),
+                                 T("已满 %u/%u · 先删一台再用备选", "已滿 %u/%u · 先刪一台再用備選"),
+                                 static_cast<unsigned>(*count),
+                                 static_cast<unsigned>(LDN_MAX_SERVERS));
+                    } else {
+                        snprintf(sub, sizeof(sub),
+                                 T("内置 %u 台 · 当前 %u/%u", "內建 %u 台 · 目前 %u/%u"),
+                                 static_cast<unsigned>(builtin), static_cast<unsigned>(*count),
+                                 static_cast<unsigned>(LDN_MAX_SERVERS));
+                    }
+                    frame->setSubtitle(sub);
                     g_main_list_dirty = true;
                 } else {
                     item->setValue(T("添加失败", "新增失敗"), true);
@@ -682,7 +699,7 @@ static void buildList(tsl::elm::List *list) {
             }
         }
 
-        // 标准版：房间功能整体关闭（房间模块在某些系统上会崩，另行发布测试版）。
+        // 标准版：房间功能整体关闭（房间模块另行发布测试版）。
         // 这里不创建任何房间入口，monitor 也就不会被初始化。
 
         // Undo a mistake without editing relay.cfg on a PC. Two presses on
