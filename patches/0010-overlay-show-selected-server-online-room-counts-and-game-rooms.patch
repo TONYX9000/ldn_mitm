@@ -1,28 +1,38 @@
-From e8c246fa1dcadebce5e0c51d224cf4759dcb339d Mon Sep 17 00:00:00 2001
+From 5a6947182e73743e8d950b835108f3b2bf878fdb Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
-Subject: [PATCH 10/10] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80?=
- =?UTF-8?q?=E9=80=89=E6=9C=8D=E5=8A=A1=E5=99=A8=E7=9A=84=E5=9C=A8=E7=BA=BF?=
- =?UTF-8?q?=E4=BA=BA=E6=95=B0/=E6=88=BF=E9=97=B4=E6=95=B0=E9=87=8F?=
- =?UTF-8?q?=E4=B8=8E=E6=B8=B8=E6=88=8F=E6=88=BF=E9=97=B4=E5=88=97=E8=A1=A8?=
+Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
+ =?UTF-8?q?=E6=9C=8D=E5=8A=A1=E5=99=A8=E7=9A=84=E5=9C=A8=E7=BA=BF=E4=BA=BA?=
+ =?UTF-8?q?=E6=95=B0/=E6=88=BF=E9=97=B4=E6=95=B0=E9=87=8F=E4=B8=8E?=
+ =?UTF-8?q?=E6=B8=B8=E6=88=8F=E6=88=BF=E9=97=B4=E5=88=97=E8=A1=A8?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 联机监视器(0010):
-- 标题下方两列统计:标签「在线/房间」在上、数字在下
+- 标题下方两列统计:标签「在线/房间」在上、数字在下;刷新 1s 一次,
+  与延迟 ping(sysmodule RelayPingIntervalMs)同节奏,仅可见时轮询,
+  周期刷新不重拉订阅、不改目标
 - 「游戏房间」列表:chinese_db.json 标题ID→中文名映射 + N/M 人数;
   玩家名单(hostPlayerName 置顶 + nodes 玩家名)随查询解析入库
 - 房间行按 A/触摸展开玩家名单:房主排最前且用高亮色;两行并排尽量
   塞名字,排不下或名字过长则整条名字带连续滚动(每行 scissor 窗口,
   停 90 帧后 1px/帧滑动);房间区与「中继服务器(按 A 切换)」用
   分隔标题隔开;房间行为持久池只增不删(展开只改行高),焦点安全
-- 订阅 servers.json / chinese_db.json 每次打开 overlay 尝试远程刷新,
-  失败退回 /config/ldn_mitm/ 缓存;graphql/rest 分型查询(rest 1.0 用
-  UDP LDN 主动扫描补房间);切换服务器即时刷新
-- 订阅缓存随构建包预置(GitHub 已全网强制 HTTPS,ovl 纯 HTTP 客户端
-  运行时拉不动;CI 构建时新鲜抓取铺进 sdcard 并自检),运行时下载
-  成功则更新缓存
+- 服务器列表只读 relay.cfg(servers.json 彻底移除:下载/解析/类型表/
+  名字兜底全删);行解析与 sysmodule LoadConfig 完全同语义(任意空白
+  含 \v \f 切 token、单 token 行、指令行、端口校验),修复
+  resolve noname,noname 日志附条目名清单;服务器行双排布局
+  (上=名称、下=地址 host:port,行高 70 不变,右侧保留「* 延迟」)
+- 订阅(chinese_db.json)每次打开 overlay 经 https://v6.gh-proxy.org/
+  加速镜像(GitHub 链接前加镜像前缀)重新下载,失败退回
+  /config/ldn_mitm/ 缓存;overlay 内置 switch-curl(libnx SSL 后端)
+  提供 TLS(GitHub 全站强制 HTTPS,纯 HTTP 轻客户端拉不动),DNS 以
+  原始解析预钉 IP(curl 的 getaddrinfo 在 overlay 里同样不可用);
+  graphql/rest 分型查询(rest 1.0 用 UDP LDN 主动扫描补房间);切换
+  服务器即时刷新
+- 订阅缓存随构建包预置(仅 chinese_db.json;CI 构建时新鲜抓取铺进
+  sdcard 并自检),运行时下载成功则更新缓存
 
 内存与稳定性(真机 23.0.1 排障并入):
 - EnsureSd():tesla 覆盖 __appInit 后 sdmc 未挂载,曾致 fclose(NULL)
@@ -32,36 +42,39 @@ Content-Transfer-Encoding: 8bit
   缩容重试、bsd:s 兜底,AlreadyInitialized 视为成功;soc-probe 实测
 - 帧缓冲降级兜底(--wrap=framebufferCreate):双缓冲失败自动单缓冲
 - 堆探针 + 全链路日志(worker-init/probe-*/fb:/ui-*/first-frame/
-  sockets-init rc/soc-probe/resolve ok|fallback|FAIL/query e=/scan/
-  download try fail e=/use cache|no cache):日志截断移到最早,避免
-  吃掉 sockets-init;查询失败状态文本带错误码,游戏房间区直接显示
+  sockets-init rc/soc-probe/resolve ok|fallback|FAIL|noname…[条目名]/
+  query e=/scan/download ok|try fail e=/chinese: use cache|no cache):
+  日志截断移到最早,避免吃掉 sockets-init;查询失败状态文本带错误码,
+  游戏房间区直接显示
 - getaddrinfo 在桌面 23.x 系统 overlay 进程里直接不可用(rc 262-0-1201,
   不是 DNS 配置问题):overlay 与 sysmodule 一样改为 raw UDP/53 + nifm
   获取 DNS(srv records 不可用,自动退回 223.5.5.5/114/8/1 台);
-  relay.cfg 解析与 sysmodule LoadConfig 对齐(host:port / = / 制表符,
-  # 全行注释);网络层增加 5 秒超时 + 「查询超时」诊断,日志加 dns
-  标签(dns nifm=/dns srv…/dns ok|fail|timeout host rc=)与名字解析
-  标签(resolve name|noname|nohost/entry|nohost)
+  网络层增加 5 秒超时 + 「查询超时」诊断,日志加 dns 标签(dns nifm=/
+  dns srv…/dns ok|fail|timeout host rc=)与名字解析标签(resolve name|
+  noname|nohost/entry|nohost)
 - 测试(主机侧,monitor.cpp 直编):DnsBuildQuery/DnsParseA/MatchRelayLine/
-  LdnDecompress/ParseNetworkInfo/ParseRoomArray(玩家名/房主置顶/sessionId)/
-  Http 解析/DnsInitServers;chinese_db 流式解析 + 标题映射冒烟
+  RelayParseLine(\v \f 空白)/MonitorListRelayServers/ResolveSelectedServer
+  (\v 行 noname 复现修复)/HttpsGet(curl stub)/LdnDecompress/
+  ParseNetworkInfo/ParseRoomArray(玩家名/房主置顶/sessionId)/Http 解析/
+  DnsInitServers;chinese_db 流式解析 + 标题映射冒烟
 
-CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master
+CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
+安装 switch-curl(订阅 HTTPS 下载)
 ---
- .github/workflows/build.yml   |   14 +-
- .github/workflows/nightly.yml |   17 +-
- .github/workflows/release.yml |   24 +-
- Makefile                      |    7 +
+ .github/workflows/build.yml   |   20 +-
+ .github/workflows/nightly.yml |   23 +-
+ .github/workflows/release.yml |   30 +-
+ Makefile                      |    6 +
  overlay/Makefile              |    5 +-
- overlay/source/main.cpp       |  431 ++++++-
- overlay/source/monitor.cpp    | 1990 +++++++++++++++++++++++++++++++++
- overlay/source/monitor.hpp    |   57 +
- 8 files changed, 2522 insertions(+), 23 deletions(-)
+ overlay/source/main.cpp       |  632 +++++++++-
+ overlay/source/monitor.cpp    | 2044 +++++++++++++++++++++++++++++++++
+ overlay/source/monitor.hpp    |   71 ++
+ 8 files changed, 2768 insertions(+), 63 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
-index 55e5970..304d75d 100644
+index 55e5970..abfa4a8 100644
 --- a/.github/workflows/build.yml
 +++ b/.github/workflows/build.yml
 @@ -38,8 +38,20 @@ jobs:
@@ -86,11 +99,24 @@ index 55e5970..304d75d 100644
            pushd /tmp
            git clone https://github.com/switchbrew/libnx
            cd libnx
+@@ -48,6 +60,12 @@ jobs:
+           make install
+           popd
+ 
++      - name: Install switch-curl (订阅 HTTPS 下载)
++        run: |
++          # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
++          # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
++          dkp-pacman -Sy --noconfirm switch-curl
++
+       - name: Clear invalid ccache after libnx update 
+         run: ccache -C
+ 
 diff --git a/.github/workflows/nightly.yml b/.github/workflows/nightly.yml
-index c53077f..8751326 100644
+index c53077f..765967a 100644
 --- a/.github/workflows/nightly.yml
 +++ b/.github/workflows/nightly.yml
-@@ -37,22 +37,21 @@ jobs:
+@@ -37,22 +37,27 @@ jobs:
            git reset --hard origin/master
            popd
  
@@ -115,6 +141,12 @@ index c53077f..8751326 100644
            popd
 -          make -j8 PREFIX="ccache aarch64-none-elf-"
 +
++      - name: Install switch-curl (订阅 HTTPS 下载)
++        run: |
++          # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
++          # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
++          dkp-pacman -Sy --noconfirm switch-curl
++
 +      - name: Build
 +        id: build
 +        run: make -j8 PREFIX="ccache aarch64-none-elf-"
@@ -122,10 +154,10 @@ index c53077f..8751326 100644
        - name: Upload built files
          uses: actions/upload-artifact@v7
 diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
-index 7f34343..b34daa5 100644
+index 7f34343..e013231 100644
 --- a/.github/workflows/release.yml
 +++ b/.github/workflows/release.yml
-@@ -35,22 +35,30 @@ jobs:
+@@ -35,22 +35,36 @@ jobs:
      - name: Setup ccache
        uses: hendrikmuhs/ccache-action@v1.2
  
@@ -158,6 +190,12 @@ index 7f34343..b34daa5 100644
          popd
 -        make -j8 PREFIX="ccache aarch64-none-elf-"
 +
++    - name: Install switch-curl (订阅 HTTPS 下载)
++      run: |
++        # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
++        # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
++        dkp-pacman -Sy --noconfirm switch-curl
++
 +    - name: Build
 +      id: build
 +      run: make -j8 PREFIX="ccache aarch64-none-elf-"
@@ -165,20 +203,19 @@ index 7f34343..b34daa5 100644
      - name: Pack
        run: |
 diff --git a/Makefile b/Makefile
-index efcb5e7..38438a4 100644
+index efcb5e7..cd62b35 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -57,6 +57,13 @@ PACK: $(SUBFOLDERS)
+@@ -57,6 +57,12 @@ PACK: $(SUBFOLDERS)
  	@ cp ldn_mitm/res/toolbox.json $(TITLE_DIR)/toolbox.json
  	@ touch $(TITLE_DIR)/flags/boot2.flag
  	@ cp config/ldn_mitm/relay.cfg $(SD_ROOT)/config/ldn_mitm/relay.cfg
 +	@ mkdir -p $(SD_ROOT)/config/nx-ovlloader
 +	@ printf '\000\000\200\000\000\000\000\000' > $(SD_ROOT)/config/nx-ovlloader/heap_size.bin
-+	@ echo "预置订阅缓存(GitHub 已强制 HTTPS,运行时纯 HTTP 拉不动,随包内置;运行时仍会尝试刷新)"
-+	@ (curl -fsSL --max-time 30 https://raw.githubusercontent.com/jieluojun/LanPlayMonitor/refs/heads/main/servers.json -o $(SD_ROOT)/config/ldn_mitm/servers.json.tmp && mv $(SD_ROOT)/config/ldn_mitm/servers.json.tmp $(SD_ROOT)/config/ldn_mitm/servers.json) || (rm -f $(SD_ROOT)/config/ldn_mitm/servers.json.tmp; echo "warn: servers.json 预置失败(运行时缓存兜底将缺失)")
++	@ echo "预置订阅缓存(chinese_db.json;运行时经 https://v6.gh-proxy.org/ 加速镜像刷新;服务器列表只读 relay.cfg,不预置 servers.json)"
 +	@ (curl -fsSL --max-time 60 https://raw.githubusercontent.com/jieluojun/LanPlayMonitor/refs/heads/main/chinese_db.json -o $(SD_ROOT)/config/ldn_mitm/chinese_db.json.tmp && mv $(SD_ROOT)/config/ldn_mitm/chinese_db.json.tmp $(SD_ROOT)/config/ldn_mitm/chinese_db.json) || (rm -f $(SD_ROOT)/config/ldn_mitm/chinese_db.json.tmp; echo "warn: chinese_db.json 预置失败")
 +	@ ls -la $(SD_ROOT)/config/ldn_mitm/
-+	@ (test -s $(SD_ROOT)/config/ldn_mitm/servers.json && test -s $(SD_ROOT)/config/ldn_mitm/chinese_db.json) || echo "::warning::订阅缓存预置失败——请检查构建日志 curl 输出;即使缺失,在线/房间数字仍可工作(标题将显示标题ID)"
++	@ (test -s $(SD_ROOT)/config/ldn_mitm/chinese_db.json) || echo "::warning::chinese_db.json 预置失败——请检查构建日志 curl 输出;即使缺失,在线/房间数字仍可工作(标题将显示标题ID)"
  #---------------------------------------------------------------------------------
  
  .PHONY: all clean PACK atmosphere-patch $(SUBFOLDERS)
@@ -206,18 +243,44 @@ index e2cdc19..efd0e47 100644
  LIBS	:= -lnx
  
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..990a29c 100644
+index 8e07c19..17cad09 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
-@@ -1,6 +1,7 @@
+@@ -1,7 +1,10 @@
  #define TESLA_INIT_IMPL // If you have more than one file using the tesla header, only define this in the main one
  #include <tesla.hpp>    // The Tesla Header
  #include "ldn.h"
 +#include "monitor.hpp"
++#include <functional>
  #include <vector>
++#include <arm/counter.h>
  
  enum class State {
-@@ -34,6 +35,322 @@ static bool g_isTraditional = false;
+     Uninit,
+@@ -18,7 +21,8 @@ char g_version[32];
+    OverlayFrame keeps the pointer instead of copying it. */
+ char g_brand[64] = "阿东版";   // overwritten by detectLanguage() at startup
+ 
+-std::vector<tsl::elm::ListItem*> g_serverItems;
++class ServerRow;
++std::vector<ServerRow*> g_serverRows;
+ 
+ /* Latency value currently painted on the server rows. Lives at file scope
+    rather than as a function-local static so createUI() can invalidate it:
+@@ -26,6 +30,12 @@ std::vector<tsl::elm::ListItem*> g_serverItems;
+    painting them entirely. */
+ u32 g_shown_latency = 0xFFFFFFFFu;
+ 
++/* 在线/房间周期刷新计时(与延迟 ping 的 1s 节奏对齐);0 = 尚未起表。 */
++static u64 g_lastPollNs = 0;
++
++/* overlay 是否可见(onShow/onHide 维护);隐藏时不发周期刷新,不扰网。 */
++static bool g_visible = false;
++
+ /* Traditional / Simplified Chinese switch. The overlay used to hardcode
+    Simplified strings, which left Traditional Chinese consoles with the
+    wrong glyphs. libtesla already loads both CJK shared fonts, so all we
+@@ -34,6 +44,414 @@ static bool g_isTraditional = false;
  
  #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
  
@@ -496,6 +559,98 @@ index 8e07c19..990a29c 100644
 +    u32 m_scrollOff = 0, m_scrollCnt = 0;
 +};
 +
++/* 中继服务器行:双排布局(上=服务器名,下=服务器地址),行高与原
++ * ListItem 等高(70)。右侧沿用「* 延迟 Nms」文本;按 A/触摸 = 切换服务器。 */
++class ServerRow : public tsl::elm::Element {
++public:
++    static constexpr u16 kHeight = 70;
++
++    void setServer(u32 index, const char *name, const char *addr) {
++        m_index = index;
++        snprintf(m_name, sizeof(m_name), "%s", name);
++        snprintf(m_addr, sizeof(m_addr), "%s", addr);
++    }
++    void setSelected(bool sel) {
++        m_selected = sel;
++        snprintf(m_right, sizeof(m_right), "%s", sel ? "*" : "");
++        m_rightFaint = true;
++    }
++    void setRight(const char *text, bool faint) {
++        snprintf(m_right, sizeof(m_right), "%s", text);
++        m_rightFaint = faint;
++    }
++    bool selected() const { return m_selected; }
++    void setClickListener(std::function<void()> fn) { m_click = std::move(fn); }
++
++    virtual void layout(u16, u16, u16, u16) override {
++        this->setBoundaries(this->getX(), this->getY(), this->getWidth(), kHeight);
++    }
++
++    virtual void draw(tsl::gfx::Renderer *renderer) override {
++        using R = tsl::gfx::Renderer;
++        renderer->drawRect(this->getX(), this->getY(), this->getWidth(), 1,
++                           R::a(tsl::style::color::ColorFrame));
++        /* 上排:服务器名(选中用高亮色);下排:服务器地址 */
++        std::string name = renderer->limitStringLength(
++            m_name, false, 22, this->getWidth() - 180);
++        renderer->drawString(name.c_str(), false, this->getX() + 20,
++                             this->getY() + 32, 22,
++                             R::a(m_selected ? tsl::style::color::ColorHighlight
++                                             : tsl::style::color::ColorText));
++        std::string addr = renderer->limitStringLength(
++            m_addr, false, 16, this->getWidth() - 180);
++        renderer->drawString(addr.c_str(), false, this->getX() + 20,
++                             this->getY() + 58, 16,
++                             R::a(tsl::style::color::ColorDescription));
++        if (m_right[0]) {
++            auto [vw, vh] = renderer->drawString(m_right, false, 0, 0, 20,
++                                                 R::a(tsl::style::color::ColorTransparent));
++            renderer->drawString(m_right, false,
++                                 this->getX() + this->getWidth() - 20 - (s32)vw,
++                                 this->getY() + 45, 20,
++                                 R::a(m_rightFaint ? tsl::style::color::ColorDescription
++                                                   : tsl::style::color::ColorHighlight));
++        }
++    }
++
++    virtual tsl::elm::Element *requestFocus(tsl::elm::Element *oldFocus,
++                                            tsl::FocusDirection direction) override {
++        return this;
++    }
++
++    virtual bool onClick(u64 keys) override {
++        if (keys & HidNpadButton_A) {
++            if (m_click)
++                m_click();
++            this->triggerClickAnimation();
++            return true;
++        }
++        return false;
++    }
++
++    virtual bool onTouch(tsl::elm::TouchEvent event, s32 currX, s32 currY,
++                         s32 prevX, s32 prevY, s32 initialX, s32 initialY) override {
++        if (event == tsl::elm::TouchEvent::Touch)
++            m_touched = this->inBounds(currX, currY);
++        if (event == tsl::elm::TouchEvent::Release && m_touched) {
++            m_touched = false;
++            if (tsl::elm::Element::getInputMode() == tsl::InputMode::Touch)
++                return this->onClick(HidNpadButton_A);
++        }
++        return false;
++    }
++
++private:
++    u32 m_index = 0;
++    char m_name[32] = {};
++    char m_addr[64] = {};
++    char m_right[48] = {};
++    bool m_rightFaint = true;
++    bool m_selected = false;
++    bool m_touched = false;
++    std::function<void()> m_click;
++};
++
 +/* 帧:在标题下方常驻显示当前服务器的在线人数与房间数量。
 +   标签“在线/房间”在上,对应数量在下。 */
 +class MonitorFrame : public tsl::elm::OverlayFrame {
@@ -540,7 +695,7 @@ index 8e07c19..990a29c 100644
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -70,18 +387,82 @@ static void detectLanguage()
+@@ -70,18 +488,82 @@ static void detectLanguage()
      strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
  }
  
@@ -624,10 +779,15 @@ index 8e07c19..990a29c 100644
  
          if (g_state == State::Error) {
              list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
-@@ -95,7 +476,23 @@ public:
+@@ -95,43 +577,68 @@ public:
              list->addItem(new tsl::elm::CategoryHeader(T("互联网中继（跨网联机）", "網際網路中繼（跨網連線）")));
              list->addItem(new ConfigToggleListItem(T("互联网中继", "網際網路中繼"), ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
  
+-            g_serverItems.clear();
+-            u32 count = 0;
+-            if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count))) {
+-                list->addItem(new tsl::elm::ListItem(T("读取服务器列表失败", "讀取伺服器清單失敗")));
+-            } else if (count == 0) {
 +            // 游戏房间:当前选择的服务器上的房间列表。
 +            // 行由 update() 按监视器快照版本动态重建,通过 addItem 的
 +            // index 参数插在标题正下方;标题放在服务器列表之前,
@@ -643,35 +803,84 @@ index 8e07c19..990a29c 100644
 +            list->addItem(new tsl::elm::CategoryHeader(
 +                T("中继服务器（按 A 切换）", "中繼伺服器（按 A 切換）")));
 +
-             g_serverItems.clear();
++            g_serverRows.clear();
 +            g_selectedName[0] = 0;
-             u32 count = 0;
-             if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count))) {
-                 list->addItem(new tsl::elm::ListItem(T("读取服务器列表失败", "讀取伺服器清單失敗")));
-@@ -109,9 +506,11 @@ public:
++            /* 服务器列表直接读 relay.cfg(双排:名称 + 地址),解析与
++             * sysmodule LoadConfig 同语义、顺序一一对应;servers.json 已
++             * 彻底移除。读不到文件时退回 IPC 名称(地址留空)。 */
++            MonitorServer servers[MONITOR_MAX_SERVERS];
++            u32 count = MonitorListRelayServers(servers, MONITOR_MAX_SERVERS);
++            u32 selected = 0;
++            if (R_FAILED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &selected))) {
++                selected = count;
++            }
++            if (count == 0) {
++                u32 ipcN = 0;
++                if (R_SUCCEEDED(ldnMitmGetRelayServerCount(&g_ldnConfig, &ipcN))) {
++                    for (u32 i = 0; i < ipcN && count < MONITOR_MAX_SERVERS; i++) {
++                        ldnMitmGetRelayServerName(&g_ldnConfig, i, servers[count].name);
++                        servers[count].addr[0] = 0;
++                        count++;
++                    }
++                }
++            }
++            if (count == 0) {
+                 list->addItem(new tsl::elm::ListItem(T("没有服务器，请编辑 relay.cfg", "沒有伺服器，請編輯 relay.cfg")));
+             } else {
+-                u32 selected = 0;
+-                if (R_FAILED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &selected))) {
+-                    selected = count;
+-                }
                  for (u32 i = 0; i < count; i++) {
-                     char name[32] = {};
-                     ldnMitmGetRelayServerName(&g_ldnConfig, i, name);
-+                    if (i == selected)
-+                        snprintf(g_selectedName, sizeof(g_selectedName), "%s", name);
-                     auto *item = new tsl::elm::ListItem(name);
-                     item->setValue(i == selected ? "*" : "");
+-                    char name[32] = {};
+-                    ldnMitmGetRelayServerName(&g_ldnConfig, i, name);
+-                    auto *item = new tsl::elm::ListItem(name);
+-                    item->setValue(i == selected ? "*" : "");
 -                    item->setClickListener([i](u64 keys) {
-+                    item->setClickListener([i, name](u64 keys) {
-                         if (keys & HidNpadButton_A) {
-                             if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
-                                 g_serverItems[i]->setValue(T("错误", "錯誤"));
-@@ -126,6 +525,9 @@ public:
-                             // there with only a star until the overlay is
-                             // reopened.
-                             g_shown_latency = 0xFFFFFFFFu;
-+                            // 切换服务器:同步监视器目标并立即刷新在线/房间。
-+                            snprintf(g_selectedName, sizeof(g_selectedName), "%s", name);
-+                            MonitorRequestRefresh(g_selectedName);
-                             return true;
+-                        if (keys & HidNpadButton_A) {
+-                            if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
+-                                g_serverItems[i]->setValue(T("错误", "錯誤"));
+-                                return true;
+-                            }
+-                            for (size_t k = 0; k < g_serverItems.size(); k++) {
+-                                g_serverItems[k]->setValue(k == i ? "*" : "");
+-                            }
+-                            // The loop above just wiped every latency label back
+-                            // to a bare "*". Invalidate the cache so the next
+-                            // update() repaints, otherwise the rows would sit
+-                            // there with only a star until the overlay is
+-                            // reopened.
+-                            g_shown_latency = 0xFFFFFFFFu;
+-                            return true;
++                    if (i == selected)
++                        snprintf(g_selectedName, sizeof(g_selectedName), "%s", servers[i].name);
++                    auto *row = new ServerRow();
++                    row->setServer(i, servers[i].name, servers[i].addr);
++                    row->setSelected(i == selected);
++                    row->setClickListener([i, name = std::string(servers[i].name)]() {
++                        if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
++                            g_serverRows[i]->setRight(T("错误", "錯誤"), true);
++                            return;
++                        }
++                        for (size_t k = 0; k < g_serverRows.size(); k++) {
++                            g_serverRows[k]->setSelected(k == i);
                          }
-                         return false;
-@@ -211,12 +613,23 @@ public:
+-                        return false;
++                        // 切换选中会重置右侧文本。失效缓存让下一个
++                        // update() 立即把延迟画回来。
++                        g_shown_latency = 0xFFFFFFFFu;
++                        // 切换服务器:同步监视器目标并立即刷新在线/房间。
++                        snprintf(g_selectedName, sizeof(g_selectedName), "%s", name.c_str());
++                        MonitorRequestSwitch(g_selectedName);
+                     });
+-                    g_serverItems.push_back(item);
+-                    list->addItem(item);
++                    g_serverRows.push_back(row);
++                    list->addItem(row);
+                 }
+             }
+ 
+@@ -211,16 +718,40 @@ public:
          // cached value made update() return early and the label stayed at
          // just "*" with no "--" and no number.
          g_shown_latency = 0xFFFFFFFFu;
@@ -692,10 +901,53 @@ index 8e07c19..990a29c 100644
 +            rebuildRoomSection(snap);
 +        }
 +
++        // 在线/房间周期刷新:与延迟 ping(sysmodule 每 1s 发一次)同节奏。
++        // 仅可见时刷新;MonitorRequestPoll 不动目标、不重拉订阅,查询由
++        // 后台线程合并执行,不会堆积。
++        if (g_visible && g_state == State::Loaded) {
++            u64 nowNs = armTicksToNs(armGetSystemTick());
++            if (g_lastPollNs == 0)
++                g_lastPollNs = nowNs;
++            if (nowNs - g_lastPollNs >= 1000000000ull) {
++                g_lastPollNs = nowNs;
++                MonitorRequestPoll();
++            }
++        }
++
          // Show the live relay latency next to the selected server.
          // Only the selected server is connected, so it is the only one
          // whose round-trip time we can actually know.
-@@ -265,9 +678,14 @@ public:
+-        if (g_state != State::Loaded || g_serverItems.empty()) {
++        if (g_state != State::Loaded || g_serverRows.empty()) {
+             return;
+         }
+         u32 ms = 0;
+@@ -233,9 +764,8 @@ public:
+         }
+         g_shown_latency = ms;
+ 
+-        // ListItem::setValue(value, faint): faint=false renders in the
+-        // highlight colour, faint=true in the dim description colour. That
+-        // gives a green / grey traffic light without a custom element.
++        // faint=false renders in the highlight colour, faint=true in the dim
++        // description colour: green / grey traffic light without extra widgets.
+         char buf[48];
+         bool faint = false;
+         if (ms == 0) {
+@@ -247,9 +777,9 @@ public:
+         } else {
+             snprintf(buf, sizeof(buf), T("* 延迟 %ums", "* 延遲 %ums"), ms);
+         }
+-        for (size_t k = 0; k < g_serverItems.size(); k++) {
+-            if (!g_serverItems[k]->getValue().empty()) {
+-                g_serverItems[k]->setValue(buf, faint);
++        for (size_t k = 0; k < g_serverRows.size(); k++) {
++            if (g_serverRows[k]->selected()) {
++                g_serverRows[k]->setRight(buf, faint);
+             }
+         }
+     }
+@@ -265,9 +795,14 @@ public:
      virtual void initServices() override {
          g_state = State::Uninit;
          detectLanguage();
@@ -710,7 +962,7 @@ index 8e07c19..990a29c 100644
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,13 +706,20 @@ public:
+@@ -288,14 +823,25 @@ public:
              g_state = State::Loaded;
          });
  
@@ -725,19 +977,25 @@ index 8e07c19..990a29c 100644
      }
  
 -    virtual void onShow() override {}    // Called before overlay wants to change from invisible to visible state
+-    virtual void onHide() override {}    // Called before overlay wants to change from visible to invisible state
 +    virtual void onShow() override {
 +        // 每次点开 Tesla 插件就从远程重新下载订阅并刷新在线/房间。
++        g_visible = true;
++        g_lastPollNs = 0;
 +        MonitorRequestRefresh(g_selectedName[0] ? g_selectedName : nullptr);
 +    }
-     virtual void onHide() override {}    // Called before overlay wants to change from visible to invisible state
++    virtual void onHide() override {
++        g_visible = false;
++    }    // Called before overlay wants to change from visible to invisible state
  
      virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
+         return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..e5bd8cd
+index 0000000..42be3ed
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,1990 @@
+@@ -0,0 +1,2044 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -769,19 +1027,20 @@ index 0000000..e5bd8cd
 +#include <cstring>
 +#include <mutex>
 +#include <string>
++#include <curl/curl.h>
 +
 +/* ------------------------------------------------------------------ */
 +/* 常量                                                                */
 +/* ------------------------------------------------------------------ */
 +
-+static const char *kSubServersPath = "jieluojun/LanPlayMonitor/refs/heads/main/servers.json";
 +static const char *kSubChinesePath = "jieluojun/LanPlayMonitor/refs/heads/main/chinese_db.json";
 +
-+/* 下载通道:直连 + GitHub 加速镜像(raw.githubusercontent.com 纯 HTTP 可直连,
-+ * 部分网络需要镜像兜底)。 */
++/* 下载通道:HTTPS 加速镜像优先(https://v6.gh-proxy.org/ 直接加在 GitHub
++ * 链接前面;GitHub 已全站强制 HTTPS,纯 HTTP 通道几乎都被 301,仅作兜底)。
++ * 服务器列表不再订阅 servers.json —— 只读 relay.cfg。 */
 +static const char *kUrlPrefixes[] = {
++    "https://v6.gh-proxy.org/https://raw.githubusercontent.com/",
 +    "http://raw.githubusercontent.com/",
-+    "http://v6.gh-proxy.org/https://raw.githubusercontent.com/",
 +    "http://gh-proxy.com/https://raw.githubusercontent.com/",
 +    "http://ghfast.top/https://raw.githubusercontent.com/",
 +};
@@ -791,7 +1050,6 @@ index 0000000..e5bd8cd
 +    " sessionId contentId hostPlayerName nodeCount nodeCountMax nodes { playerName } } }";
 +
 +static const char *kSaveDir         = "sdmc:/config/ldn_mitm";
-+static const char *kSaveServersPath = "sdmc:/config/ldn_mitm/servers.json";
 +static const char *kSaveChinesePath = "sdmc:/config/ldn_mitm/chinese_db.json";
 +static const char *kRelayCfgPath    = "sdmc:/config/ldn_mitm/relay.cfg";
 +static const char *kLogPath         = "sdmc:/config/ldn_mitm/monitor.log";
@@ -943,18 +1201,11 @@ index 0000000..e5bd8cd
 +static Thread g_thread;
 +static bool  g_inited = false;
 +static char  g_pendingName[48];      /* 切换服务器时指定;空 = 读 relay.cfg */
++static bool  g_pendingSubs = false;  /* 下一次刷新是否重新拉订阅缓存 */
 +
 +#define T_STR(hans, hant) (g_traditional.load() ? (hant) : (hans))
 +
-+/* 服务器列表(servers.json 订阅) */
-+struct ServerEntry {
-+    char name[32];
-+    char host[64];
-+    u16  port;
-+    char type[12];      /* "graphql" / "rest" / "" */
-+};
-+static ServerEntry g_servers[MONITOR_MAX_SERVERS];
-+static u32 g_serverN = 0;
++/* 服务器列表:servers.json 已彻底移除,只读 relay.cfg(见 MonitorListRelayServers)。 */
 +
 +/* 标题映射(chinese_db.json 订阅):开放寻址哈希 + 字符串池 */
 +static u64  *g_titleKey   = nullptr;    /* 存 key+1,0 = 空槽 */
@@ -1702,12 +1953,88 @@ index 0000000..e5bd8cd
 +    return false;
 +}
 +
-+/* 按镜像链下载订阅文件 */
++/* HTTPS 通道(switch-curl,libnx SSL 后端):overlay 是纯 HTTP 客户端,
++ * GitHub 全站强制 HTTPS,只有走 TLS 才能把订阅真正拉下来(v6.gh-proxy.org
++ * 加速镜像就是 https)。DNS 用本文件的原始解析(覆盖层进程里 getaddrinfo
++ * 不可用),以 CURLOPT_RESOLVE 钉住 IP,SNI/Host 仍是域名。 */
++static bool s_curlInited = false;
++
++static size_t CurlWrite(char *ptr, size_t size, size_t nmemb, void *userdata) {
++    std::string *out = (std::string *)userdata;
++    size_t n = size * nmemb;
++    if (out->size() + n > kMaxDownload)
++        return 0;
++    out->append(ptr, n);
++    return n;
++}
++
++static bool HttpsGet(const char *url, std::string *outBody, int timeoutMs) {
++    if (strncmp(url, "https://", 8) != 0)
++        return false;
++    EnsureSockets();
++    if (!s_curlInited) {
++        /* libnx SSL 后端经 sm 拿 ssl 服务;外层已开 sm 时失败也无妨 */
++        bool ownSm = R_SUCCEEDED(smInitialize());
++        curl_global_init(CURL_GLOBAL_DEFAULT);
++        if (ownSm)
++            smExit();
++        s_curlInited = true;
++    }
++    /* 预解析 host:curl 默认 getaddrinfo 在 overlay 里全灭,必须钉 IP */
++    const char *hostBeg = url + 8;
++    const char *hostEnd = strchr(hostBeg, '/');
++    size_t hl = hostEnd ? (size_t)(hostEnd - hostBeg) : strlen(hostBeg);
++    char host[128];
++    if (hl == 0 || hl >= sizeof(host))
++        return false;
++    memcpy(host, hostBeg, hl);
++    host[hl] = 0;
++    struct sockaddr_in sa = {};
++    if (!HttpResolve(host, &sa))
++        return false;
++    char resolve[192];
++    snprintf(resolve, sizeof(resolve), "%s:443:%u.%u.%u.%u", host,
++             (unsigned)(sa.sin_addr.s_addr & 0xFF),
++             (unsigned)((sa.sin_addr.s_addr >> 8) & 0xFF),
++             (unsigned)((sa.sin_addr.s_addr >> 16) & 0xFF),
++             (unsigned)((sa.sin_addr.s_addr >> 24) & 0xFF));
++
++    outBody->clear();
++    CURL *curl = curl_easy_init();
++    if (!curl)
++        return false;
++    curl_easy_setopt(curl, CURLOPT_URL, url);
++    curl_easy_setopt(curl, CURLOPT_RESOLVE, resolve);
++    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWrite);
++    curl_easy_setopt(curl, CURLOPT_WRITEDATA, outBody);
++    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
++    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
++    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
++    curl_easy_setopt(curl, CURLOPT_MAXFILESIZE, (long)kMaxDownload);
++    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeoutMs);
++    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
++    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ldn-mitm-monitor");
++    CURLcode rc = curl_easy_perform(curl);
++    long status = 0;
++    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
++    curl_easy_cleanup(curl);
++    if (rc == CURLE_OK && status >= 200 && status < 300)
++        return true;
++    /* 错误码:700+curlcode(curl 层),否则 100+HTTP 状态 */
++    g_httpErr = (rc != CURLE_OK) ? (700 + (int)rc) : (100 + (int)status);
++    outBody->clear();
++    return false;
++}
++
++/* 按镜像链下载订阅文件(https 镜像走 curl,http 兜底走内置轻客户端) */
 +static bool DownloadSubscription(const char *relPath, std::string *out) {
 +    for (size_t i = 0; i < sizeof(kUrlPrefixes) / sizeof(kUrlPrefixes[0]); i++) {
 +        char url[512];
 +        snprintf(url, sizeof(url), "%s%s", kUrlPrefixes[i], relPath);
-+        if (HttpGet(url, out, 5000, kMaxDownload)) {
++        bool ok = (strncmp(url, "https://", 8) == 0)
++                      ? HttpsGet(url, out, 5000)
++                      : HttpGet(url, out, 5000, kMaxDownload);
++        if (ok) {
 +            MonLog("download ok");
 +            return true;
 +        }
@@ -1751,37 +2078,8 @@ index 0000000..e5bd8cd
 +}
 +
 +/* ------------------------------------------------------------------ */
-+/* 订阅解析:servers.json / chinese_db.json                             */
++/* 订阅解析:chinese_db.json(servers.json 已移除) */
 +/* ------------------------------------------------------------------ */
-+
-+static void ParseServersJson(const char *json) {
-+    g_serverN = 0;
-+    const char *p = JsWs(SkipBom(json));
-+    if (*p != '[')
-+        return;
-+    p = JsWs(p + 1);
-+    while (g_serverN < MONITOR_MAX_SERVERS && *p == '{') {
-+        ServerEntry &e = g_servers[g_serverN];
-+        memset(&e, 0, sizeof(e));
-+        JsonGetStr(p, "name", e.name, sizeof(e.name));
-+        if (!JsonGetStr(p, "host", e.host, sizeof(e.host)))
-+            e.host[0] = 0;
-+        u32 port = 11451;
-+        JsonGetU32(p, "port", &port);
-+        e.port = (u16)(port ? port : 11451);
-+        if (!JsonGetStr(p, "type", e.type, sizeof(e.type)))
-+            e.type[0] = 0;
-+        if (e.host[0])
-+            g_serverN++;
-+        const char *next = JsonSkip(p, 0);
-+        if (!next)
-+            break;
-+        next = JsWs(next);
-+        if (*next != ',')
-+            break;
-+        p = JsWs(next + 1);
-+    }
-+}
 +
 +static u64 TitleKeyPack(const char *hex16) {
 +    u64 key = 0;
@@ -1926,77 +2224,106 @@ index 0000000..e5bd8cd
 +}
 +
 +/* ------------------------------------------------------------------ */
-+/* relay.cfg:当前选择的服务器 -> host:port                              */
++/* relay.cfg 行解析:与 sysmodule(relay_client.cpp LoadConfig)逐条对齐  */
 +/* ------------------------------------------------------------------ */
 +
-+static bool ParseHostPort(const char *tok, char *host, size_t hostN, u16 *port) {
-+    const char *colon = strrchr(tok, ':');
-+    size_t hl = colon ? (size_t)(colon - tok) : strlen(tok);
-+    if (hl == 0 || hl >= hostN)
++/* 指令值:LoadConfig 的 DirectiveValue 语义(name 后可接 =/空白,值再跳过)。 */
++static const char *RelayDirective(const char *l, const char *name) {
++    size_t n = strlen(name);
++    if (strncmp(l, name, n) != 0)
++        return nullptr;
++    char c = l[n];
++    if (c != 0 && c != '=' && c != ' ' && c != '\t')
++        return nullptr;
++    const char *v = l + n;
++    while (*v == '=' || *v == ' ' || *v == '\t')
++        v++;
++    return v;
++}
++
++/* 解析 relay.cfg 的一行(服务器条目)。与 LoadConfig 完全同语义:
++ *   sscanf("%31s %63s") —— 任意空白(含 \v \f)切 token;旧版用 " \t"
++ *   切分,遇到 \v/\f 分隔的行就匹配不到名字(resolve noname 之谜);
++ *   单 token 行 name=addr=token(随后 addr 再去 :port);
++ *   enabled=/broadcast=/id=/selected= 指令行与 #/空行跳过;
++ *   addr 可带 :port(默认 11451;port 为 0 或 >65535 整行丢弃)。
++ * 返回 true = 是服务器行。 */
++static bool RelayParseLine(const char *lineIn,
++                           char *name, size_t nameN,
++                           char *host, size_t hostN, u16 *port) {
++    char buf[256];
++    snprintf(buf, sizeof(buf), "%s", lineIn);
++    char *line = buf;
++    while (*line == ' ' || *line == '\t')
++        line++;
++    if (*line == '#' || *line == 0)
 +        return false;
-+    memcpy(host, tok, hl);
-+    host[hl] = 0;
-+    u32 p = 11451;
-+    if (colon) {
-+        p = 0;
-+        for (const char *q = colon + 1; *q >= '0' && *q <= '9'; q++)
-+            p = p * 10 + (u32)(*q - '0');
++    if (RelayDirective(line, "enabled") || RelayDirective(line, "broadcast") ||
++        RelayDirective(line, "selected") || RelayDirective(line, "id"))
++        return false;
++
++    char t1[32] = {}, t2[64] = {};
++    if (sscanf(line, "%31s %63s", t1, t2) < 2) {
++        if (sscanf(line, "%63s", t2) < 1)
++            return false;
++        snprintf(t1, sizeof(t1), "%.31s", t2);   /* 单 token:name=addr=token(同 %31s 截断) */
 +    }
-+    if (p == 0 || p > 65535)
-+        p = 11451;
++    unsigned p = 11451;
++    char *colon = strchr(t2, ':');
++    if (colon) {
++        *colon = 0;
++        p = (unsigned)atoi(colon + 1);
++    }
++    if (t2[0] == 0 || p == 0 || p > 65535)
++        return false;
++    snprintf(name, nameN, "%s", t1);
++    snprintf(host, hostN, "%s", t2);
 +    *port = (u16)p;
 +    return true;
 +}
 +
-+/* 解析 relay.cfg 的一行。兼容 sysmodule(relay_client LoadConfig)的两种行:
-+ *   <name> <host>[:port]     两 token
-+ *   <host>[:port]            单 token,name=host(sysmodule 语义)
-+ * 及 <name>=<host>[:port] 变体。名字相符且 host 合法时填输出并返回 true;
-+ * isEntry 标记该行是服务器行(指令/注释行不算)。 */
++/* 匹配 relay.cfg 一行里的服务器名;isEntry 标记该行是服务器行(指令/注释不算)。 */
 +static bool MatchRelayLine(const std::string &line, const char *want,
 +                           char *nameOut, size_t nameN,
 +                           char *hostOut, size_t hostN, u16 *portOut,
 +                           bool *isEntry = nullptr) {
 +    if (isEntry)
 +        *isEntry = false;
-+    size_t s = line.find_first_not_of(" \t");
-+    if (s == std::string::npos || line[s] == '#')
-+        return false;
-+    std::string tok1, tok2;
-+    {
-+        size_t sp = line.find_first_of(" \t", s);
-+        tok1 = line.substr(s, sp == std::string::npos ? std::string::npos : sp - s);
-+        if (sp != std::string::npos) {
-+            size_t t = line.find_first_not_of(" \t", sp);
-+            if (t != std::string::npos) {
-+                size_t te = line.find_first_of(" \t", t);
-+                tok2 = line.substr(t, te == std::string::npos ? std::string::npos : te - t);
-+            }
-+        }
-+    }
-+    if (tok1.empty())
-+        return false;
-+    /* 指令行不是服务器行 */
-+    if (tok1.compare(0, 8, "enabled=") == 0 || tok1.compare(0, 10, "broadcast=") == 0 ||
-+        tok1.compare(0, 3, "id=") == 0 || tok1.compare(0, 9, "selected=") == 0)
++    char name[32] = {}, host[64] = {};
++    u16 port = 0;
++    if (!RelayParseLine(line.c_str(), name, sizeof(name), host, sizeof(host), &port))
 +        return false;
 +    if (isEntry)
 +        *isEntry = true;
++    if (strcmp(name, want) != 0)
++        return false;
++    snprintf(nameOut, nameN, "%s", name);
++    snprintf(hostOut, hostN, "%s", host);
++    *portOut = port;
++    return true;
++}
 +
-+    std::string name1 = tok1, hp = tok2;
-+    if (hp.empty()) {
-+        size_t eq = tok1.find('=');
-+        if (eq != std::string::npos && eq + 1 < tok1.size()) {
-+            name1 = tok1.substr(0, eq);
-+            hp = tok1.substr(eq + 1);
-+        } else {
-+            hp = tok1;                        /* 单 token:name 也是 host */
++/* 服务器列表:直接读 relay.cfg(与 sysmodule LoadConfig 同一套解析,
++ * 第 i 条与 sysmodule 的 g_servers[i] 一一对应)。 */
++u32 MonitorListRelayServers(MonitorServer *out, u32 max) {
++    std::string cfg;
++    if (!out || !LoadFile(kRelayCfgPath, &cfg))
++        return 0;
++    u32 n = 0;
++    size_t i = 0;
++    while (i < cfg.size() && n < max) {
++        size_t e = cfg.find_first_of("\r\n", i);
++        std::string line = cfg.substr(i, e == std::string::npos ? std::string::npos : e - i);
++        i = (e == std::string::npos) ? cfg.size() : e + 1;
++        char host[64] = {};
++        u16 port = 0;
++        if (RelayParseLine(line.c_str(), out[n].name, sizeof(out[n].name),
++                           host, sizeof(host), &port)) {
++            snprintf(out[n].addr, sizeof(out[n].addr), "%.55s:%u", host, (unsigned)port);
++            n++;
 +        }
 +    }
-+    if (name1 != want)
-+        return false;
-+    snprintf(nameOut, nameN, "%s", want);
-+    return ParseHostPort(hp.c_str(), hostOut, hostN, portOut);
++    return n;
 +}
 +
 +static bool ResolveSelectedServer(const char *nameOverride,
@@ -2034,6 +2361,7 @@ index 0000000..e5bd8cd
 +    }
 +
 +    int entryN = 0;
++    char entries[80] = {};
 +    size_t i = 0;
 +    while (i < cfg.size()) {
 +        size_t e = cfg.find_first_of("\r\n", i);
@@ -2043,12 +2371,21 @@ index 0000000..e5bd8cd
 +        bool isEntry = false;
 +        if (MatchRelayLine(line, want, nameOut, nameN, hostOut, hostN, portOut, &isEntry))
 +            return true;
-+        if (isEntry)
++        if (isEntry) {
 +            entryN++;
++            char ename[32] = {}, ehost[64] = {};
++            u16 eport = 0;
++            if (RelayParseLine(line.c_str(), ename, sizeof(ename),
++                               ehost, sizeof(ehost), &eport) &&
++                strlen(entries) + strlen(ename) + 2 < sizeof(entries)) {
++                strcat(entries, ename);
++                strcat(entries, "|");
++            }
++        }
 +    }
 +    {
-+        char m[96];
-+        snprintf(m, sizeof(m), "resolve noname %s n=%d", want, entryN);
++        char m[200];
++        snprintf(m, sizeof(m), "resolve noname %s n=%d [%s]", want, entryN, entries);
 +        MonLog(m);
 +    }
 +    snprintf(nameOut, nameN, "%s", want);
@@ -2484,7 +2821,7 @@ index 0000000..e5bd8cd
 +/* 刷新流程                                                            */
 +/* ------------------------------------------------------------------ */
 +
-+static void DoRefresh(const char *nameOverride) {
++static void DoRefresh(const char *nameOverride, bool reloadSubs) {
 +    MonLog("refresh-start");
 +    EnsureSockets();
 +    {
@@ -2518,60 +2855,32 @@ index 0000000..e5bd8cd
 +                 name[0] ? name : (host[0] ? host : "?"));
 +    }
 +
-+    /* 2. 两个订阅:每次打开都从远程下载,失败退回本地缓存
-+     *    (GitHub 已全网强制 HTTPS,纯 HTTP 客户端运行时拉不动,
-+     *     缓存由构建包预置,见根 Makefile PACK;下载成功则刷新) */
-+    std::string serversJson, chineseJson;
-+    bool gotServers = DownloadSubscription(kSubServersPath, &serversJson);
-+    if (gotServers)
-+        SaveFile(kSaveServersPath, serversJson);
-+    else {
-+        gotServers = LoadFile(kSaveServersPath, &serversJson);
-+        MonLog(gotServers ? "servers: use cache" : "servers: no cache");
-+    }
-+
-+    bool gotChinese = DownloadSubscription(kSubChinesePath, &chineseJson);
-+    if (gotChinese)
-+        SaveFile(kSaveChinesePath, chineseJson);
-+    else {
-+        gotChinese = LoadFile(kSaveChinesePath, &chineseJson);
-+        MonLog(gotChinese ? "chinese: use cache" : "chinese: no cache");
-+    }
-+
-+    /* 3. 解析订阅 */
-+    if (gotServers)
-+        ParseServersJson(serversJson.c_str());
-+    else
-+        g_serverN = 0;
-+    if (gotChinese) {
-+        EnsureTitleTables();
-+        if (g_titleKey) {
-+            g_titleArenaUsed = 0;
-+            memset(g_titleKey, 0, kTitleHashSize * sizeof(u64));
-+            /* 先释放 JSON 字符串(约 0.5MB),再从落盘文件流式解析,
-+             * 避免字符串与标题表同驻把 ovlloader 的堆挤爆。 */
-+            std::string().swap(chineseJson);
-+            if (!ParseChineseDbFile(kSaveChinesePath))
-+                MonLog("chinese_db: open file failed");
++    /* 2. 订阅(chinese_db.json):开盖/手动刷新时拉取(周期轮询跳过),
++     *    失败退回本地缓存;servers.json 已彻底移除,服务器列表只读 relay.cfg。
++     *    下载走 HTTPS 加速镜像(https://v6.gh-proxy.org/),删了缓存也能重拉 */
++    if (reloadSubs) {
++        std::string chineseJson;
++        bool gotChinese = DownloadSubscription(kSubChinesePath, &chineseJson);
++        if (gotChinese)
++            SaveFile(kSaveChinesePath, chineseJson);
++        else {
++            gotChinese = LoadFile(kSaveChinesePath, &chineseJson);
++            MonLog(gotChinese ? "chinese: use cache" : "chinese: no cache");
 +        }
-+    }
-+
-+    /* 名字兜底:relay.cfg 行名对不上时,用 servers.json 的短名匹配 host:port */
-+    if (!haveServer && nameOverride && nameOverride[0]) {
-+        for (u32 i = 0; i < g_serverN; i++) {
-+            if (strcasecmp(g_servers[i].name, nameOverride) == 0) {
-+                snprintf(name, sizeof(name), "%s", g_servers[i].name);
-+                snprintf(host, sizeof(host), "%s", g_servers[i].host);
-+                port = g_servers[i].port;
-+                haveServer = true;
-+                char m[160];
-+                snprintf(m, sizeof(m), "resolve fallback %s %s:%u",
-+                         name, host, (unsigned)port);
-+                MonLog(m);
-+                break;
++        if (gotChinese) {
++            EnsureTitleTables();
++            if (g_titleKey) {
++                g_titleArenaUsed = 0;
++                memset(g_titleKey, 0, kTitleHashSize * sizeof(u64));
++                /* 先释放 JSON 字符串(约 0.5MB),再从落盘文件流式解析,
++                 * 避免字符串与标题表同驻把 ovlloader 的堆挤爆。 */
++                std::string().swap(chineseJson);
++                if (!ParseChineseDbFile(kSaveChinesePath))
++                    MonLog("chinese_db: open file failed");
 +            }
 +        }
 +    }
++
 +    if (!haveServer) {
 +        std::scoped_lock lk(g_mutex);
 +        snprintf(g_snap.status, sizeof(g_snap.status), "%s",
@@ -2581,28 +2890,14 @@ index 0000000..e5bd8cd
 +        return;
 +    }
 +
-+    /* 4. 查服务器类型(servers.json 按 host:port 匹配) */
-+    char type[12] = {};
-+    for (u32 i = 0; i < g_serverN; i++) {
-+        if (strcasecmp(g_servers[i].host, host) == 0 && g_servers[i].port == port) {
-+            snprintf(type, sizeof(type), "%s", g_servers[i].type);
-+            break;
-+        }
-+    }
-+
-+    /* 5. 查询:按类型;未登记的服务器 graphql 优先(含房间),失败再 rest */
-+    bool ok;
-+    if (strcmp(type, "rest") == 0) {
++    /* 4. 查询:自动识别 —— graphql 优先(含房间),失败再 rest
++     *    (servers.json 已移除,不再按 host:port 查类型表) */
++    bool ok = QueryGraphql(host, port, &qr);
++    if (!ok)
 +        ok = QueryRest(host, port, &qr);
-+    } else {
-+        ok = QueryGraphql(host, port, &qr);
-+        if (!ok)
-+            ok = QueryRest(host, port, &qr);
-+    }
 +    {
 +        char m[56];
-+        snprintf(m, sizeof(m), "query %s e=%d on=%d rooms=%u",
-+                 strcmp(type, "rest") == 0 ? "rest" : "auto",
++        snprintf(m, sizeof(m), "query auto e=%d on=%d rooms=%u",
 +                 g_httpErr, qr.online, (unsigned)qr.roomN);
 +        MonLog(m);
 +    }
@@ -2653,11 +2948,14 @@ index 0000000..e5bd8cd
 +        if (want != g_doneGen) {
 +            g_doneGen = want;
 +            char name[48];
++            bool subs;
 +            {
 +                std::scoped_lock lk(g_mutex);
 +                memcpy(name, g_pendingName, sizeof(name));
++                subs = g_pendingSubs;
++                g_pendingSubs = false;
 +            }
-+            DoRefresh(name[0] ? name : nullptr);
++            DoRefresh(name[0] ? name : nullptr, subs);
 +            MonLog("refresh-done");
 +        } else {
 +            svcSleepThread(50'000'000);      /* 50ms */
@@ -2720,7 +3018,21 @@ index 0000000..e5bd8cd
 +    {
 +        std::scoped_lock lk(g_mutex);
 +        snprintf(g_pendingName, sizeof(g_pendingName), "%s", serverName ? serverName : "");
++        g_pendingSubs = true;      /* 开盖/手动刷新:同时重新拉订阅缓存 */
 +    }
++    g_reqGen.fetch_add(1);
++}
++
++void MonitorRequestSwitch(const char *serverName) {
++    {
++        std::scoped_lock lk(g_mutex);
++        snprintf(g_pendingName, sizeof(g_pendingName), "%s", serverName ? serverName : "");
++    }
++    g_reqGen.fetch_add(1);
++}
++
++void MonitorRequestPoll() {
++    /* 周期刷新(与延迟 ping 同节奏):不动目标、不拉订阅 */
 +    g_reqGen.fetch_add(1);
 +}
 +
@@ -2730,22 +3042,23 @@ index 0000000..e5bd8cd
 +}
 diff --git a/overlay/source/monitor.hpp b/overlay/source/monitor.hpp
 new file mode 100644
-index 0000000..21cf18e
+index 0000000..6d32143
 --- /dev/null
 +++ b/overlay/source/monitor.hpp
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,71 @@
 +#pragma once
 +#include <switch.h>
 +
 +/* 联机监视器:当前中继服务器的在线人数 / 房间数 / 游戏房间列表。
 + *
 + * 数据来源:
-+ *   1. 服务器列表订阅  servers.json    (type=graphql/rest、region)
++ *   1. 服务器列表      relay.cfg(与 sysmodule LoadConfig 同解析;servers.json 已移除)
 + *   2. 标题映射订阅    chinese_db.json (标题ID -> 中文名)
 + *   3. 服务器自身的查询接口(graphql POST / 或 rest GET /info),
 + *      rest 服务器接口不给房间时用 UDP 主动扫描补上。
 + *
-+ * 两个订阅文件每次打开 overlay 都从远程重新下载,落盘到
++ * chinese_db.json 每次打开 overlay 从远程重新下载(HTTPS 加速镜像
++ * https://v6.gh-proxy.org/ 优先),落盘到
 + * sdmc:/config/ldn_mitm/ 下供下次离线兜底。
 + */
 +
@@ -2781,10 +3094,23 @@ index 0000000..21cf18e
 +/* 简繁文案切换(与 UI 的 T() 同步)。 */
 +void MonitorSetTraditional(bool traditional);
 +
++/* 服务器列表:直接读 relay.cfg(第 i 条与 sysmodule 的 g_servers[i] 对应)。
++ * addr 形如 "host:port"。 */
++struct MonitorServer {
++    char name[32];
++    char addr[64];
++};
++u32 MonitorListRelayServers(MonitorServer *out, u32 max);
++
 +/* 请求一次后台刷新(每次打开 overlay / 切换服务器时调用)。
 + * serverName:选中的服务器名(可空,空则读 relay.cfg 的 selected=)。
-+ * 非阻塞;完成后 MonitorCopySnapshot 里的 version 会 +1。 */
++ * 非阻塞;完成后 MonitorCopySnapshot 里的 version 会 +1。
++ * Refresh = 开盖:改目标 + 重新拉订阅缓存;
++ * Switch  = 切换服务器:改目标,不拉订阅;
++ * Poll    = 周期刷新(与延迟 ping 同节奏):不动目标、不拉订阅。 */
 +void MonitorRequestRefresh(const char *serverName);
++void MonitorRequestSwitch(const char *serverName);
++void MonitorRequestPoll();
 +
 +/* 取当前快照的副本。 */
 +void MonitorCopySnapshot(MonitorSnapshot *out);
