@@ -1,4 +1,4 @@
-From 6aa1d7739761e9fe87efdf25806434f85c653638 Mon Sep 17 00:00:00 2001
+From 7bdba1a222d61fa5cee80142dbdf24348ca3c93a Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
 Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
@@ -12,20 +12,24 @@ Content-Transfer-Encoding: 8bit
 联机监视器(0010):
 - 标题下方两列统计:标签「在线/房间」在上、数字在下
 - 「游戏房间」列表:chinese_db.json 标题ID→中文名映射 + N/M 人数
-- 订阅 servers.json / chinese_db.json 每次打开 overlay 重新下载到
-  sdmc:/config/ldn_mitm/,失败退回缓存;graphql/rest 分型查询,
+- 订阅 servers.json / chinese_db.json 每次打开 overlay 尝试远程刷新,
+  失败退回 /config/ldn_mitm/ 缓存;graphql/rest 分型查询,
   rest 1.0 用 UDP LDN 主动扫描补房间;切换服务器即时刷新
+- 订阅缓存随构建包预置(GitHub 已全网强制 HTTPS,ovl 纯 HTTP 客户端
+  运行时拉不动;CI 构建时新鲜抓取铺进 sdcard,运行时下载成功则更新)
 
 内存与稳定性(真机 23.0.1 排障并入):
 - EnsureSd():tesla 覆盖 __appInit 后 sdmc 未挂载,曾致 fclose(NULL)
   崩溃(2168-0002/0x428)与全部文件 I/O 静默失效;现幂等挂载 + 日志截断判空
 - 标题表懒加载 + chinese_db 1KB 窗口流式解析 + HTTP Content-Length
   预留,消除 ovlloader 0x559 OutOfMemory(表缺失时回退显示标题ID)
-- bsd socket 延迟到首次查询再初始化并缩容,挪出帧缓冲关键窗口
+- bsd socket 延迟到首次查询再初始化(挪出帧缓冲关键窗口);bsd:u 经 sm
+  获取,须自带 sm 会话包裹(doWithSmSession 结束后 sm 已关)
 - 帧缓冲降级兜底(-Wl,--wrap=framebufferCreate):双缓冲 1.34MB 分配
   失败时自动改单缓冲 672KB,小堆 loader 不再 0x559 直接崩
 - 堆余量探针 + 阶段日志(worker-init/probe-*/initServices-done/fb:/
-  ui-begin/ui-ready/first-frame/refresh-*):崩溃时 monitor.log 直接定位
+  ui-begin/ui-ready/first-frame/refresh-*/download/sockets-*):崩溃或
+  功能异常时 monitor.log 直接定位
 - sdcard 包内置 /config/nx-ovlloader/heap_size.bin=8MB(ppkantorski/
   Ultrahand loader 提堆;官方 loader 忽略无害)
 
@@ -35,12 +39,12 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master(同上游 nightly
  .github/workflows/build.yml   |   14 +-
  .github/workflows/nightly.yml |   17 +-
  .github/workflows/release.yml |   24 +-
- Makefile                      |    2 +
+ Makefile                      |    5 +
  overlay/Makefile              |    5 +-
  overlay/source/main.cpp       |  152 +++-
- overlay/source/monitor.cpp    | 1584 +++++++++++++++++++++++++++++++++
+ overlay/source/monitor.cpp    | 1591 +++++++++++++++++++++++++++++++++
  overlay/source/monitor.hpp    |   51 ++
- 8 files changed, 1826 insertions(+), 23 deletions(-)
+ 8 files changed, 1836 insertions(+), 23 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
@@ -149,15 +153,18 @@ index 7f34343..b34daa5 100644
      - name: Pack
        run: |
 diff --git a/Makefile b/Makefile
-index efcb5e7..75d337a 100644
+index efcb5e7..949f441 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -57,6 +57,8 @@ PACK: $(SUBFOLDERS)
+@@ -57,6 +57,11 @@ PACK: $(SUBFOLDERS)
  	@ cp ldn_mitm/res/toolbox.json $(TITLE_DIR)/toolbox.json
  	@ touch $(TITLE_DIR)/flags/boot2.flag
  	@ cp config/ldn_mitm/relay.cfg $(SD_ROOT)/config/ldn_mitm/relay.cfg
 +	@ mkdir -p $(SD_ROOT)/config/nx-ovlloader
 +	@ printf '\000\000\200\000\000\000\000\000' > $(SD_ROOT)/config/nx-ovlloader/heap_size.bin
++	@ echo "预置订阅缓存(GitHub 已强制 HTTPS,运行时纯 HTTP 拉不动,随包内置;运行时仍会尝试刷新)"
++	@ (curl -fsSL --max-time 30 https://raw.githubusercontent.com/jieluojun/LanPlayMonitor/refs/heads/main/servers.json -o $(SD_ROOT)/config/ldn_mitm/servers.json.tmp && mv $(SD_ROOT)/config/ldn_mitm/servers.json.tmp $(SD_ROOT)/config/ldn_mitm/servers.json) || (rm -f $(SD_ROOT)/config/ldn_mitm/servers.json.tmp; echo "warn: servers.json 预置失败(运行时缓存兜底将缺失)")
++	@ (curl -fsSL --max-time 60 https://raw.githubusercontent.com/jieluojun/LanPlayMonitor/refs/heads/main/chinese_db.json -o $(SD_ROOT)/config/ldn_mitm/chinese_db.json.tmp && mv $(SD_ROOT)/config/ldn_mitm/chinese_db.json.tmp $(SD_ROOT)/config/ldn_mitm/chinese_db.json) || (rm -f $(SD_ROOT)/config/ldn_mitm/chinese_db.json.tmp; echo "warn: chinese_db.json 预置失败")
  #---------------------------------------------------------------------------------
  
  .PHONY: all clean PACK atmosphere-patch $(SUBFOLDERS)
@@ -440,10 +447,10 @@ index 8e07c19..6073fb8 100644
      virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..40d1bef
+index 0000000..c987504
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,1584 @@
+@@ -0,0 +1,1591 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -524,26 +531,22 @@ index 0000000..40d1bef
 +    fclose(f);
 +}
 +
-+/* bsd socket 延迟到首次网络查询才初始化:
-+ * 1) 把 ~114KB 的 bsd 缓冲分配挪出 initScreen 的帧缓冲(1.34MB)关键窗口,
-+ *    避免 ovlloader 小堆上触发 0x559 OutOfMemory;
-+ * 2) 缓冲按实际需要缩容(HTTP 响应按 8KB 流式读,LDN 扫描包 < 2KB)。 */
++/* bsd socket 延迟到首次网络查询才初始化:把 bsd 缓冲分配挪出
++ * initScreen 的帧缓冲关键窗口。注意:bsd:u 服务要经 sm 获取,
++ * 而 Tesla 在 initServices 里 doWithSmSession 结束后就 smExit 了,
++ * 所以这里必须自己包一层 sm 会话(否则 sockets-init FAIL,全盘无网络)。 */
 +static bool g_sockInited = false;
 +static void EnsureSockets() {
 +    if (g_sockInited)
 +        return;
-+    SocketInitConfig cfg = *socketGetDefaultInitConfig();
-+    cfg.tcp_tx_buf_size = 0x4000;
-+    cfg.tcp_rx_buf_size = 0x8000;
-+    cfg.tcp_tx_buf_max_size = 0x10000;
-+    cfg.tcp_rx_buf_max_size = 0x10000;
-+    cfg.udp_tx_buf_size = 0x1400;
-+    cfg.udp_rx_buf_size = 0x4000;
-+    cfg.sb_efficiency = 2;
-+    cfg.num_bsd_sessions = 1;      /* 只有工作线程用 socket */
-+    Result rc = socketInitialize(&cfg);
++    if (R_FAILED(smInitialize())) {
++        MonLog("sockets-init FAIL(sm)");
++        return;
++    }
++    Result rc = socketInitializeDefault();
++    smExit();
 +    g_sockInited = R_SUCCEEDED(rc);
-+    MonLog(g_sockInited ? "sockets-init ok" : "sockets-init FAIL");
++    MonLog(g_sockInited ? "sockets-init ok" : "sockets-init FAIL(bsd)");
 +}
 +
 +/* 堆余量探针:试分配与帧缓冲同量级的块并立即释放。
@@ -1148,8 +1151,11 @@ index 0000000..40d1bef
 +    for (size_t i = 0; i < sizeof(kUrlPrefixes) / sizeof(kUrlPrefixes[0]); i++) {
 +        char url[512];
 +        snprintf(url, sizeof(url), "%s%s", kUrlPrefixes[i], relPath);
-+        if (HttpGet(url, out, 8000, kMaxDownload))
++        if (HttpGet(url, out, 8000, kMaxDownload)) {
++            MonLog("download ok");
 +            return true;
++        }
++        MonLog("download try fail");
 +    }
 +    return false;
 +}
@@ -1852,19 +1858,27 @@ index 0000000..40d1bef
 +                 name[0] ? name : (host[0] ? host : "?"));
 +    }
 +
-+    /* 2. 两个订阅:每次打开都从远程下载,失败退回本地缓存 */
++    /* 2. 两个订阅:每次打开都从远程下载,失败退回本地缓存
++     *    (GitHub 已全网强制 HTTPS,纯 HTTP 客户端运行时拉不动,
++     *     缓存由构建包预置,见根 Makefile PACK;下载成功则刷新) */
 +    std::string serversJson, chineseJson;
 +    bool gotServers = DownloadSubscription(kSubServersPath, &serversJson);
 +    if (gotServers)
 +        SaveFile(kSaveServersPath, serversJson);
-+    else
++    else {
 +        gotServers = LoadFile(kSaveServersPath, &serversJson);
++        if (gotServers)
++            MonLog("servers: use cache");
++    }
 +
 +    bool gotChinese = DownloadSubscription(kSubChinesePath, &chineseJson);
 +    if (gotChinese)
 +        SaveFile(kSaveChinesePath, chineseJson);
-+    else
++    else {
 +        gotChinese = LoadFile(kSaveChinesePath, &chineseJson);
++        if (gotChinese)
++            MonLog("chinese: use cache");
++    }
 +
 +    /* 3. 解析订阅 */
 +    if (gotServers)
