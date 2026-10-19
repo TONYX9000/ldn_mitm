@@ -85,27 +85,30 @@ namespace ams::mitm::ldn::relay {
         int g_count = 0;
 
         /* Factory catalog for RestoreDefaultServers() and the overlay's
-           "add server" page. Ordered by measured latency (2026-10-19,
-           from a Zhejiang/China line): the first MaxServers entries are
-           what a fresh relay.cfg gets. Keep in sync with the shipped
-           relay.cfg. */
+           "add server" page. Ordered by measured UDP PING latency
+           (2026-10-19, Zhejiang/China line): the first MaxServers entries
+           are what a fresh relay.cfg gets. The last entry (yordon.cn) is
+           alive but does not echo PING, so it is a backup. Keep in sync
+           with the shipped relay.cfg. */
         struct BuiltinServer { const char *name; const char *host; u16 port; };
         constexpr BuiltinServer g_builtin[] = {
-            { "China-Guangdong",  "gugu.mulaosi.cn",      11451 },
-            { "China-Zhejiang",   "yordon.cn",            11451 },
-            { "China-Shanghai",   "47.102.121.212",       11451 },
-            { "China-Jiangsu",    "wuaiyi.top",           11451 },
-            { "China-Beijing",    "olunira.fun",          11451 },
-            { "China-Henan",      "srv.jaxlewis.top",     11451 },
-            { "China-Henan-2",    "122.114.8.38",         11451 },
-            { "USA-SanFrancisco", "tekn0.net",            11451 },
-            { "Germany-1",        "erdbeerbaerlp.de",     11451 },
-            { "Denmark-1",        "switch.servegame.com", 11451 },
-            { "Netherlands-1b",   "switch.jayseateam.nl", 11453 },
-            { "Netherlands-1",    "switch.jayseateam.nl", 11451 },
-            { "Netherlands-2",    "switch.r3ps4j.nl",     11452 },
-            { "Netherlands-2b",   "switch.r3ps4j.nl",     11453 },
-            { "USA-2",            "muitxobem-lanplay.ddns.net", 11451 },
+            { "China-Guangdong",   "gugu.mulaosi.cn",      11451 },  /*   9ms */
+            { "China-Guangdong-2", "ns.mulaosi.cn",        11451 },  /*  15ms */
+            { "China-Jiangsu",     "wuaiyi.top",           11451 },  /*  30ms */
+            { "China-Shanghai",    "47.102.121.212",       11451 },  /*  32ms */
+            { "China-Beijing",     "olunira.fun",          11451 },  /*  44ms */
+            { "China-Henan-2",     "122.114.8.38",         11451 },  /*  53ms */
+            { "China-Henan",       "srv.jaxlewis.top",     11451 },  /*  63ms */
+            { "USA-SanFrancisco",  "tekn0.net",            11451 },  /* 158ms */
+            { "Germany-1",         "erdbeerbaerlp.de",     11451 },  /* 193ms */
+            { "Denmark-1",         "switch.servegame.com", 11451 },  /* 195ms */
+            { "Netherlands-2",     "switch.r3ps4j.nl",     11453 },  /* 205ms */
+            { "Netherlands-1",     "switch.jayseateam.nl", 11451 },  /* 210ms */
+            { "Netherlands-1b",    "switch.jayseateam.nl", 11453 },  /* 217ms */
+            { "Netherlands-2b",    "switch.r3ps4j.nl",     11451 },  /* 217ms */
+            { "Netherlands-2c",    "switch.r3ps4j.nl",     11452 },  /* 233ms */
+            { "USA-2",             "muitxobem-lanplay.ddns.net", 11451 }, /* 334ms */
+            { "China-Zhejiang",    "yordon.cn",            11451 },  /* 不回 PING */
         };
         constexpr int BuiltinCount = static_cast<int>(sizeof(g_builtin) / sizeof(g_builtin[0]));
         std::atomic_int  g_selected{0};
@@ -651,10 +654,30 @@ namespace ams::mitm::ldn::relay {
         return g_id_source.load();
     }
 
+    namespace {
+        /* nifmGetCurrentIpAddress needs the global nifm session. Outside a
+           relay session nothing held one, so both the "本机 IP" row and the
+           hardware-derived id stayed empty until the user created a room.
+           Acquire it once, lazily, and keep it for the life of the
+           sysmodule (the session manager's refcount stays balanced). */
+        void EnsureNifmSession() {
+            static std::once_flag once;
+            std::call_once(once, [] {
+                const Result rc = NifmSessionManager::Acquire();
+                if (R_FAILED(rc)) {
+                    LogFormat("relay: nifm acquire for ip lookup failed %x", rc);
+                }
+            });
+        }
+    }
+
     u32 RelayGetLocalIp() {
         u32 ip = 0;
         if (R_FAILED(nifmGetCurrentIpAddress(&ip))) {
-            return 0;
+            EnsureNifmSession();
+            if (R_FAILED(nifmGetCurrentIpAddress(&ip))) {
+                return 0;
+            }
         }
         return ntohl(ip);
     }
@@ -1073,7 +1096,18 @@ namespace ams::mitm::ldn::relay {
     }
 
     u32 RelayGetVirtualAddress() {
-        const u16 id = g_client_id.load();
+        u16 id = g_client_id.load();
+        if (id == 0) {
+            /* Assign the id lazily so the overlay can show the address
+               before a room exists. Only derive it when nifm can tell us the
+               LAN address; otherwise the random fallback would be persisted
+               just because Wi-Fi was not up yet. */
+            EnsureNifmSession();
+            u32 ip = 0;
+            if (R_SUCCEEDED(nifmGetCurrentIpAddress(&ip)) && ip != 0) {
+                id = EnsureClientId();
+            }
+        }
         if (id == 0) {
             return 0;
         }
