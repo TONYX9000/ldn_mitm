@@ -71,8 +71,6 @@ static tsl::elm::ListItem *g_addServerItem = nullptr;
    数据抓取在 monitor.cpp 的后台线程里完成，UI 只拷贝快照。
    GPL-2.0, 来自 Zero（jieluojun/ldn_mitm）的 patch 0010；保留署名与鸣谢。 */
 static bool g_monitor_inited = false;
-static u32 g_monitor_version = 0xFFFFFFFFu;
-static u64 g_monitor_last_poll = 0;
 static tsl::elm::ListItem *g_roomSummaryItem = nullptr;
 
 static void EnsureMonitor() {
@@ -93,6 +91,23 @@ static void GetSelectedServerName(char *out, size_t n) {
         ldnMitmGetRelayServerName(&g_ldnConfig, sel, name);
         snprintf(out, n, "%s", name);
     }
+}
+
+/* 房间功能额外要 ~0.5MB 游戏名库；19.0.1 及以下的旧系统/旧 ovlloader
+   堆太小，打开插件就会崩。旧系统直接隐藏房间入口，其余功能照常。
+   hosversionGet()==0 表示读不到版本，按新系统处理（不误伤）。 */
+static bool RoomsSupported() {
+    const u32 v = hosversionGet();
+    if (v != 0) {
+        return !hosversionBefore(20, 0, 0);
+    }
+    /* 版本读不到时用堆探测兜底：连 600KB 都拿不出来，肯定放不下游戏名库。 */
+    void *probe = malloc(600 * 1024);
+    if (probe == nullptr) {
+        return false;
+    }
+    free(probe);
+    return true;
 }
 
 static void buildList(tsl::elm::List *list);
@@ -153,16 +168,8 @@ public:
         g_list = new RebuildList();
         buildList(g_list);
 
-        // 房间监控：启动后台线程，并向选中的服务器请求一次刷新。
-        // 首帧数据可能还没回来，房间行先显示「查询中…」。
-        EnsureMonitor();
-        MonitorSetTraditional(g_isTraditional);
-        {
-            char sel[32] = {};
-            GetSelectedServerName(sel, sizeof(sel));
-            MonitorRequestRefresh(sel);
-        }
-
+        // 房间监控改为进入房间页时才启动：旧系统（19.0.1 及以下）的
+        // overlay 堆太小，一开主菜单就加载 0.5MB 游戏名库会直接崩。
         frame->setContent(g_list);
 
         // Every item was just created with a bare "*". Force the first
@@ -177,29 +184,6 @@ public:
 
     // Called once every frame to update values
     virtual void update() override {
-        // 房间摘要：每 5 秒轮询一次；快照版本变化时刷新右侧文字。
-        {
-            const u64 now = svcGetSystemTick();
-            if (now - g_monitor_last_poll >= 5ull * 19200000ull) {
-                g_monitor_last_poll = now;
-                MonitorRequestPoll();
-            }
-            static MonitorSnapshot msnap = {};
-            MonitorCopySnapshot(&msnap);
-            if (msnap.version != g_monitor_version && g_roomSummaryItem != nullptr) {
-                g_monitor_version = msnap.version;
-                char v[48];
-                if (msnap.online >= 0) {
-                    snprintf(v, sizeof(v), T("在线 %d · %d 间", "線上 %d · %d 間"),
-                             msnap.online, msnap.roomCount);
-                    g_roomSummaryItem->setValue(v);
-                } else {
-                    g_roomSummaryItem->setValue(
-                        msnap.busy ? T("查询中…", "查詢中…") : T("--", "--"), true);
-                }
-            }
-        }
-
         // Coming back from the add page: the relay list changed while this
         // Gui sat underneath it, so rebuild now that it is on top again.
         if (g_main_list_dirty) {
@@ -372,6 +356,14 @@ public:
     explicit RoomGui(std::string target) : m_target(std::move(target)) {}
 
     virtual tsl::elm::Element* createUI() override {
+        if (!RoomsSupported()) {
+            auto frame = new tsl::elm::OverlayFrame(T("房间列表", "房間列表"), "");
+            auto *list = new tsl::elm::List();
+            list->addItem(new tsl::elm::ListItem(
+                T("旧系统不支持房间查询", "舊系統不支援房間查詢")));
+            frame->setContent(list);
+            return frame;
+        }
         EnsureMonitor();
         MonitorSetTraditional(g_isTraditional);
         char sel[32] = {};
@@ -459,6 +451,14 @@ public:
     ~AllServersGui() override { MonitorAllCancel(); }
 
     virtual tsl::elm::Element* createUI() override {
+        if (!RoomsSupported()) {
+            auto frame = new tsl::elm::OverlayFrame(T("全部服务器", "全部伺服器"), "");
+            auto *list = new tsl::elm::List();
+            list->addItem(new tsl::elm::ListItem(
+                T("旧系统不支持房间查询", "舊系統不支援房間查詢")));
+            frame->setContent(list);
+            return frame;
+        }
         EnsureMonitor();
         MonitorSetTraditional(g_isTraditional);
         MonitorRequestAll(m_scope, false);
@@ -682,29 +682,36 @@ static void buildList(tsl::elm::List *list) {
             }
         }
 
-        // 房间：当前服务器在线人数/房间数，按 A 进房间列表。
+        // 房间：旧系统（19.0.1 及以下）overlay 堆太小，直接隐藏入口。
         list->addItem(new tsl::elm::CategoryHeader(T("房间", "房間")));
-        g_roomSummaryItem = new tsl::elm::ListItem(T("房间列表", "房間列表"));
-        g_roomSummaryItem->setValue(T("查询中…", "查詢中…"), true);
-        g_roomSummaryItem->setClickListener([](u64 keys) {
-            if (keys & HidNpadButton_A) {
-                tsl::changeTo<RoomGui>();
-                return true;
-            }
-            return false;
-        });
-        list->addItem(g_roomSummaryItem);
+        if (RoomsSupported()) {
+            g_roomSummaryItem = new tsl::elm::ListItem(T("房间列表", "房間列表"));
+            g_roomSummaryItem->setValue(T("按 A 查看", "按 A 查看"), true);
+            g_roomSummaryItem->setClickListener([](u64 keys) {
+                if (keys & HidNpadButton_A) {
+                    tsl::changeTo<RoomGui>();
+                    return true;
+                }
+                return false;
+            });
+            list->addItem(g_roomSummaryItem);
 
-        auto *allRoomsItem = new tsl::elm::ListItem(T("全部服务器", "全部伺服器"));
-        allRoomsItem->setValue(T("多服房间总览", "多服房間總覽"), true);
-        allRoomsItem->setClickListener([](u64 keys) {
-            if (keys & HidNpadButton_A) {
-                tsl::changeTo<AllServersGui>();
-                return true;
-            }
-            return false;
-        });
-        list->addItem(allRoomsItem);
+            auto *allRoomsItem = new tsl::elm::ListItem(T("全部服务器", "全部伺服器"));
+            allRoomsItem->setValue(T("多服房间总览", "多服房間總覽"), true);
+            allRoomsItem->setClickListener([](u64 keys) {
+                if (keys & HidNpadButton_A) {
+                    tsl::changeTo<AllServersGui>();
+                    return true;
+                }
+                return false;
+            });
+            list->addItem(allRoomsItem);
+        } else {
+            auto *unsupported = new tsl::elm::ListItem(
+                T("旧系统不支持房间查询", "舊系統不支援房間查詢"));
+            unsupported->setValue(T("19.0.1 及以下", "19.0.1 及以下"), true);
+            list->addItem(unsupported);
+        }
 
         // Undo a mistake without editing relay.cfg on a PC. Two presses on
         // purpose: this rewrites the whole relay list.
