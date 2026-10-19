@@ -1,4 +1,4 @@
-From 604a7c141164296b15c6a0a47cbbf2e2158aaafd Mon Sep 17 00:00:00 2001
+From a77c5403d70065cf0d752b7cc32cd4ba9ddd6398 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH] overlay: online counts/room list and relay management
@@ -8,7 +8,7 @@ Content-Transfer-Encoding: 8bit
 
 联机监视器(0010):
 - 底部按键提示按系统语言显示「返回/确定」(覆盖 libtesla 的英文 Back/OK)
-- 部分游戏将 LDN LocalCommunicationId 写为 FFFFFFFFFFFFFFFF(auto sentinel);按每个房间自己的 advertiseData 识别 Dragon Ball FighterZ、Rocket League、MONSTER HUNTER RISE、Monster Hunter Stories 2 与 Minecraft 的标题 ID;未知模式安全显示「未知游戏」,不再用本机前台 ProgramId 误标远端房间
+- 部分游戏将 LDN LocalCommunicationId 写为 FFFFFFFFFFFFFFFF(auto sentinel);按每个房间自己的 advertiseData 识别 Dragon Ball FighterZ、Rocket League、MONSTER HUNTER RISE、Monster Hunter Stories 2、Minecraft 与 Pokémon Scarlet/Violet;S/V 校验 132 字节 Pia+游戏数据,覆盖搜索变化字段、无密码/链接码及 Union Circle 已知形态;两版本都广告 Scarlet 通信 ID,all-F 房间显示「宝可梦 朱/紫」而不猜具体版;未知模式安全回退且不读取本机前台 ProgramId
 - 标题下方两列统计:标签「在线/房间」在上、数字在下;刷新 1s 一次,
   与延迟 ping(sysmodule RelayPingIntervalMs)同节奏,仅可见时轮询,
   周期刷新不重拉订阅、不改目标
@@ -114,6 +114,31 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
 服务器切换后的房间快照错位修复（反馈）：
 - 每次打开刷新或切换目标时更新请求代次，并立即把已发布的房间列表与新选择解绑、清空；
 - 单 worker 的旧服务器查询返回后，若请求代次已过期，则不写入房间缓存、在线/房间数或快照，避免把旧结果显示到新服务器下；新增纯主机 generation gate 回归测试。
+---
+ .github/workflows/beta.yml                    |   16 +-
+ .github/workflows/build.yml                   |   34 +-
+ .github/workflows/nightly.yml                 |   37 +-
+ .github/workflows/release.yml                 |   44 +-
+ Makefile                                      |    6 +
+ overlay/Makefile                              |    9 +-
+ overlay/source/main.cpp                       | 1029 ++++++-
+ overlay/source/monitor.cpp                    | 2435 +++++++++++++++++
+ overlay/source/monitor.hpp                    |   71 +
+ overlay/source/monitor_player_filter.hpp      |   32 +
+ overlay/source/monitor_target_generation.hpp  |   22 +
+ overlay/source/monitor_title_resolver.hpp     |  240 ++
+ overlay/tests/monitor_player_filter_test.cpp  |   29 +
+ .../tests/monitor_target_generation_test.cpp  |   22 +
+ overlay/tests/monitor_title_resolver_test.cpp |  119 +
+ 15 files changed, 3987 insertions(+), 158 deletions(-)
+ create mode 100644 overlay/source/monitor.cpp
+ create mode 100644 overlay/source/monitor.hpp
+ create mode 100644 overlay/source/monitor_player_filter.hpp
+ create mode 100644 overlay/source/monitor_target_generation.hpp
+ create mode 100644 overlay/source/monitor_title_resolver.hpp
+ create mode 100644 overlay/tests/monitor_player_filter_test.cpp
+ create mode 100644 overlay/tests/monitor_target_generation_test.cpp
+ create mode 100644 overlay/tests/monitor_title_resolver_test.cpp
 
 diff --git a/.github/workflows/beta.yml b/.github/workflows/beta.yml
 index e61dc52..9c225b0 100644
@@ -1504,10 +1529,10 @@ index 8e07c19..8eea790 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..4e82f4c
+index 0000000..c61cd6d
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2429 @@
+@@ -0,0 +1,2435 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -2981,6 +3006,12 @@ index 0000000..4e82f4c
 +            snprintf(out, n, "%s", T_STR("未知游戏", "未知遊戲"));
 +            return;
 +        }
++        /* Violet also advertises Scarlet's communication ID, so the room
++         * payload identifies the shared Scarlet/Violet family, not a version. */
++        if (strcmp(resolved, "0100A3D008C5C000") == 0) {
++            snprintf(out, n, "%s", T_STR("宝可梦 朱/紫", "寶可夢 朱/紫"));
++            return;
++        }
 +        snprintf(up, sizeof(up), "%s", resolved);
 +    }
 +
@@ -4082,10 +4113,10 @@ index 0000000..a0a3d78
 +} // namespace MonitorTargetGeneration
 diff --git a/overlay/source/monitor_title_resolver.hpp b/overlay/source/monitor_title_resolver.hpp
 new file mode 100644
-index 0000000..d0ac8cc
+index 0000000..78a358e
 --- /dev/null
 +++ b/overlay/source/monitor_title_resolver.hpp
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,240 @@
 +#pragma once
 +
 +#include <stddef.h>
@@ -4164,6 +4195,95 @@ index 0000000..d0ac8cc
 +    return true;
 +}
 +
++inline unsigned char AdvertiseByte(const char *hex, size_t byteOffset) {
++    const size_t i = byteOffset * 2;
++    return (unsigned char)((HexDigit(hex[i]) << 4) | HexDigit(hex[i + 1]));
++}
++
++inline bool AdvertiseBytesAreZero(const char *hex, size_t startByte,
++                                  size_t byteCount) {
++    for (size_t i = 0; i < byteCount; ++i) {
++        if (AdvertiseByte(hex, startByte + i) != 0)
++            return false;
++    }
++    return true;
++}
++
++/* S/V carries 40 game bytes after its 0x5c-byte Pia property header.
++ * Retail Link Trade search beacons have all-zero game bytes or a changing
++ * four-byte field at +0x21. Link-Code sessions store a printable code at
++ * +0x00 and its little-endian length at +0x24; Union Circle uses the observed
++ * aa 08 3e marker at +0x21. Keep this check narrow so unrelated Pia payloads
++ * fall back to unknown rather than being mislabeled. */
++inline bool IsPokemonScarletVioletGameData(const char *hex) {
++    static constexpr size_t kGameStart = 0x5c;
++    static constexpr size_t kGameSize = 40;
++
++    if (AdvertiseBytesAreZero(hex, kGameStart, kGameSize))
++        return true;
++
++    /* Searching Link Trade beacon: changing bytes at game-data +0x21..+0x24. */
++    if (AdvertiseBytesAreZero(hex, kGameStart, 0x21) &&
++        !AdvertiseBytesAreZero(hex, kGameStart + 0x21, 4) &&
++        AdvertiseBytesAreZero(hex, kGameStart + 0x25, 3))
++        return true;
++
++    /* Link Code sessions use a printable code and a little-endian u32 length. */
++    const unsigned int codeLen =
++        (unsigned int)AdvertiseByte(hex, kGameStart + 0x24) |
++        ((unsigned int)AdvertiseByte(hex, kGameStart + 0x25) << 8) |
++        ((unsigned int)AdvertiseByte(hex, kGameStart + 0x26) << 16) |
++        ((unsigned int)AdvertiseByte(hex, kGameStart + 0x27) << 24);
++    if (codeLen == 0) {
++        /* Also allow an open Union Circle with its observed marker. */
++        return AdvertiseBytesAreZero(hex, kGameStart, 0x21) &&
++               AdvertiseByte(hex, kGameStart + 0x21) == 0xaa &&
++               AdvertiseByte(hex, kGameStart + 0x22) == 0x08 &&
++               AdvertiseByte(hex, kGameStart + 0x23) == 0x3e &&
++               AdvertiseBytesAreZero(hex, kGameStart + 0x24, 4);
++    }
++    if (codeLen > 16)
++        return false;
++
++    for (size_t i = 0; i < codeLen; ++i) {
++        const unsigned char c = AdvertiseByte(hex, kGameStart + i);
++        if (c < 0x21 || c > 0x7e)
++            return false;
++    }
++    if (!AdvertiseBytesAreZero(hex, kGameStart + codeLen, 0x21 - codeLen))
++        return false;
++
++    const bool noModeMarker =
++        AdvertiseBytesAreZero(hex, kGameStart + 0x21, 3);
++    const bool unionCircleMarker =
++        AdvertiseByte(hex, kGameStart + 0x21) == 0xaa &&
++        AdvertiseByte(hex, kGameStart + 0x22) == 0x08 &&
++        AdvertiseByte(hex, kGameStart + 0x23) == 0x3e;
++    return (noModeMarker || unionCircleMarker) &&
++           AdvertiseByte(hex, kGameStart + 0x24) == codeLen &&
++           AdvertiseBytesAreZero(hex, kGameStart + 0x25, 3);
++}
++
++/* Scarlet and Violet share Scarlet's local-communication ID on the air.
++ * Their 132-byte app data is a 0x5c Pia block plus 40 game-specific bytes. */
++inline bool IsPokemonScarletVioletAdvertiseHex(const char *hex, size_t hexLen) {
++    static constexpr size_t kAdvertiseBytes = 132;
++    if (!hex || hexLen != kAdvertiseBytes * 2 ||
++        memcmp(hex, "005c150015", 10) != 0)
++        return false;
++
++    /* Pia header: player limit enabled, 1-4 players, UTF-8 single-space name. */
++    if (AdvertiseByte(hex, 0x15) != 1 ||
++        AdvertiseByte(hex, 0x16) < 1 || AdvertiseByte(hex, 0x16) > 4 ||
++        AdvertiseByte(hex, 0x17) != 0 || AdvertiseByte(hex, 0x18) != 0 ||
++        AdvertiseByte(hex, 0x19) != 0 || AdvertiseByte(hex, 0x1a) != 1 ||
++        AdvertiseByte(hex, 0x1b) != 1 || AdvertiseByte(hex, 0x1c) != 0x20 ||
++        !AdvertiseBytesAreZero(hex, 0x1d, 0x5c - 0x1d))
++        return false;
++
++    return IsPokemonScarletVioletGameData(hex);
++}
++
 +/* Returns false when the advertisement is absent or does not match a known
 + * signature. The caller must then show the safe unknown-game fallback. */
 +inline bool ResolveAdvertisedTitleId(const char *advertiseData,
@@ -4187,6 +4307,9 @@ index 0000000..d0ac8cc
 +    if (hexLen >= 4 && hex[0] == '7' && hex[1] == 'b' &&
 +        hex[hexLen - 2] == '7' && hex[hexLen - 1] == 'd')
 +        return CopyTitleId("01005EE0036EC000", outTitleId, outN);
++
++    if (IsPokemonScarletVioletAdvertiseHex(hex, hexLen))
++        return CopyTitleId("0100A3D008C5C000", outTitleId, outN);
 +
 +    static const char kDelimiter[] = "00000004";
 +    const size_t delimiterLen = sizeof(kDelimiter) - 1;
@@ -4299,15 +4422,16 @@ index 0000000..a0e003f
 +}
 diff --git a/overlay/tests/monitor_title_resolver_test.cpp b/overlay/tests/monitor_title_resolver_test.cpp
 new file mode 100644
-index 0000000..f716702
+index 0000000..ef795dc
 --- /dev/null
 +++ b/overlay/tests/monitor_title_resolver_test.cpp
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,119 @@
 +#include "../source/monitor_title_resolver.hpp"
 +
 +#include <assert.h>
 +#include <string.h>
 +
++using MonitorTitleResolver::kAdvertiseDataMaxHex;
 +using MonitorTitleResolver::ResolveAdvertisedTitleId;
 +
 +static void ExpectResolved(const char *advertiseData, const char *hostName,
@@ -4323,6 +4447,55 @@ index 0000000..f716702
 +    assert(!ResolveAdvertisedTitleId(advertiseData, hostName,
 +                                     titleId, sizeof(titleId)));
 +    assert(titleId[0] == 0);
++}
++
++static void SetByte(char *hex, size_t byteOffset, unsigned char value) {
++    static const char digits[] = "0123456789abcdef";
++    hex[byteOffset * 2] = digits[value >> 4];
++    hex[byteOffset * 2 + 1] = digits[value & 0x0f];
++}
++
++/* Build the documented 132-byte Scarlet/Violet application-data shape:
++ * 0x5c-byte Pia header plus the game's 40 bytes. mode 0 = no code, mode 1 =
++ * changing trade-search value, mode 2 = Link Code, mode 3 = Union Circle. */
++static void BuildScarletVioletAdvertiseData(char *hex, size_t hexSize, int mode) {
++    static const size_t kBytes = 132;
++    assert(hexSize >= kBytes * 2 + 1);
++    memset(hex, '0', kBytes * 2);
++    hex[kBytes * 2] = 0;
++
++    SetByte(hex, 0, 0x00);
++    SetByte(hex, 1, 0x5c);
++    SetByte(hex, 2, 0x15); // system communication version
++    SetByte(hex, 3, 0x00);
++    SetByte(hex, 4, 0x15); // application communication version
++    SetByte(hex, 0x15, 1); // player limit enabled
++    SetByte(hex, 0x16, 1); // one participant
++    SetByte(hex, 0x17, 0);
++    SetByte(hex, 0x18, 0);
++    SetByte(hex, 0x19, 0);
++    SetByte(hex, 0x1a, 1); // one-byte nickname
++    SetByte(hex, 0x1b, 1); // UTF-8
++    SetByte(hex, 0x1c, 0x20); // the published nickname is one space
++
++    const size_t game = 0x5c;
++    if (mode == 1) {
++        SetByte(hex, game + 0x21, 0xfb);
++        SetByte(hex, game + 0x22, 0x14);
++        SetByte(hex, game + 0x23, 0x97);
++        SetByte(hex, game + 0x24, 0x00);
++    } else if (mode == 2 || mode == 3) {
++        SetByte(hex, game + 0, '1');
++        SetByte(hex, game + 1, '2');
++        SetByte(hex, game + 2, '3');
++        SetByte(hex, game + 3, '4');
++        if (mode == 3) {
++            SetByte(hex, game + 0x21, 0xaa);
++            SetByte(hex, game + 0x22, 0x08);
++            SetByte(hex, game + 0x23, 0x3e);
++        }
++        SetByte(hex, game + 0x24, 4); // little-endian code length
++    }
 +}
 +
 +int main() {
@@ -4341,6 +4514,13 @@ index 0000000..f716702
 +    ExpectResolved("00112233445566778899aabbccddeeff4d6961", "Mia",
 +                   "0100D71004694000");
 +
++    /* Scarlet and Violet use Scarlet's local-communication ID on both builds. */
++    char sv[kAdvertiseDataMaxHex + 1] = {};
++    for (int mode = 0; mode < 4; ++mode) {
++        BuildScarletVioletAdvertiseData(sv, sizeof(sv), mode);
++        ExpectResolved(sv, nullptr, "0100A3D008C5C000");
++    }
++
 +    /* Case/spacing normalization is harmless, while partial signatures are
 +     * not promoted to a title. Unknown sentinels must remain unknown. */
 +    ExpectResolved("FF FF 00 00", nullptr, "0100A250097F0000");
@@ -4350,8 +4530,18 @@ index 0000000..f716702
 +                     nullptr); // Rise signature is missing its second delimiter.
 +    ExpectUnresolved("00112233445566778899aabbccddeeff4d6961", "Not-Mia");
 +    ExpectUnresolved("11223344", nullptr);
++
++    BuildScarletVioletAdvertiseData(sv, sizeof(sv), 0);
++    SetByte(sv, 2, 0x14); // wrong Pia system version
++    ExpectUnresolved(sv, nullptr);
++    BuildScarletVioletAdvertiseData(sv, sizeof(sv), 0);
++    SetByte(sv, 0x1c, 'A'); // unexpected nickname
++    ExpectUnresolved(sv, nullptr);
++    BuildScarletVioletAdvertiseData(sv, sizeof(sv), 0);
++    SetByte(sv, 0x5c + 10, 0xaa); // unknown game-data shape
++    ExpectUnresolved(sv, nullptr);
++    BuildScarletVioletAdvertiseData(sv, sizeof(sv), 0);
++    strcat(sv, "00"); // app-data size is not 132 bytes
++    ExpectUnresolved(sv, nullptr);
 +    return 0;
 +}
--- 
-2.47.3
-
