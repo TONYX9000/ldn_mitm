@@ -1,4 +1,4 @@
-From c0fd175f3c14865da5e333b98a03fd34e435c039 Mon Sep 17 00:00:00 2001
+From 604a7c141164296b15c6a0a47cbbf2e2158aaafd Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH] overlay: online counts/room list and relay management
@@ -116,18 +116,17 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
 - 单 worker 的旧服务器查询返回后，若请求代次已过期，则不写入房间缓存、在线/房间数或快照，避免把旧结果显示到新服务器下；新增纯主机 generation gate 回归测试。
 
 diff --git a/.github/workflows/beta.yml b/.github/workflows/beta.yml
-index 3c7281c..9c225b0 100644
+index e61dc52..9c225b0 100644
 --- a/.github/workflows/beta.yml
 +++ b/.github/workflows/beta.yml
-@@ -118,6 +118,26 @@ jobs:
-           make install
-           popd
+@@ -120,9 +120,23 @@ jobs:
  
-+      - name: Install switch-curl (订阅 HTTPS 下载)
-+        run: |
+       - name: Install switch-curl (订阅 HTTPS 下载)
+         run: |
 +          set -euo pipefail
-+          # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
-+          # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
+           # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
+           # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
+-          dkp-pacman -Sy --noconfirm switch-curl
 +          if dkp-pacman -Q switch-curl >/dev/null 2>&1; then
 +            echo "switch-curl already installed"
 +          else
@@ -142,10 +141,9 @@ index 3c7281c..9c225b0 100644
 +            echo "::error::Required package switch-curl is not installed."
 +            exit 1
 +          fi
-+
+ 
        - name: Build
          id: build
-         run: make -j8 PREFIX="ccache aarch64-none-elf-"
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
 index 3d7bc8b..b37dab7 100644
 --- a/.github/workflows/build.yml
