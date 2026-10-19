@@ -1,4 +1,4 @@
-From ee112dc009c0c0c92309643f6e7acd57ad6068b3 Mon Sep 17 00:00:00 2001
+From decd01f54e4234d1b2a5755d406add83dcb2f3eb Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Sun, 18 Oct 2026 14:28:50 +0000
 Subject: [PATCH] =?UTF-8?q?overlay:=20=E6=98=BE=E7=A4=BA=E6=89=80=E9=80=89?=
@@ -74,16 +74,19 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
 - overlay/Makefile 补齐 $(PORTLIBS)/include(CI 编译找不到 curl/curl.h
   即「构建报错」根因)与 -lcurl -lz(链接缺库);诊断日志加
   subs-start/curl-try/curl-done,再有崩溃日志即可钉死窗口
+- 删掉 main.cpp 的 #include <arm/counter.h>(错误路径:libnx 里是
+  switch/arm/counter.h,且 <switch.h> 本就传递包含;真实 CI 硬错误
+  fatal error: arm/counter.h: No such file or directory)
 ---
  .github/workflows/build.yml   |   20 +-
  .github/workflows/nightly.yml |   23 +-
  .github/workflows/release.yml |   30 +-
  Makefile                      |    6 +
  overlay/Makefile              |    9 +-
- overlay/source/main.cpp       |  634 +++++++++-
+ overlay/source/main.cpp       |  633 +++++++++-
  overlay/source/monitor.cpp    | 2068 +++++++++++++++++++++++++++++++++
  overlay/source/monitor.hpp    |   71 ++
- 8 files changed, 2796 insertions(+), 65 deletions(-)
+ 8 files changed, 2795 insertions(+), 65 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
 
@@ -269,21 +272,19 @@ index e2cdc19..891ccd1 100644
  #---------------------------------------------------------------------------------
  # list of directories containing libraries, this must be the top level containing
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..6361895 100644
+index 8e07c19..affa57b 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
-@@ -1,7 +1,10 @@
+@@ -1,6 +1,8 @@
  #define TESLA_INIT_IMPL // If you have more than one file using the tesla header, only define this in the main one
  #include <tesla.hpp>    // The Tesla Header
  #include "ldn.h"
 +#include "monitor.hpp"
 +#include <functional>
  #include <vector>
-+#include <arm/counter.h>
  
  enum class State {
-     Uninit,
-@@ -18,7 +21,8 @@ char g_version[32];
+@@ -18,7 +20,8 @@ char g_version[32];
     OverlayFrame keeps the pointer instead of copying it. */
  char g_brand[64] = "阿东版";   // overwritten by detectLanguage() at startup
  
@@ -293,7 +294,7 @@ index 8e07c19..6361895 100644
  
  /* Latency value currently painted on the server rows. Lives at file scope
     rather than as a function-local static so createUI() can invalidate it:
-@@ -26,6 +30,12 @@ std::vector<tsl::elm::ListItem*> g_serverItems;
+@@ -26,6 +29,12 @@ std::vector<tsl::elm::ListItem*> g_serverItems;
     painting them entirely. */
  u32 g_shown_latency = 0xFFFFFFFFu;
  
@@ -306,7 +307,7 @@ index 8e07c19..6361895 100644
  /* Traditional / Simplified Chinese switch. The overlay used to hardcode
     Simplified strings, which left Traditional Chinese consoles with the
     wrong glyphs. libtesla already loads both CJK shared fonts, so all we
-@@ -34,6 +44,416 @@ static bool g_isTraditional = false;
+@@ -34,6 +43,416 @@ static bool g_isTraditional = false;
  
  #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
  
@@ -723,7 +724,7 @@ index 8e07c19..6361895 100644
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -70,18 +490,82 @@ static void detectLanguage()
+@@ -70,18 +489,82 @@ static void detectLanguage()
      strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
  }
  
@@ -807,7 +808,7 @@ index 8e07c19..6361895 100644
  
          if (g_state == State::Error) {
              list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
-@@ -95,43 +579,68 @@ public:
+@@ -95,43 +578,68 @@ public:
              list->addItem(new tsl::elm::CategoryHeader(T("互联网中继（跨网联机）", "網際網路中繼（跨網連線）")));
              list->addItem(new ConfigToggleListItem(T("互联网中继", "網際網路中繼"), ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
  
@@ -908,7 +909,7 @@ index 8e07c19..6361895 100644
                  }
              }
  
-@@ -211,16 +720,40 @@ public:
+@@ -211,16 +719,40 @@ public:
          // cached value made update() return early and the label stayed at
          // just "*" with no "--" and no number.
          g_shown_latency = 0xFFFFFFFFu;
@@ -950,7 +951,7 @@ index 8e07c19..6361895 100644
              return;
          }
          u32 ms = 0;
-@@ -233,9 +766,8 @@ public:
+@@ -233,9 +765,8 @@ public:
          }
          g_shown_latency = ms;
  
@@ -962,7 +963,7 @@ index 8e07c19..6361895 100644
          char buf[48];
          bool faint = false;
          if (ms == 0) {
-@@ -247,9 +779,9 @@ public:
+@@ -247,9 +778,9 @@ public:
          } else {
              snprintf(buf, sizeof(buf), T("* 延迟 %ums", "* 延遲 %ums"), ms);
          }
@@ -975,7 +976,7 @@ index 8e07c19..6361895 100644
              }
          }
      }
-@@ -265,9 +797,14 @@ public:
+@@ -265,9 +796,14 @@ public:
      virtual void initServices() override {
          g_state = State::Uninit;
          detectLanguage();
@@ -990,7 +991,7 @@ index 8e07c19..6361895 100644
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,14 +825,25 @@ public:
+@@ -288,14 +824,25 @@ public:
              g_state = State::Loaded;
          });
  
