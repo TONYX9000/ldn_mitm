@@ -1,30 +1,26 @@
 From: Patch Port <port@local>
-Subject: [PATCH 00/09] 将 beta/bsd-broadcast-relay-TONYX9000 分支移植到本仓库
+Subject: [PATCH 00/10] 维护 TONYX9000 relay 分支移植补丁及 overlay 监视器
 
-将 aylz10/ldn_mitm2 的 beta/bsd-broadcast-relay-TONYX9000 分支
-(bsd 广播中继 / LDN 互联网中继)以补丁形式移植到本仓库
-(jieluojun/ldn_mitm,基线 9a2639e)。
+本次继续维护现有补丁编号，不新增补丁：修复无 tag 构建时 overlay 版本串为空，并把 aylz10/ldn_mitm2 的
+beta/bsd-broadcast-relay-TONYX9000 分支后续服务器管理改动合并进现有 0009/0010。
 
-原分支 43 个提交(其中 16 个为同标题连续开发提交)整理为 9 个
-逻辑补丁;C++ 源码、tools、docs、config 与分支 tip 逐字节一致。
-相对分支 tip 的有意差异:
-- 不改动 Atmosphere-libs 子模块指针(保持 82f1553;分支自带的
-  docs/ domain-id 补丁实测对该版本可干净应用)
-- CI 工作流在本 fork 版本上适配:保留 upload-artifact@v7 与
-  libnx-master 预装策略,新增镜像固定、fetch-depth、safe.directory、
-  include-hidden-files 等功能所需改动
-- README 夜间构建链接指向本 fork,并保留本 fork 更新的版本表
+0001–0009 为原分支 43 个提交整理出的 9 个逻辑补丁；0010 为既有的 overlay 联机监视器补丁。
+本次更新后：
+- 0002/0006：版本生成命令在没有可描述 tag 时回退到 commit 短哈希，并保留 -dirty 标记。
+- 0004/0008：保留服务器容量上限 32 与配置模板修改。
+- 0009：保留 PING 修复和精确的 13 条默认服务器配置；新增分支服务器管理 IPC、17 条内置候选目录与 idle 延迟预览。恢复默认仍是原有 13 条，selected=中国·河南；4 条备用候选只进入内置目录。荷兰名称保持“荷兰”/“荷兰(2)”。
+- 0010：整合添加/删除/恢复服务器页及列表重建/焦点恢复，同时保留 MonitorFrame、RoomRow、自绘 ServerRow、在线/房间间距、标题 ID 回退和 monitor.cpp 修正。
 
-应用方法(已在全新克隆的 9a2639e 基线上验证无冲突):
+目标分支 tip：0b83cd3f17f14058d5fdabcdb7dec1faa13ede9d。
+为适配本仓库，仍不改 Atmosphere-libs 子模块指针；CI 相关改动继续放在既有 0010 内，不增加新编号。
+
+应用方法（在基线 9a2639eff5b2e60065be3dfae69c46de6c3d7648 上）：
 
   git checkout master
-  git am 000[1-9]-*.patch
+  git am 000[1-9]-*.patch 0010-*.patch
 
-说明:0006 中 .github/workflows/release.yml 为二进制增量(原文件是
-CRLF 行尾,转为 LF 的整文件重写),以保证 git am 默认行为可正确应用。
-
-构建注意事项(devkitA64 r29.2 / gcc 15.2.0、Atmosphere-libs 补丁、
-ldn_mitm.ovl 更名等)见随附的 移植说明.md。
+0006 中 .github/workflows/release.yml 的原文件为 CRLF；该补丁已按可供 git am 正常应用的 LF 形式维护。
+构建需使用兼容的 devkitA64 工具链；overlay 版本串在无 tag 时显示 commit 短哈希，不再为空。
 ---
  base-commit: 9a2639eff5b2e60065be3dfae69c46de6c3d7648
  prerequisite-patches: none
@@ -37,14 +33,5 @@ ldn_mitm.ovl 更名等)见随附的 移植说明.md。
  0006 build, CI and docs for the relay; relay test tool
  0007 relay/ldn: thread-safe transport, bound-port wakeups, lp2p refusal, hardened joins
  0008 overlay: zh-Hans/zh-Hant UI, live relay ping, latency and virtual address
- 0009 relay: fix PING payload length so 2.0/3.0 servers report latency
-
--- 
-2.47.3
-
-补注(2026-10-18/19):系列交付后追加 0010 联机监视器补丁
-(overlay: 显示所选服务器的在线人数/房间数量与游戏房间列表,
-内含 CI 适配最新系统修复:构建前 Atmosphere-libs 顶到 master +
-libnx master 配套;及内存优化:修复 ovlloader 0x559 OutOfMemory),
-新增内容,非本移植系列的上游提交,作者 Patch Port。
-应用时将 0010-*.patch 一并 git am 即可,共 10 个补丁。
+ 0009 relay: fix PING payload and merge relay server management/catalog
+ 0010 overlay: merge relay management UI with online/room/game-room monitor

@@ -14,8 +14,9 @@ Content-Transfer-Encoding: 8bit
   对象镜像目标服务的 object id,避免 domain id 冲突
 - 顶层 Makefile 增加 atmosphere-patch 目标,构建前自动对 Atmosphere-libs
   工作树打补丁(幂等)
-- ldn_mitm/Makefile 与 overlay/Makefile 的 -dirty 标记忽略子模块
-  (Atmosphere-libs 工作树因补丁而脏)
+- ldn_mitm/Makefile 与 overlay/Makefile 的版本串在无 tag 时回退到
+  commit 短哈希,并让 -dirty 标记忽略子模块(Atmosphere-libs 工作树
+  因补丁而脏),避免 overlay 版本显示为空
 
 Squashed from aylz10/ldn_mitm2 commit 6fa180f (author: dogty).
 
@@ -387,7 +388,7 @@ index 34f7334..c6ed71f 100644
  #---------------------------------------------------------------------------------
 -TARGET_VERSION := $(shell git describe --tags --dirty)
 +# Ignore submodules for -dirty: Atmosphere-libs carries the docs/ patch.
-+TARGET_VERSION := $(shell git describe --tags)$(shell git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)
++TARGET_VERSION := $(shell git describe --tags --always 2>/dev/null || echo unknown)$(shell git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)
  
  #---------------------------------------------------------------------------------
  # options for code generation
@@ -401,7 +402,7 @@ index e75d4f1..e2cdc19 100644
  #---------------------------------------------------------------------------------
 -TARGET_VERSION := $(shell git describe --tags --dirty)
 +# Ignore submodule state for the dirty flag (see ldn_mitm/Makefile).
-+TARGET_VERSION := $(shell git describe --tags)$(shell git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)
++TARGET_VERSION := $(shell git describe --tags --always 2>/dev/null || echo unknown)$(shell git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)
  VERSION_DEFINES	:= -DGITDESCVER="\"${TARGET_VERSION}\""
  
  APP_TITLE	:=	ldn_mitm

@@ -14,7 +14,7 @@ upload-artifact@v7):
   LDN 会话结束时死机,需 devkitA64 r29.2 / gcc 15.2.0);PACK 增加
   ldn_mitm.ovl 与 relay.cfg 的打包(见后续 overlay 提交)
 - CI:固定 devkitpro/devkita64:20260219 镜像;checkout fetch-depth: 0
-  (git describe 需要标签与完整历史);容器内 git safe.directory;
+  (优先显示 tag,无 tag 时回退 commit 短哈希);容器内 git safe.directory;
   build.yml 增加工具链版本诊断;sdcard 产物 include-hidden-files
   (switch/.overlays 默认会被跳过);nightly 增加 workflow_dispatch
 - release.yml:采用上游修复(permissions: contents:write、
@@ -73,7 +73,7 @@ index 8be8bd5..55e5970 100644
 +          "${DEVKITPRO:-/opt/devkitpro}/devkitA64/bin/aarch64-none-elf-gcc" --version | head -1 || true
 +          git --version || true
 +          echo "version string this build will stamp:"
-+          echo "  $(git describe --tags 2>/dev/null)$(git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)"
++          echo "  $(git describe --tags --always 2>/dev/null || echo unknown)$(git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)"
 +          exit 0
  
        - name: Setup ccache
@@ -309,7 +309,7 @@ diff --git a/ldn_mitm/Makefile b/ldn_mitm/Makefile
 index c6ed71f..7590d0e 100644
 --- a/ldn_mitm/Makefile
 +++ b/ldn_mitm/Makefile
-@@ -14,9 +14,10 @@ TARGET_VERSION := $(shell git describe --tags)$(shell git diff --quiet --ignore-
+@@ -14,9 +14,10 @@ TARGET_VERSION := $(shell git describe --tags --always 2>/dev/null || echo unknown)$(shell git diff --quiet --ignore-
  #---------------------------------------------------------------------------------
  VERSION_DEFINES	:= -DGITDESCVER="\"${TARGET_VERSION}\""
  
