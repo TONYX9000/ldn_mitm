@@ -747,7 +747,10 @@ public:
                 g_lastPollNs = nowNs;
             if (nowNs - g_lastPollNs >= 3000000000ull) {
                 g_lastPollNs = nowNs;
-                MonitorRequestPoll();
+                /* 一次查询(含 UDP 扫描)常常超过 1 秒,忙时跳过这一拍,
+                 * 否则请求首尾相接、日志刷屏,界面也永远停在「正在查询…」。 */
+                if (!MonitorIsBusy())
+                    MonitorRequestPoll();
             }
         }
         // 服务器行右侧三列「在线 / 房间 / 延迟」:每一行都显示。

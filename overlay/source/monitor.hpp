@@ -78,10 +78,14 @@ u32 MonitorListServerStats(MonitorServerStat *out, u32 max);
  * 非阻塞;完成后 MonitorCopySnapshot 里的 version 会 +1。
  * Refresh = 开盖:改目标 + 重新拉订阅缓存;
  * Switch  = 切换服务器:改目标,不拉订阅;
- * Poll    = 周期刷新(与延迟 ping 同节奏):不动目标、不拉订阅。 */
+ * Poll    = 周期刷新(与延迟 ping 同节奏):不动目标、不拉订阅,
+ *           也不把界面切到「正在查询…」(结果出来才更新)。 */
 void MonitorRequestRefresh(const char *serverName);
 void MonitorRequestSwitch(const char *serverName);
 void MonitorRequestPoll();
+
+/* 后台线程是否正在执行一次查询:界面轮询用它在忙时跳过一拍。 */
+bool MonitorIsBusy();
 
 /* 取当前快照的副本。 */
 void MonitorCopySnapshot(MonitorSnapshot *out);
