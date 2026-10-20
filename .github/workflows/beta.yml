@@ -33,6 +33,10 @@ jobs:
       # 症状为 LDN 会话结束时主机死机(顶层 Makefile 亦有告警)。
       image: devkitpro/devkita64:20260219
 
+    # 产物要推回 builds 分支(artifact 的 Azure 下载域名国内常被掐)
+    permissions:
+      contents: write
+
     defaults:
       run:
         shell: bash
@@ -166,3 +170,22 @@ jobs:
         with:
           name: overlay.elf
           path: overlay/overlay.elf
+
+      # artifact 的下载地址是 productionresultssa*.blob.core.windows.net,
+      # 国内 TLS 经常直接被掐。把 out/sd 推到 builds 分支,
+      # 本地改走 raw.githubusercontent.com(该域名可达)取文件。
+      - name: Publish sdcard to builds branch
+        if: success()
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p /tmp/pub
+          cp -a out/sd/. /tmp/pub/
+          git checkout --orphan ci-builds
+          git rm -rf --cached . >/dev/null 2>&1 || true
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -a /tmp/pub/. .
+          git add -A
+          git commit -m "ci: sdcard from ${GITHUB_SHA}" || true
+          git push --force origin HEAD:builds
