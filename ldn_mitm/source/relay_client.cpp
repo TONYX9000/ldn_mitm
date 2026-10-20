@@ -111,21 +111,25 @@ namespace ams::mitm::ldn::relay {
         };
         constexpr int BuiltinCount = static_cast<int>(sizeof(g_builtin) / sizeof(g_builtin[0]));
 
-        /* Exact factory relay.cfg shipped by patch 0009. Keep order, names,
-           and selected=中国·河南 (index zero) stable across "restore". */
+        /* Exact factory relay.cfg shipped by patch 0009. Keep names and order;selected defaults to index zero (中国·广东). */
         constexpr BuiltinServer g_defaultServers[] = {
-            { "中国·河南",       "srv.jaxlewis.top",               11451 },
-            { "中国·河南(2)",    "122.114.8.38",                   11451 },
             { "中国·广东",       "gugu.mulaosi.cn",                11451 },
+            { "中国·广东(2)",    "ns.mulaosi.cn",                  11451 },
             { "中国·江苏",       "wuaiyi.top",                     11451 },
-            { "中国·北京",       "olunira.fun",                    11451 },
             { "中国·上海",       "47.102.121.212",                 11451 },
-            { "中国·丹麦",       "switch.r3ps4j.nl",               11452 },
+            { "中国·北京",       "olunira.fun",                    11451 },
+            { "中国·河南(2)",    "122.114.8.38",                   11451 },
+            { "中国·河南",       "srv.jaxlewis.top",               11451 },
             { "美国",            "tekn0.net",                      11451 },
-            { "美国(2)",         "muitxobem-lanplay.ddns.net",     11451 },
+            { "德国·萨克森",     "erdbeerbaerlp.de",               11451 },
+            { "丹麦",            "switch.servegame.com",           11451 },
+            { "荷兰(3)",         "switch.r3ps4j.nl",               11453 },
             { "荷兰",            "switch.jayseateam.nl",           11451 },
             { "荷兰(2)",         "switch.jayseateam.nl",           11453 },
-            { "德国·萨克森",     "erdbeerbaerlp.de",               11451 },
+            { "荷兰(4)",         "switch.r3ps4j.nl",               11451 },
+            { "中国·丹麦",       "switch.r3ps4j.nl",               11452 },
+            { "美国(2)",         "muitxobem-lanplay.ddns.net",     11451 },
+            { "中国·江苏(2)",    "yordon.cn",                      11451 },
         };
         constexpr int DefaultServerCount = static_cast<int>(sizeof(g_defaultServers) / sizeof(g_defaultServers[0]));
         std::atomic_int  g_selected{0};
