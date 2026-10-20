@@ -28,6 +28,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write
+
     container:
       # devkitA64 r29.2 / gcc 15.2.0。gcc >= 16 会误编译 libstratosphere,
       # 症状为 LDN 会话结束时主机死机(顶层 Makefile 亦有告警)。
@@ -120,9 +123,23 @@ jobs:
 
       - name: Install switch-curl (订阅 HTTPS 下载)
         run: |
+          set -euo pipefail
           # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
           # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
-          dkp-pacman -Sy --noconfirm switch-curl
+          if dkp-pacman -Q switch-curl >/dev/null 2>&1; then
+            echo "switch-curl already installed"
+          else
+            # DevkitPro package DB refresh can fail with HTTP 403. Do not
+            # make a mirror refresh failure fatal if cached DBs can install it.
+            if ! dkp-pacman -Sy --noconfirm; then
+              echo "::warning::DevkitPro package DB refresh failed; trying cached metadata."
+            fi
+            dkp-pacman -S --noconfirm --needed switch-curl || true
+          fi
+          if ! dkp-pacman -Q switch-curl >/dev/null 2>&1; then
+            echo "::error::Required package switch-curl is not installed."
+            exit 1
+          fi
 
       - name: Build
         id: build
@@ -147,3 +164,34 @@ jobs:
         with:
           name: overlay.elf
           path: overlay/overlay.elf
+
+      - name: Set release version
+        run: echo "RELEASE_VERSION=dev" >> "$GITHUB_ENV"
+
+      - name: Pack
+        run: |
+          # Match release.yml: publish the installable Atmosphere + Switch archive.
+          apt-get update && apt-get install -y zip
+          cd ./out/sd
+          zip -r "./ldn_mitm_${RELEASE_VERSION}.zip" atmosphere switch
+
+      - name: Move dev tag to this build
+        id: dev_tag
+        run: |
+          built_sha="$(git rev-parse HEAD)"
+          echo "sha=$built_sha" >> "$GITHUB_OUTPUT"
+          git tag -f dev "$built_sha"
+          git push --force origin refs/tags/dev
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.RELEASE_VERSION }}
+          tag_name: dev
+          target_commitish: ${{ steps.dev_tag.outputs.sha }}
+          files: out/sd/ldn_mitm_${{ env.RELEASE_VERSION }}.zip
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
