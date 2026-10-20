@@ -9,10 +9,10 @@
    hosversion 读不到时用 600KB 堆探测兜底。 */
 static bool g_rooms_ok = true;
 static bool ComputeRoomsOk() {
-    const u32 v = hosversionGet();
-    if (v != 0) {
-        return !hosversionBefore(20, 0, 0);
-    }
+    /* 只按实际堆余量判断，不再按固件版本一刀切：
+       19.0.1 + heap_size.bin(8MB) 实测能正常看房间（Zero 的构建已验证），
+       版本判断会把能用的机器误伤。真遇到堆不够的老机器，
+       600KB 探测失败时再隐藏房间。 */
     void *probe = malloc(600 * 1024);
     if (probe == nullptr) {
         return false;
