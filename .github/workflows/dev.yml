@@ -93,7 +93,8 @@ jobs:
           echo "Plugin version: $plugin_version; archive suffix: $archive_suffix"
 
       - name: Build
-        run: make -j8 PREFIX="ccache aarch64-none-elf-"
+        # Pass the release version to recursive Makefiles so the overlay doesn't embed the moving dev tag.
+        run: make -j8 PREFIX="ccache aarch64-none-elf-" TARGET_VERSION="$PLUGIN_VERSION"
 
       - name: Upload sdcard
         uses: actions/upload-artifact@v7
