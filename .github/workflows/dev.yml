@@ -232,7 +232,11 @@ jobs:
           tag_name: dev
           target_commitish: ${{ github.sha }}
           files: out/sd/ldn_mitm-${{ env.ARCHIVE_SUFFIX }}.zip
-          generate_release_notes: true
+          body: |
+            自动滚动 dev 预发布。
+            联机插件版本：`${{ env.PLUGIN_VERSION }}`
+            构建记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          append_body: false
           fail_on_unmatched_files: true
           prerelease: true
           make_latest: false
