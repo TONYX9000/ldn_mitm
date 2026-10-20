@@ -46,6 +46,18 @@ jobs:
           submodules: true
           # git describe 需要标签与完整历史
           fetch-depth: 0
+          # RELEASE_TOKEN 需有 repo + workflow 权限，供滚动 dev 标签推送使用。
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+          persist-credentials: true
+
+      - name: Check release token
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          if [ -z "$RELEASE_TOKEN" ]; then
+            echo "::error::请在仓库 Actions secrets 添加 RELEASE_TOKEN（classic PAT: repo + workflow；fine-grained: Contents 和 Workflows 写权限）。GITHUB_TOKEN 无法推送包含工作流变更的 dev 标签。"
+            exit 1
+          fi
 
       - name: Trust the workspace for git
         run: git config --global --add safe.directory '*'
@@ -194,4 +206,4 @@ jobs:
           make_latest: false
           overwrite_files: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
