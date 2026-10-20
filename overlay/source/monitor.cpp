@@ -106,15 +106,37 @@ static void MonLog(const char *msg) {
         if (g_logLen + n + 1 < sizeof(g_logBuf)) {
             memcpy(g_logBuf + g_logLen, msg, n);
             g_logLen += n;
-            g_logBuf[g_logLen++] = '\n';
+            g_logBuf[g_logLen++] = '
+';
         }
         return;
+    }
+    /* 挂机时日志会一直追加:每 128 行看一次大小,超过 512 KB 就重开一份,
+     * 免得 SD 卡上长出一个几十 MB 的文件。正常一次会话只有几十 KB。 */
+    static u32 linesSinceCheck = 0;
+    if (((++linesSinceCheck) & 127u) == 0) {
+        constexpr long kLogMaxBytes = 512 * 1024;
+        FILE *chk = fopen(kLogPath, "rb");
+        if (chk) {
+            fseek(chk, 0, SEEK_END);
+            const long size = ftell(chk);
+            fclose(chk);
+            if (size > kLogMaxBytes) {
+                FILE *clr = fopen(kLogPath, "wb");
+                if (clr) {
+                    fputs("-- log rotated --
+", clr);
+                    fclose(clr);
+                }
+            }
+        }
     }
     FILE *f = fopen(kLogPath, "a");
     if (!f)
         return;
     fputs(msg, f);
-    fputc('\n', f);
+    fputc('
+', f);
     fclose(f);
 }
 
@@ -2200,7 +2222,13 @@ static void LogWorkerStack(const char *phase) {
                  static_cast<unsigned>((current - base) / 1024));
     } else {
         /* Never print a wrapped/negative "free stack" number. This also
-         * diagnoses a runtime that did not use the supplied stack buffer. */
+         * diagnoses a runtime that did not use the supplied stack buffer.
+         * libnx 实测没把 worker 放到这块静态栈上(10-21 日志每次刷新都是
+         * range-mismatch),只记第一次,免得把日志刷满。 */
+        static bool logged = false;
+        if (logged)
+            return;
+        logged = true;
         snprintf(msg, sizeof(msg), "%s worker-stack range-mismatch sp=%p range=%p..%p",
                  phase, reinterpret_cast<void *>(current),
                  reinterpret_cast<void *>(base), reinterpret_cast<void *>(end));
@@ -2325,9 +2353,9 @@ static void DoRefresh(const char *nameOverride, bool reloadSubs,
 
     /* 4. 查询:自动识别 —— graphql 优先(含房间),失败再 rest
      *    (servers.json 已移除,不再按 host:port 查类型表) */
-    bool ok = QueryGraphql(host, port, &qr);
-    if (!ok && !IoAbort())
-        ok = QueryRest(host, port, &qr);
+    bool httpOk = QueryGraphql(host, port, &qr);
+    if (!httpOk && !IoAbort())
+        httpOk = QueryRest(host, port, &qr);
     /* 返回/退出时查询会被 HTTP 层中止:此时不要写任何快照,
        免得把 "查询失败 e=6" 显示到界面上。 */
     if (IoAbort()) {
@@ -2341,13 +2369,20 @@ static void DoRefresh(const char *nameOverride, bool reloadSubs,
         MonLog(m);
     }
 
-    /* 6. 接口不给房间时,用 UDP 主动扫描补房间(rest 1.0 服务器) */
-    if (ok && qr.roomN == 0 && !IoAbort()) {
+    /* 6. HTTP 接口不通(纯 lan-play 老服务器,11451 端口只转发 UDP)或接口
+     *    不给房间时,都用 UDP 主动扫描补房间。以前只在 httpOk 且 0 房间时
+     *    才扫,e=3(connect 被拒)的服务器房间永远查不出来——实测
+     *    ns.mulaosi.cn:11451 延迟正常却一直显示「查询失败 e=3」。 */
+    bool scanned = false;
+    if ((!httpOk || qr.roomN == 0) && !IoAbort()) {
         UdpRoomScan(host, port, &qr);
+        scanned = true;
         char m[24];
         snprintf(m, sizeof(m), "scan rooms=%u", (unsigned)qr.roomN);
         MonLog(m);
     }
+    /* UDP 扫到房间也算这次查询有效,缓存与时间戳照常更新 */
+    const bool ok = httpOk || (scanned && qr.roomN > 0);
 
     /* 7. 并入房间 5 秒 TTL 缓存后写快照:当次查到的房间刷新时间戳,
      *    没查到的旧房间再保留 5 秒,列表不再随单次丢包闪烁。 */
@@ -2392,8 +2427,11 @@ static void DoRefresh(const char *nameOverride, bool reloadSubs,
                     snprintf(g_snap.status, sizeof(g_snap.status), "%s",
                              T_STR("网络初始化失败", "網絡初始化失敗"));
                 else
-                    snprintf(g_snap.status, sizeof(g_snap.status), "%s e=%d",
-                             T_STR("查询失败", "查詢失敗"), g_httpErr);
+                    /* HTTP 接口没应答、UDP 也没扫到房间:这台服务器在线、
+                     * 延迟正常,只是没有开房间或没提供查询接口。别把 e=3
+                     * 这种内部错误码甩给用户(日志里还留着 e= 方便排查)。 */
+                    snprintf(g_snap.status, sizeof(g_snap.status), "%s",
+                             T_STR("该服务器无房间信息", "該伺服器無房間資訊"));
             } else if (n == 0) {
                 snprintf(g_snap.status, sizeof(g_snap.status), "%s",
                          T_STR("暂无房间", "暫無房間"));
