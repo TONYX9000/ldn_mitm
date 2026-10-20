@@ -144,11 +144,20 @@ jobs:
       - name: Set release and plugin versions
         run: |
           echo "RELEASE_VERSION=dev" >> "$GITHUB_ENV"
-          # Keep the archive suffix identical to TARGET_VERSION in the ldn_mitm
-          # and overlay Makefiles (git describe + the same dirty-tree suffix).
+          # Match TARGET_VERSION in ldn_mitm/Makefile and overlay/Makefile.
           plugin_version="$(git describe --tags)$(git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)"
+          clean_version="${plugin_version%-dirty}"
+          if [[ "$clean_version" =~ -g([0-9a-fA-F]+)$ ]]; then
+            # Keep only git-describe's final g<short-sha> part, e.g. gf0597ab.
+            archive_suffix="g${BASH_REMATCH[1]}"
+          else
+            # At an exact tag, use the same short-commit style as the suffix.
+            archive_suffix="g$(git rev-parse --short=7 HEAD)"
+          fi
           echo "PLUGIN_VERSION=$plugin_version" >> "$GITHUB_ENV"
+          echo "ARCHIVE_SUFFIX=$archive_suffix" >> "$GITHUB_ENV"
           echo "Online plugin version: $plugin_version"
+          echo "Release archive suffix: $archive_suffix"
 
       - name: Build
         id: build
@@ -179,7 +188,40 @@ jobs:
           # Match release.yml: publish the installable Atmosphere + Switch archive.
           apt-get update && apt-get install -y zip
           cd ./out/sd
-          zip -r "./ldn_mitm_${PLUGIN_VERSION}.zip" atmosphere switch
+          zip -r "./ldn_mitm-${ARCHIVE_SUFFIX}.zip" atmosphere switch
+
+      - name: Remove previous plugin ZIP assets from dev Release
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            let release;
+            try {
+              ({ data: release } = await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag: "dev",
+              }));
+            } catch (error) {
+              if (error.status === 404) {
+                core.info("No previous dev release; skipping asset cleanup.");
+                return;
+              }
+              throw error;
+            }
+
+            const staleAssets = release.assets.filter(({ name }) =>
+              /^ldn_mitm[-_].*[.]zip$/i.test(name)
+            );
+            for (const asset of staleAssets) {
+              await github.rest.repos.deleteReleaseAsset({
+                owner,
+                repo,
+                asset_id: asset.id,
+              });
+              core.info(`Deleted stale asset ${asset.name} (${asset.id}).`);
+            }
 
       # Follow LanPlayMonitor/release.yml: create/update the Release via the API;
       # avoid git-pushing the tag with GITHUB_TOKEN when the workflow file changed.
@@ -189,7 +231,7 @@ jobs:
           name: ${{ env.RELEASE_VERSION }}
           tag_name: dev
           target_commitish: ${{ github.sha }}
-          files: out/sd/ldn_mitm_${{ env.PLUGIN_VERSION }}.zip
+          files: out/sd/ldn_mitm-${{ env.ARCHIVE_SUFFIX }}.zip
           generate_release_notes: true
           fail_on_unmatched_files: true
           prerelease: true
