@@ -141,6 +141,15 @@ jobs:
             exit 1
           fi
 
+      - name: Set release and plugin versions
+        run: |
+          echo "RELEASE_VERSION=dev" >> "$GITHUB_ENV"
+          # Keep the archive suffix identical to TARGET_VERSION in the ldn_mitm
+          # and overlay Makefiles (git describe + the same dirty-tree suffix).
+          plugin_version="$(git describe --tags)$(git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)"
+          echo "PLUGIN_VERSION=$plugin_version" >> "$GITHUB_ENV"
+          echo "Online plugin version: $plugin_version"
+
       - name: Build
         id: build
         run: make -j8 PREFIX="ccache aarch64-none-elf-"
@@ -165,15 +174,12 @@ jobs:
           name: overlay.elf
           path: overlay/overlay.elf
 
-      - name: Set release version
-        run: echo "RELEASE_VERSION=dev" >> "$GITHUB_ENV"
-
       - name: Pack
         run: |
           # Match release.yml: publish the installable Atmosphere + Switch archive.
           apt-get update && apt-get install -y zip
           cd ./out/sd
-          zip -r "./ldn_mitm_${RELEASE_VERSION}.zip" atmosphere switch
+          zip -r "./ldn_mitm_${PLUGIN_VERSION}.zip" atmosphere switch
 
       # Follow LanPlayMonitor/release.yml: create/update the Release via the API;
       # avoid git-pushing the tag with GITHUB_TOKEN when the workflow file changed.
@@ -183,7 +189,7 @@ jobs:
           name: ${{ env.RELEASE_VERSION }}
           tag_name: dev
           target_commitish: ${{ github.sha }}
-          files: out/sd/ldn_mitm_${{ env.RELEASE_VERSION }}.zip
+          files: out/sd/ldn_mitm_${{ env.PLUGIN_VERSION }}.zip
           generate_release_notes: true
           fail_on_unmatched_files: true
           prerelease: true
