@@ -105,27 +105,33 @@ namespace ams::mitm::ldn::relay {
             { "荷兰",            "switch.jayseateam.nl", 11451 },  /* 210ms */
             { "荷兰(2)",         "switch.jayseateam.nl", 11453 },  /* 217ms */
             { "荷兰(4)",         "switch.r3ps4j.nl",     11451 },  /* 217ms; backup */
-            { "中国·丹麦",       "switch.r3ps4j.nl",     11452 },  /* 233ms */
+            { "荷兰(5)",         "switch.r3ps4j.nl",     11452 },  /* 233ms */
             { "美国(2)",         "muitxobem-lanplay.ddns.net", 11451 }, /* 334ms */
             { "中国·江苏(2)",    "yordon.cn",            11451 },  /* no PING echo */
         };
         constexpr int BuiltinCount = static_cast<int>(sizeof(g_builtin) / sizeof(g_builtin[0]));
 
-        /* Exact factory relay.cfg shipped by patch 0009. Keep order, names,
-           and selected=中国·河南 (index zero) stable across "restore". */
+        /* Exact factory relay.cfg shipped with this fork. Keep order and names
+           stable across "restore". 阿东版发的是 17 台(与 config/ldn_mitm/
+           relay.cfg 一致);Zero 原版是 12 台,恢复默认以我们发的包为准。 */
         constexpr BuiltinServer g_defaultServers[] = {
-            { "中国·河南",       "srv.jaxlewis.top",               11451 },
-            { "中国·河南(2)",    "122.114.8.38",                   11451 },
             { "中国·广东",       "gugu.mulaosi.cn",                11451 },
+            { "中国·广东(2)",    "ns.mulaosi.cn",                  11451 },
             { "中国·江苏",       "wuaiyi.top",                     11451 },
-            { "中国·北京",       "olunira.fun",                    11451 },
             { "中国·上海",       "47.102.121.212",                 11451 },
-            { "中国·丹麦",       "switch.r3ps4j.nl",               11452 },
+            { "中国·北京",       "olunira.fun",                    11451 },
+            { "中国·河南(2)",    "122.114.8.38",                   11451 },
+            { "中国·河南",       "srv.jaxlewis.top",               11451 },
             { "美国",            "tekn0.net",                      11451 },
-            { "美国(2)",         "muitxobem-lanplay.ddns.net",     11451 },
+            { "德国·萨克森",     "erdbeerbaerlp.de",               11451 },
+            { "丹麦",            "switch.servegame.com",           11451 },
+            { "荷兰(3)",         "switch.r3ps4j.nl",               11453 },
             { "荷兰",            "switch.jayseateam.nl",           11451 },
             { "荷兰(2)",         "switch.jayseateam.nl",           11453 },
-            { "德国·萨克森",     "erdbeerbaerlp.de",               11451 },
+            { "荷兰(4)",         "switch.r3ps4j.nl",               11451 },
+            { "荷兰(5)",         "switch.r3ps4j.nl",               11452 },
+            { "美国(2)",         "muitxobem-lanplay.ddns.net",     11451 },
+            { "中国·江苏(2)",    "yordon.cn",                      11451 },
         };
         constexpr int DefaultServerCount = static_cast<int>(sizeof(g_defaultServers) / sizeof(g_defaultServers[0]));
         std::atomic_int  g_selected{0};

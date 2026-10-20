@@ -235,6 +235,11 @@ static Thread g_thread;
 static bool  g_inited = false;
 static char  g_pendingName[48];      /* 切换服务器时指定;空 = 读 relay.cfg */
 static bool  g_pendingSubs = false;  /* 下一次刷新是否重新拉订阅缓存 */
+/* 周期轮询(1 秒一次)不该把快照改成「正在查询…」:一次查询含 UDP 扫描要
+ * 1.5 秒,若每次都占位,界面上就永远只剩这行字。true = 本次不抢快照。 */
+static bool  g_pendingQuiet = false;
+/* 后台线程是否正在跑一次查询:界面据此跳过一次轮询,避免请求连成串。 */
+static std::atomic<bool> g_queryBusy{false};
 
 #define T_STR(hans, hant) (g_traditional.load() ? (hant) : (hans))
 
@@ -2493,13 +2498,21 @@ static void LogWorkerStack(const char *phase) {
     MonLog(msg);
 }
 
+/* RAII:后台线程只要在跑查询就置位,界面轮询据此跳过一拍。 */
+struct QueryBusyGuard {
+    QueryBusyGuard() { g_queryBusy.store(true); }
+    ~QueryBusyGuard() { g_queryBusy.store(false); }
+};
+
 static void DoRefresh(const char *nameOverride, bool reloadSubs,
-                      MonitorTargetGeneration::Value targetGen) {
+                      MonitorTargetGeneration::Value targetGen, bool quiet) {
     bool staleTarget = false;
     {
         std::scoped_lock lk(g_mutex);
         staleTarget = !g_targetGen.IsCurrent(targetGen);
-        if (!staleTarget) {
+        /* quiet(周期轮询)不动 busy/status:结果出来再一次性刷新快照,
+         * 否则「正在查询…」会一直盖在房间列表上。开盖/切服照旧占位。 */
+        if (!staleTarget && !quiet) {
             g_snap.busy = true;
             /* 同一服务器的轮询继续展示上一结果;切服时由请求入口先清空。 */
             snprintf(g_snap.status, sizeof(g_snap.status), "%s",
@@ -2511,6 +2524,7 @@ static void DoRefresh(const char *nameOverride, bool reloadSubs,
         return;
     }
 
+    QueryBusyGuard busyGuard;
     LogWorkerStack("refresh-start");
     EnsureSockets();
 
@@ -2717,16 +2731,18 @@ static void MonitorWorker(void *) {
         if (want != g_doneGen) {
             g_doneGen = want;
             char name[48];
-            bool subs;
+            bool subs, quiet;
             MonitorTargetGeneration::Value targetGen;
             {
                 std::scoped_lock lk(g_mutex);
                 memcpy(name, g_pendingName, sizeof(name));
                 subs = g_pendingSubs;
                 g_pendingSubs = false;
+                quiet = g_pendingQuiet;
+                g_pendingQuiet = false;
                 targetGen = g_targetGen.Capture();
             }
-            DoRefresh(name[0] ? name : nullptr, subs, targetGen);
+            DoRefresh(name[0] ? name : nullptr, subs, targetGen, quiet);
             MonLog("refresh-done");
         } else {
             svcSleepThread(50'000'000);      /* 50ms */
@@ -2804,6 +2820,7 @@ void MonitorRequestRefresh(const char *serverName) {
     std::scoped_lock lk(g_mutex);
     snprintf(g_pendingName, sizeof(g_pendingName), "%s", serverName ? serverName : "");
     g_pendingSubs = true;      /* 开盖/手动刷新:同时重新拉订阅缓存 */
+    g_pendingQuiet = false;
     g_targetGen.Advance();
     ResetSnapshotForRequestLocked(
         serverName, T_STR("正在刷新服务器…", "正在刷新伺服器…"));
@@ -2813,6 +2830,7 @@ void MonitorRequestRefresh(const char *serverName) {
 void MonitorRequestSwitch(const char *serverName) {
     std::scoped_lock lk(g_mutex);
     snprintf(g_pendingName, sizeof(g_pendingName), "%s", serverName ? serverName : "");
+    g_pendingQuiet = false;
     g_targetGen.Advance();
     ResetSnapshotForRequestLocked(
         serverName, T_STR("正在切换服务器…", "正在切換伺服器…"));
@@ -2820,8 +2838,14 @@ void MonitorRequestSwitch(const char *serverName) {
 }
 
 void MonitorRequestPoll() {
-    /* 周期刷新(与延迟 ping 同节奏):不动目标、不拉订阅 */
+    /* 周期刷新(与延迟 ping 同节奏):不动目标、不拉订阅,也不覆盖快照 */
+    std::scoped_lock lk(g_mutex);
+    g_pendingQuiet = true;
     g_reqGen.fetch_add(1);
+}
+
+bool MonitorIsBusy() {
+    return g_queryBusy.load();
 }
 
 void MonitorCopySnapshot(MonitorSnapshot *out) {
