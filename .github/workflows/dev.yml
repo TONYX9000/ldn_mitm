@@ -73,8 +73,17 @@ jobs:
 
       - name: Set plugin version
         run: |
-          plugin_version="$(git describe --tags --exclude=dev)$(git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)"
+          version_base="$(git describe --tags --exclude=dev 2>/dev/null || true)"
+          if [[ -z "$version_base" ]]; then
+            version_base="g$(git rev-parse --short=7 HEAD)"
+          fi
+          plugin_version="$version_base"
+          if ! git diff --quiet --ignore-submodules=all HEAD 2>/dev/null; then
+            plugin_version+="-dirty"
+          fi
           if [[ "$plugin_version" =~ -g([[:xdigit:]]+)(-dirty)?$ ]]; then
+            archive_suffix="g${BASH_REMATCH[1]}"
+          elif [[ "$plugin_version" =~ ^g([[:xdigit:]]+)(-dirty)?$ ]]; then
             archive_suffix="g${BASH_REMATCH[1]}"
           else
             archive_suffix="g$(git rev-parse --short=7 HEAD)"
@@ -111,7 +120,7 @@ jobs:
             apt-get update && apt-get install -y zip
           fi
           cd out/sd
-          zip -r "ldn_mitm-${ARCHIVE_SUFFIX}.zip" atmosphere switch
+          zip -r "ldn_mitm-${ARCHIVE_SUFFIX}.zip" atmosphere switch config
 
       - name: Remove old dev ZIP assets
         uses: actions/github-script@v7
