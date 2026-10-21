@@ -1,4 +1,4 @@
-From 50b77ff420f5f9962b870176680a00481c9ae0f5 Mon Sep 17 00:00:00 2001
+From 604a7c141164296b15c6a0a47cbbf2e2158aaafd Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH] overlay: online counts/room list and relay management
@@ -8,7 +8,7 @@ Content-Transfer-Encoding: 8bit
 
 联机监视器(0010):
 - 底部按键提示按系统语言显示「返回/确定」(覆盖 libtesla 的英文 Back/OK)
-- 部分游戏将 LDN LocalCommunicationId 写为 FFFFFFFFFFFFFFFF(auto sentinel);按每个房间自己的 advertiseData 识别 Dragon Ball FighterZ、Rocket League、MONSTER HUNTER RISE、Monster Hunter Stories 2、Minecraft 与 Pokémon Scarlet/Violet;S/V 校验 132 字节 Pia+游戏数据,覆盖搜索字段、无密码/链接码及 Union Circle,并纳入 srv.jaxlewis.top 实测的 aa88f4、47.102.121.212 实测的 aa e8 8c，以及本次重部署后实测的 aa 88 72;由于重建会改变标记尾字节，严格校验其余 Pia/链接码结构后按已观测的 aa08/aa88/aae8 前缀族识别;两版本都广告 Scarlet 通信 ID;家族名视为可补充信息并触发 GraphQL 按需查询房间自身 game/name,明确为 Scarlet/Violet 时分别显示「宝可梦朱/宝可梦紫」,没有版本信息仍回退「宝可梦 朱/紫」;未知模式安全回退且不读取本机前台 ProgramId
+- 部分游戏将 LDN LocalCommunicationId 写为 FFFFFFFFFFFFFFFF(auto sentinel);按每个房间自己的 advertiseData 识别 Dragon Ball FighterZ、Rocket League、MONSTER HUNTER RISE、Monster Hunter Stories 2 与 Minecraft 的标题 ID;未知模式安全显示「未知游戏」,不再用本机前台 ProgramId 误标远端房间
 - 标题下方两列统计:标签「在线/房间」在上、数字在下;刷新 1s 一次,
   与延迟 ping(sysmodule RelayPingIntervalMs)同节奏,仅可见时轮询,
   周期刷新不重拉订阅、不改目标
@@ -51,7 +51,7 @@ Content-Transfer-Encoding: 8bit
   RelayParseLine(\v \f 空白)/MonitorListRelayServers/ResolveSelectedServer
   (\v 行 noname 复现修复)/HttpsGet(curl stub)/LdnDecompress/
   ParseNetworkInfo/ParseRoomArray(玩家名/房主置顶/sessionId)/Http 解析/
-  DnsInitServers;chinese_db 流式解析 + 标题映射冒烟;FormatGameName(all-F sentinel -> room advertiseData);独立 monitor_title_resolver_test 覆盖已知/未知广告模式及 aa88f4/aae88c/aa8872 实测标记
+  DnsInitServers;chinese_db 流式解析 + 标题映射冒烟;FormatGameName(all-F sentinel -> room advertiseData);独立 monitor_title_resolver_test 覆盖已知/未知广告模式
 
 CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
 安装 switch-curl(订阅 HTTPS 下载)
@@ -91,7 +91,7 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
 - 合入分支服务器管理页 AddServerGui、添加/删除/恢复默认操作、列表重建与焦点恢复；服务器列表继续使用 patch 10 的自绘 ServerRow，保留名称/地址布局、右侧延迟和在线/房间数字间距。
 - 游戏房间行改为与服务器行同高的 70px 固定双排布局：上排游戏标题、下排玩家名常显、人数右对齐；长名单在下排窗口内滚动。MonitorFrame 下方同时显示版本，空版本显示“版本未知”。
 - 最大容量统一为 32；出厂及恢复默认列表为 12 条，0009 中移除 relay.cfg 的「中国·江苏(2) yordon.cn:11451」；17 条添加候选目录仍保留该服务器作为可选候选，另有 4 条备用节点。
-- 在既有补丁 0010 内根源修复接口字段缺失：房间解析兼容 contentId/content_id/titleId 等标题 ID 别名、game 字符串与嵌套对象；缺 ID/all-F 时先尝试该房间自己的 advertiseData，再使用接口提供的游戏名；GraphQL 按 schema 回退标题/广告/节点字段，按需读取 game 标量或对象并缓存字段支持状态；朱/紫家族名不再阻断该按需查询，只有房间自身数据明确给出单版本时才细分标题，否则保留家族名。未知仍安全回退；不读取本机前台 ProgramId。纯主机回归测试覆盖 ID 规范化、版本名分类、房间游戏名、广告识别、未知负例及 GraphQL 查询构造/字段协商。
+- 在既有补丁 0010 内增加 room advertiseData 标题识别、UDP NetworkInfo 广告数据解析、旧 GraphQL schema 回退及纯主机回归测试；未识别 all-F 房间安全显示「未知游戏」，不读取本机 ProgramId。
 
 Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-TONYX9000
 
@@ -103,7 +103,6 @@ Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-T
 CI 构建修复（DevkitPro 包数据库 HTTP 403）：
 - build/nightly/release 的依赖安装步骤已加入缓存回退；本次用户提供的 beta 构建日志显示 beta.yml 仍直接运行 dkp-pacman -Sy --noconfirm switch-curl，依赖步骤失败，Build 被跳过。
 - beta.yml 现复用同一策略：先检查 switch-curl 是否已安装；索引刷新失败时继续尝试用缓存数据库安装；最后用 dkp-pacman -Q 校验依赖，否则明确报缺失并停止，不吞掉真实依赖错误。
-- beta.yml 在同一补丁内把版本固定为 beta-g<GITHUB_SHA 前 7 位>，并以命令行 TARGET_VERSION 传入递归 Make；不再出现 dev-x 或 beta-x-xxxx 距离段，也不移动/推送 tag。
 - 四个 workflow 的 YAML 解析与 shell 分支均以 mock 测过：已安装、403 后缓存安装成功、正常刷新安装成功、依赖缺失时清楚失败。
 
 玩家名单切服串台修复（截图反馈）：
@@ -115,61 +114,12 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
 服务器切换后的房间快照错位修复（反馈）：
 - 每次打开刷新或切换目标时更新请求代次，并立即把已发布的房间列表与新选择解绑、清空；
 - 单 worker 的旧服务器查询返回后，若请求代次已过期，则不写入房间缓存、在线/房间数或快照，避免把旧结果显示到新服务器下；新增纯主机 generation gate 回归测试。
----
- .github/workflows/beta.yml                    |   27 +-
- .github/workflows/build.yml                   |   34 +-
- .github/workflows/nightly.yml                 |   37 +-
- .github/workflows/release.yml                 |   44 +-
- Makefile                                      |    6 +
- overlay/Makefile                              |    9 +-
- overlay/source/main.cpp                       | 1029 +++++-
- overlay/source/monitor.cpp                    | 2798 +++++++++++++++++
- overlay/source/monitor.hpp                    |   71 +
- overlay/source/monitor_graphql_compat.hpp     |  203 ++
- overlay/source/monitor_player_filter.hpp      |   32 +
- overlay/source/monitor_target_generation.hpp  |   22 +
- overlay/source/monitor_title_resolver.hpp     |  461 +++
- overlay/tests/monitor_graphql_compat_test.cpp |   85 +
- overlay/tests/monitor_player_filter_test.cpp  |   29 +
- .../tests/monitor_target_generation_test.cpp  |   22 +
- overlay/tests/monitor_title_resolver_test.cpp |  195 ++
- 17 files changed, 4943 insertions(+), 161 deletions(-)
- create mode 100644 overlay/source/monitor.cpp
- create mode 100644 overlay/source/monitor.hpp
- create mode 100644 overlay/source/monitor_graphql_compat.hpp
- create mode 100644 overlay/source/monitor_player_filter.hpp
- create mode 100644 overlay/source/monitor_target_generation.hpp
- create mode 100644 overlay/source/monitor_title_resolver.hpp
- create mode 100644 overlay/tests/monitor_graphql_compat_test.cpp
- create mode 100644 overlay/tests/monitor_player_filter_test.cpp
- create mode 100644 overlay/tests/monitor_target_generation_test.cpp
- create mode 100644 overlay/tests/monitor_title_resolver_test.cpp
 
 diff --git a/.github/workflows/beta.yml b/.github/workflows/beta.yml
-index e61dc52..dbeba86 100644
+index e61dc52..9c225b0 100644
 --- a/.github/workflows/beta.yml
 +++ b/.github/workflows/beta.yml
-@@ -48,14 +48,17 @@ jobs:
-         run: git config --global --add safe.directory '*'
- 
-       - name: Toolchain versions
-+        id: beta_version
-         continue-on-error: true
-         run: |
-           (dkp-pacman -Q 2>/dev/null || pacman -Q 2>/dev/null) \
-             | grep -Ei 'devkita64|libnx|newlib|binutils' || true
-           "${DEVKITPRO:-/opt/devkitpro}/devkitA64/bin/aarch64-none-elf-gcc" --version | head -1 || true
-           git --version || true
--          echo "version string this build will stamp:"
--          echo "  $(git describe --tags 2>/dev/null)$(git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)"
-+          short_sha="${GITHUB_SHA:0:7}"
-+          version="beta-g${short_sha}"
-+          echo "version=${version}" >> "$GITHUB_OUTPUT"
-+          echo "Beta plugin version: ${version}"
-           exit 0
- 
-       - name: Apply port patches (patches/*.patch)
-@@ -120,13 +123,29 @@ jobs:
+@@ -120,9 +120,23 @@ jobs:
  
        - name: Install switch-curl (订阅 HTTPS 下载)
          run: |
@@ -194,13 +144,6 @@ index e61dc52..dbeba86 100644
  
        - name: Build
          id: build
--        run: make -j8 PREFIX="ccache aarch64-none-elf-"
-+        env:
-+          TARGET_VERSION: ${{ steps.beta_version.outputs.version }}
-+        run: make -j8 PREFIX="ccache aarch64-none-elf-" TARGET_VERSION="$TARGET_VERSION"
- 
-       - name: Upload sdcard
-         uses: actions/upload-artifact@v7
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
 index 3d7bc8b..b37dab7 100644
 --- a/.github/workflows/build.yml
@@ -1561,10 +1504,10 @@ index 8e07c19..8eea790 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..45d0231
+index 0000000..4e82f4c
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2798 @@
+@@ -0,0 +1,2429 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -1575,7 +1518,6 @@ index 0000000..45d0231
 + */
 +#include "monitor.hpp"
 +#include "monitor_title_resolver.hpp"
-+#include "monitor_graphql_compat.hpp"
 +#include "monitor_player_filter.hpp"
 +#include "monitor_target_generation.hpp"
 +
@@ -1603,8 +1545,6 @@ index 0000000..45d0231
 +#include <string>
 +#include <curl/curl.h>
 +
-+using namespace MonitorGraphqlCompat;
-+
 +/* ------------------------------------------------------------------ */
 +/* 常量                                                                */
 +/* ------------------------------------------------------------------ */
@@ -1621,15 +1561,26 @@ index 0000000..45d0231
 +    "http://ghfast.top/https://raw.githubusercontent.com/",
 +};
 +
-+struct GraphqlSchemaCacheEntry {
-+    char host[96] = {};
-+    u16 port = 0;
-+    bool known = false;
-+    GraphqlQueryFields fields = {};
-+};
-+static GraphqlSchemaCacheEntry g_graphqlSchemaCache[MONITOR_MAX_SERVERS] = {};
-+static u32 g_graphqlSchemaCacheCursor = 0;
-+static std::mutex g_graphqlSchemaCacheMutex;
++static const char *kGraphqlQuery =
++    "query PublicRoomSnapshot { serverInfo { online idle } room {"
++    " sessionId contentId advertiseData hostPlayerName nodeCount nodeCountMax"
++    " nodes { playerName isConnected } } }";
++
++/* Query variants keep older custom GraphQL schemas working while preferring
++ * both per-room title data and NodeInfo.isConnected. The latter is essential:
++ * servers may retain names in disconnected node slots. */
++static const char *kGraphqlQueryNoAdvert =
++    "query PublicRoomSnapshot { serverInfo { online idle } room {"
++    " sessionId contentId hostPlayerName nodeCount nodeCountMax"
++    " nodes { playerName isConnected } } }";
++static const char *kGraphqlQueryNoConnection =
++    "query PublicRoomSnapshot { serverInfo { online idle } room {"
++    " sessionId contentId advertiseData hostPlayerName nodeCount nodeCountMax"
++    " nodes { playerName } } }";
++static const char *kGraphqlQueryOldest =
++    "query PublicRoomSnapshot { serverInfo { online idle } room {"
++    " sessionId contentId hostPlayerName nodeCount nodeCountMax"
++    " nodes { playerName } } }";
 +
 +static const char *kSaveDir         = "sdmc:/config/ldn_mitm";
 +static const char *kSaveChinesePath = "sdmc:/config/ldn_mitm/chinese_db.json";
@@ -2005,24 +1956,9 @@ index 0000000..45d0231
 +/* 同义 key 依次尝试(如 contentId/content_id) */
 +static bool JsonGetStrAny(const char *obj, const char *k1, const char *k2,
 +                          char *out, size_t n) {
-+    if (JsonGetStr(obj, k1, out, n) && out[0])
++    if (JsonGetStr(obj, k1, out, n))
 +        return true;
-+    return k2 && JsonGetStr(obj, k2, out, n) && out[0];
-+}
-+
-+static bool JsonGetStrAnyList(const char *obj, const char *const *keys,
-+                              size_t keyN, char *out, size_t n) {
-+    if (!out || n == 0)
-+        return false;
-+    out[0] = 0;
-+    if (!obj || !keys)
-+        return false;
-+    for (size_t i = 0; i < keyN; ++i) {
-+        if (keys[i] && JsonGetStr(obj, keys[i], out, n) && out[0])
-+            return true;
-+    }
-+    out[0] = 0;
-+    return false;
++    return k2 && JsonGetStr(obj, k2, out, n);
 +}
 +
 +/* ------------------------------------------------------------------ */
@@ -3015,160 +2951,46 @@ index 0000000..45d0231
 +    u32 roomN = 0;
 +    MonitorRoom rooms[MONITOR_MAX_ROOMS];
 +};
-+static QueryResult g_graphqlCandidateResult; /* single worker; keep the room buffer off stack */
 +
-+/* A valid nested room ID replaces only an invalid or all-F top-level value. */
-+static void PreferRoomTitleId(char *current, size_t currentN,
-+                              const char *candidate) {
-+    char oldId[17] = {}, newId[17] = {};
-+    const bool oldValid = MonitorTitleResolver::NormalizeTitleId(
-+        current, oldId, sizeof(oldId));
-+    const bool newValid = MonitorTitleResolver::NormalizeTitleId(
-+        candidate, newId, sizeof(newId));
-+    if (newValid && (!oldValid ||
-+        (MonitorTitleResolver::IsUnknownTitleId(oldId) &&
-+         !MonitorTitleResolver::IsUnknownTitleId(newId))))
-+        snprintf(current, currentN, "%s", newId);
-+}
-+
-+static bool IsUnknownGameLabel(const char *label) {
-+    return !label || !label[0] ||
-+           strcmp(label, "未知游戏") == 0 || strcmp(label, "未知遊戲") == 0 ||
-+           strncmp(label, "未知", 6) == 0;
-+}
-+
-+static int RoomGameLabelQuality(const char *label) {
-+    if (IsUnknownGameLabel(label))
-+        return 0;
-+    if (MonitorTitleResolver::IsPokemonScarletVioletFamilyName(label))
-+        return 1; /* A family label can still be enriched by the room's game name. */
-+    char titleId[17] = {};
-+    return MonitorTitleResolver::NormalizeTitleId(label, titleId, sizeof(titleId)) ? 1 : 2;
-+}
-+
-+/* Resolve from this room's IDs/name/advertisement only. Never use the local
-+ * foreground ProgramId: a remote server can list several unrelated games. */
-+static void FormatGameName(const char *contentId, const char *gameValue,
-+                           const char *gameName, const char *advertiseData,
++/* Room-specific advertiseData resolves all-F communication-ID sentinels.
++ * Never substitute the local foreground ProgramId for a remote room: a server
++ * can list several games, and that fallback would mislabel every such room. */
++static void FormatGameName(const char *contentId, const char *advertiseData,
 +                           const char *hostPlayerName, char *out, size_t n) {
-+    char normalizedName[52] = {};
-+    char normalizedGameValue[52] = {};
-+    const bool hasRoomName = MonitorTitleResolver::NormalizeRoomGameName(
-+        gameName, normalizedName, sizeof(normalizedName));
-+    const bool hasRoomGameValue = MonitorTitleResolver::NormalizeRoomGameName(
-+        gameValue, normalizedGameValue, sizeof(normalizedGameValue));
-+    if (!hasRoomName && hasRoomGameValue)
-+        snprintf(normalizedName, sizeof(normalizedName), "%s", normalizedGameValue);
-+
-+    char titleId[17] = {};
-+    const bool hasTitleId = MonitorTitleResolver::ResolveRoomTitleId(
-+        contentId, gameValue, advertiseData, hostPlayerName,
-+        titleId, sizeof(titleId));
-+    if (hasTitleId && strcmp(titleId, "0100A3D008C5C000") == 0) {
-+        /* Scarlet and Violet share this communication ID. Use a version only
-+         * when the room itself provides a specific game name; never infer it
-+         * from the local foreground application's ProgramId. */
-+        MonitorTitleResolver::PokemonScarletVioletVersion roomVersion =
-+            MonitorTitleResolver::PokemonVersionFromRoomName(normalizedName);
-+        if (roomVersion == MonitorTitleResolver::PokemonScarletVioletVersion::Unspecified &&
-+            hasRoomName && hasRoomGameValue)
-+            roomVersion = MonitorTitleResolver::PokemonVersionFromRoomName(normalizedGameValue);
-+        switch (roomVersion) {
-+            case MonitorTitleResolver::PokemonScarletVioletVersion::Scarlet:
-+                snprintf(out, n, "%s", T_STR("宝可梦朱", "寶可夢朱"));
-+                return;
-+            case MonitorTitleResolver::PokemonScarletVioletVersion::Violet:
-+                snprintf(out, n, "%s", T_STR("宝可梦紫", "寶可梦紫"));
-+                return;
-+            case MonitorTitleResolver::PokemonScarletVioletVersion::Unspecified:
-+            default:
-+                snprintf(out, n, "%s", T_STR("宝可梦 朱/紫", "寶可梦 朱/紫"));
-+                return;
-+        }
++    char up[20] = {};
++    size_t len = 0;
++    for (const char *p = contentId; p && *p && len < 16; p++) {
++        char c = *p;
++        if (c >= 'a' && c <= 'f') c = (char)(c - 'a' + 'A');
++        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'))
++            up[len++] = c;
 +    }
-+
-+    if (hasTitleId) {
-+        const u64 key = TitleKeyPack(titleId);
-+        size_t nameLen = 0;
-+        const char *mappedName = TitleLookup(key, &nameLen);
-+        if (mappedName && mappedName[0]) {
-+            snprintf(out, n, "%s", mappedName);
-+            return;
-+        }
-+        if (normalizedName[0]) {
-+            snprintf(out, n, "%s", normalizedName);
-+            return;
-+        }
-+        snprintf(out, n, "%s", titleId); /* 未映射:显示房间提供的标题 ID */
++    up[len] = 0;
++    if (len != 16) {
++        snprintf(out, n, "%s", T_STR("未知游戏", "未知遊戲"));
 +        return;
 +    }
 +
-+    if (normalizedName[0]) {
-+        snprintf(out, n, "%s", normalizedName);
-+        return;
++    bool allOnes = true;
++    for (size_t i = 0; i < 16; i++)
++        allOnes &= (up[i] == 'F');
++    if (allOnes) {
++        char resolved[20] = {};
++        if (!MonitorTitleResolver::ResolveAdvertisedTitleId(
++                advertiseData, hostPlayerName, resolved, sizeof(resolved))) {
++            snprintf(out, n, "%s", T_STR("未知游戏", "未知遊戲"));
++            return;
++        }
++        snprintf(up, sizeof(up), "%s", resolved);
 +    }
-+    snprintf(out, n, "%s", T_STR("未知游戏", "未知遊戲"));
-+}
 +
-+static void ReadRoomTitleFields(const char *room, char *contentId,
-+                                size_t contentIdN, char *gameValue,
-+                                size_t gameValueN, char *gameName,
-+                                size_t gameNameN) {
-+    static const char *const kTitleIdFields[] = {
-+        "contentId", "content_id", "contentID", "titleId", "title_id", "titleID",
-+        "programId", "program_id", "applicationId", "application_id",
-+        "gameId", "game_id", "localCommunicationId", "local_communication_id",
-+        "communicationId", "communication_id", "nacpId", "nacp_id",
-+    };
-+    static const char *const kGameNameFields[] = {
-+        "gameName", "game_name", "titleName", "title_name",
-+        "displayName", "display_name", "title",
-+    };
-+    static const char *const kGameContainers[] = {
-+        "game", "title", "application", "gameInfo", "game_info",
-+        "titleInfo", "title_info",
-+    };
-+    static const char *const kNestedTitleIdFields[] = {
-+        "contentId", "content_id", "contentID", "titleId", "title_id", "titleID",
-+        "programId", "program_id", "applicationId", "application_id",
-+        "gameId", "game_id", "localCommunicationId", "local_communication_id",
-+        "communicationId", "communication_id", "nacpId", "nacp_id", "id",
-+    };
-+    static const char *const kNestedGameNameFields[] = {
-+        "name", "gameName", "game_name", "titleName", "title_name",
-+        "displayName", "display_name", "label", "title",
-+    };
-+
-+    JsonGetStrAnyList(room, kTitleIdFields,
-+                      sizeof(kTitleIdFields) / sizeof(kTitleIdFields[0]),
-+                      contentId, contentIdN);
-+    JsonGetStrAnyList(room, kGameNameFields,
-+                      sizeof(kGameNameFields) / sizeof(kGameNameFields[0]),
-+                      gameName, gameNameN);
-+    JsonGetStr(room, "game", gameValue, gameValueN);
-+
-+    for (size_t i = 0; i < sizeof(kGameContainers) / sizeof(kGameContainers[0]); ++i) {
-+        const char *nested = JsonGet(room, kGameContainers[i]);
-+        if (!nested || *nested != '{')
-+            continue;
-+        char nestedId[32] = {};
-+        char nestedName[128] = {};
-+        if (JsonGetStrAnyList(nested, kNestedTitleIdFields,
-+                              sizeof(kNestedTitleIdFields) / sizeof(kNestedTitleIdFields[0]),
-+                              nestedId, sizeof(nestedId)))
-+            PreferRoomTitleId(contentId, contentIdN, nestedId);
-+        char normalizedTopName[128] = {};
-+        const bool hasUsableTopName = MonitorTitleResolver::NormalizeRoomGameName(
-+            gameName, normalizedTopName, sizeof(normalizedTopName));
-+        if (!hasUsableTopName)
-+            JsonGetStrAnyList(nested, kNestedGameNameFields,
-+                              sizeof(kNestedGameNameFields) / sizeof(kNestedGameNameFields[0]),
-+                              nestedName, sizeof(nestedName));
-+        char normalizedNestedName[128] = {};
-+        if (!hasUsableTopName && MonitorTitleResolver::NormalizeRoomGameName(
-+                nestedName, normalizedNestedName, sizeof(normalizedNestedName)))
-+            snprintf(gameName, gameNameN, "%s", normalizedNestedName);
-+    }
++    u64 key = TitleKeyPack(up);
++    size_t nameLen = 0;
++    const char *name = TitleLookup(key, &nameLen);
++    if (name && name[0])
++        snprintf(out, n, "%s", name);
++    else
++        snprintf(out, n, "%s", up);      /* 未映射:直接显示标题 ID */
 +}
 +
 +/* room 对象数组 -> rooms[](graphql 与 rest 共用字段口径) */
@@ -3180,19 +3002,15 @@ index 0000000..45d0231
 +    while (qr->roomN < MONITOR_MAX_ROOMS && *p == '{') {
 +        MonitorRoom &r = qr->rooms[qr->roomN];
 +        memset(&r, 0, sizeof(r));
-+        char cid[32] = {};
-+        char gameValue[128] = {};
-+        char gameName[128] = {};
++        char cid[24] = {};
 +        char advertiseData[MonitorTitleResolver::kAdvertiseDataMaxHex + 1] = {};
 +        char hostName[MONITOR_PLAYER_LEN + 1] = {};
-+        ReadRoomTitleFields(p, cid, sizeof(cid), gameValue, sizeof(gameValue),
-+                            gameName, sizeof(gameName));
++        JsonGetStrAny(p, "contentId", "content_id", cid, sizeof(cid));
 +        JsonGetStrAny(p, "advertiseData", "advertise_data",
 +                      advertiseData, sizeof(advertiseData));
 +        JsonGetStrAny(p, "hostPlayerName", "host_player_name",
 +                      hostName, sizeof(hostName));
-+        FormatGameName(cid, gameValue, gameName, advertiseData, hostName,
-+                       r.game, sizeof(r.game));
++        FormatGameName(cid, advertiseData, hostName, r.game, sizeof(r.game));
 +        JsonGetStrAny(p, "sessionId", "session_id", r.sessionId, sizeof(r.sessionId));
 +
 +        u32 v = 0;
@@ -3283,114 +3101,34 @@ index 0000000..45d0231
 +    }
 +}
 +
-+static GraphqlSchemaCacheEntry GraphqlSchemaFor(const char *host, u16 port) {
-+    std::lock_guard<std::mutex> lock(g_graphqlSchemaCacheMutex);
-+    for (const auto &entry : g_graphqlSchemaCache) {
-+        if (entry.known && entry.port == port && strcmp(entry.host, host) == 0)
-+            return entry;
-+    }
-+    return GraphqlSchemaCacheEntry{};
-+}
-+
-+static void SaveGraphqlSchema(const char *host, u16 port,
-+                              const GraphqlQueryFields &fields) {
-+    std::lock_guard<std::mutex> lock(g_graphqlSchemaCacheMutex);
-+    u32 slot = MONITOR_MAX_SERVERS;
-+    for (u32 i = 0; i < MONITOR_MAX_SERVERS; ++i) {
-+        if (g_graphqlSchemaCache[i].known && g_graphqlSchemaCache[i].port == port &&
-+            strcmp(g_graphqlSchemaCache[i].host, host) == 0) {
-+            slot = i;
-+            break;
-+        }
-+        if (slot == MONITOR_MAX_SERVERS && !g_graphqlSchemaCache[i].known)
-+            slot = i;
-+    }
-+    if (slot == MONITOR_MAX_SERVERS) {
-+        slot = g_graphqlSchemaCacheCursor++ % MONITOR_MAX_SERVERS;
-+    }
-+    GraphqlSchemaCacheEntry entry{};
-+    snprintf(entry.host, sizeof(entry.host), "%s", host);
-+    entry.port = port;
-+    entry.known = true;
-+    entry.fields = fields;
-+    g_graphqlSchemaCache[slot] = entry;
-+}
-+
-+static GraphqlFieldFailure GraphqlResponseFailure(
-+        const char *response, const GraphqlQueryFields &fields) {
-+    const char *errors = JsonGet(response, "errors");
-+    if (!errors)
-+        return kGraphqlFailureNone;
-+    if (*errors != '[')
-+        return kGraphqlFailureOther;
-+    const char *p = JsWs(errors + 1);
-+    if (*p == ']')
-+        return kGraphqlFailureNone;
-+    while (*p && *p != ']') {
-+        const char *next = JsonSkip(p, 0);
-+        if (!next)
-+            return kGraphqlFailureOther;
-+        if (*p == '{') {
-+            char message[512] = {};
-+            if (JsonGetStr(p, "message", message, sizeof(message))) {
-+                const GraphqlFieldFailure failure =
-+                    GraphqlFailureForMessage(message, fields);
-+                if (failure != kGraphqlFailureOther)
-+                    return failure;
-+            }
-+        }
-+        p = JsWs(next);
-+        if (*p == ',')
-+            p = JsWs(p + 1);
-+        else
-+            break;
-+    }
-+    return kGraphqlFailureOther;
-+}
-+
-+static bool QueryGraphqlRequest(const char *host, u16 port,
-+                                const GraphqlQueryFields &fields,
-+                                QueryResult *qr, bool *retryLegacy,
-+                                GraphqlFieldFailure *failureOut) {
++static bool QueryGraphqlRequest(const char *host, u16 port, const char *query,
++                                QueryResult *qr, bool *retryLegacy) {
 +    if (retryLegacy)
 +        *retryLegacy = false;
-+    if (failureOut)
-+        *failureOut = kGraphqlFailureNone;
-+    if (!qr)
-+        return false;
-+    *qr = QueryResult{};
-+
 +    char url[160];
 +    snprintf(url, sizeof(url), "http://%s:%u/", host, (unsigned)port);
-+    const std::string query = BuildGraphqlQuery(fields);
 +    std::string payload = "{\"query\":\"";
 +    payload += query;                    /* 查询串无引号/反斜杠,可直接拼接 */
 +    payload += "\"}";
 +    std::string resp;
-+    const bool httpOk = HttpPostJson(url, payload.c_str(), &resp, 6000, kMaxHttpBody);
-+    GraphqlFieldFailure failure = GraphqlResponseFailure(resp.c_str(), fields);
-+    if (!httpOk) {
-+        /* A JSON GraphQL validation body can identify missing schema fields.
-+         * Plain 404/405 responses are REST endpoints, so do not fan out many
-+         * schema probes against them. */
-+        if (failureOut)
-+            *failureOut = failure;
-+        if (retryLegacy && failure != kGraphqlFailureNone)
-+            *retryLegacy = true;
-+        return false;
-+    }
-+    if (failure != kGraphqlFailureNone) {
-+        if (failureOut)
-+            *failureOut = failure;
-+        if (retryLegacy)
++    if (!HttpPostJson(url, payload.c_str(), &resp, 6000, kMaxHttpBody)) {
++        /* g_httpErr >= 500 && < 600 表示 HTTP 4xx (错误码 = 100 + status);
++         * 这种响应可能是旧 schema 的字段校验错误,允许旧查询再试一次。 */
++        if (retryLegacy && g_httpErr >= 500 && g_httpErr < 600)
 +            *retryLegacy = true;
 +        return false;
 +    }
 +
++    /* GraphQL 通常以 HTTP 200 返回字段校验错误;网络超时/断连则直接
++     * 交给 REST 回退,避免额外等待一个超时周期。 */
++    const char *errors = JsonGet(resp.c_str(), "errors");
++    if (errors && *errors == '[' && *JsWs(errors + 1) != ']') {
++        if (retryLegacy)
++            *retryLegacy = true;
++        return false;
++    }
 +    const char *data = JsonGet(resp.c_str(), "data");
 +    if (!data) {
-+        if (failureOut)
-+            *failureOut = kGraphqlFailureOther;
 +        if (retryLegacy)
 +            *retryLegacy = true;
 +        return false;
@@ -3398,8 +3136,6 @@ index 0000000..45d0231
 +    u32 v = 0;
 +    const char *info = JsonGet(data, "serverInfo");
 +    if (!info || !JsonGetU32(info, "online", &v)) {
-+        if (failureOut)
-+            *failureOut = kGraphqlFailureOther;
 +        if (retryLegacy)
 +            *retryLegacy = true;
 +        return false;
@@ -3411,186 +3147,25 @@ index 0000000..45d0231
 +    return true;
 +}
 +
-+static void MergeGraphqlGameLabels(QueryResult *base, const QueryResult *enriched) {
-+    if (!base || !enriched)
-+        return;
-+    for (u32 i = 0; i < enriched->roomN; ++i) {
-+        const MonitorRoom &candidate = enriched->rooms[i];
-+        s32 match = -1;
-+        if (!candidate.sessionId[0])
-+            continue;
-+        for (u32 j = 0; j < base->roomN; ++j) {
-+            if (base->rooms[j].sessionId[0] &&
-+                strcmp(base->rooms[j].sessionId, candidate.sessionId) == 0) {
-+                match = static_cast<s32>(j);
-+                break;
-+            }
-+        }
-+        if (match < 0)
-+            continue;
-+        MonitorRoom &room = base->rooms[match];
-+        if (RoomGameLabelQuality(candidate.game) > RoomGameLabelQuality(room.game))
-+            snprintf(room.game, sizeof(room.game), "%s", candidate.game);
-+    }
-+}
-+
-+static bool RoomNeedsGraphqlGame(const QueryResult *qr) {
-+    if (!qr)
-+        return false;
-+    for (u32 i = 0; i < qr->roomN; ++i) {
-+        if (RoomGameLabelQuality(qr->rooms[i].game) < 2)
-+            return true;
-+    }
-+    return false;
-+}
-+
-+static void QueryGraphqlGame(const char *host, u16 port,
-+                             const GraphqlQueryFields &baseFields,
-+                             QueryResult *base) {
-+    if (!base || !RoomNeedsGraphqlGame(base) || baseFields.gameSubfieldsDone ||
-+        baseFields.game == kGraphqlGameUnsupported ||
-+        baseFields.game == kGraphqlGameScalar)
-+        return;
-+
-+    u8 lastSupportedMode = baseFields.game;
-+    u8 mode = baseFields.game == kGraphqlGameNone
-+        ? static_cast<u8>(kGraphqlGameScalar)
-+        : NextGraphqlGameObjectField(baseFields.game);
-+    if (mode == kGraphqlGameUnsupported) {
-+        GraphqlQueryFields finished = baseFields;
-+        finished.gameSubfieldsDone = true;
-+        SaveGraphqlSchema(host, port, finished);
-+        return;
-+    }
-+
-+    for (int attempt = 0; attempt < 5; ++attempt) {
-+        GraphqlQueryFields fields = baseFields;
-+        fields.game = mode;
-+        bool retry = false;
-+        GraphqlFieldFailure failure = kGraphqlFailureNone;
-+        if (QueryGraphqlRequest(host, port, fields, &g_graphqlCandidateResult,
-+                                &retry, &failure)) {
-+            SaveGraphqlSchema(host, port, fields);
-+            lastSupportedMode = mode;
-+            MergeGraphqlGameLabels(base, &g_graphqlCandidateResult);
-+            if (mode == kGraphqlGameScalar || !RoomNeedsGraphqlGame(base))
-+                return;
-+            mode = NextGraphqlGameObjectField(mode);
-+            if (mode != kGraphqlGameUnsupported)
-+                continue;
-+            GraphqlQueryFields finished = fields;
-+            finished.gameSubfieldsDone = true;
-+            SaveGraphqlSchema(host, port, finished);
-+            return;
-+        }
-+        if (!retry)
-+            return;
-+        if (mode == kGraphqlGameScalar &&
-+            failure == kGraphqlFailureGameNeedsObject) {
-+            mode = kGraphqlGameObjectName;
-+            continue;
-+        }
-+        if (failure == kGraphqlFailureGameSubfield &&
-+            mode != kGraphqlGameScalar) {
-+            mode = NextGraphqlGameObjectField(mode);
-+            if (mode != kGraphqlGameUnsupported)
-+                continue;
-+            if (lastSupportedMode == kGraphqlGameNone) {
-+                GraphqlQueryFields unsupported = baseFields;
-+                unsupported.game = kGraphqlGameUnsupported;
-+                SaveGraphqlSchema(host, port, unsupported);
-+            } else {
-+                GraphqlQueryFields finished = baseFields;
-+                finished.game = lastSupportedMode;
-+                finished.gameSubfieldsDone = true;
-+                SaveGraphqlSchema(host, port, finished);
-+            }
-+            return;
-+        }
-+        if (failure == kGraphqlFailureGame) {
-+            GraphqlQueryFields unsupported = baseFields;
-+            unsupported.game = kGraphqlGameUnsupported;
-+            SaveGraphqlSchema(host, port, unsupported);
-+        }
-+        return;
-+    }
-+    if (lastSupportedMode == kGraphqlGameNone) {
-+        GraphqlQueryFields unsupported = baseFields;
-+        unsupported.game = kGraphqlGameUnsupported;
-+        SaveGraphqlSchema(host, port, unsupported);
-+    }
-+}
-+
 +static bool QueryGraphql(const char *host, u16 port, QueryResult *qr) {
-+    if (!qr)
++    /* Prefer title data + connected-node flags. On schema validation errors,
++     * progressively drop optional fields; transport errors still go straight
++     * to REST rather than paying for another timeout. */
++    bool retry = false;
++    if (QueryGraphqlRequest(host, port, kGraphqlQuery, qr, &retry))
++        return true;
++    if (!retry)
 +        return false;
-+    const GraphqlSchemaCacheEntry cached = GraphqlSchemaFor(host, port);
-+    GraphqlQueryFields fields = cached.known ? cached.fields : GraphqlQueryFields{};
 +
-+    /* Field errors are cheap schema-validation failures; transport errors are
-+     * not retried. Negotiate common title aliases, ad-data aliases and old
-+     * NodeInfo connection fields, then cache the working shape per endpoint. */
-+    for (int attempt = 0; attempt < 24; ++attempt) {
-+        bool retry = false;
-+        GraphqlFieldFailure failure = kGraphqlFailureNone;
-+        if (QueryGraphqlRequest(host, port, fields, qr, &retry, &failure)) {
-+            SaveGraphqlSchema(host, port, fields);
-+            QueryGraphqlGame(host, port, fields, qr);
++    const char *fallback[] = { kGraphqlQueryNoAdvert,
++                               kGraphqlQueryNoConnection,
++                               kGraphqlQueryOldest };
++    for (const char *query : fallback) {
++        bool retryNext = false;
++        if (QueryGraphqlRequest(host, port, query, qr, &retryNext))
 +            return true;
-+        }
-+        if (!retry)
++        if (!retryNext)
 +            return false;
-+
-+        switch (failure) {
-+            case kGraphqlFailureTitle:
-+                if (fields.title != kGraphqlTitleNone) {
-+                    fields.title = NextGraphqlTitleField(fields.title);
-+                    break;
-+                }
-+                return false;
-+            case kGraphqlFailureAdvertise:
-+                if (fields.advertise != kGraphqlAdvertiseNone) {
-+                    fields.advertise = NextGraphqlAdvertiseField(fields.advertise);
-+                    break;
-+                }
-+                return false;
-+            case kGraphqlFailureConnection:
-+                if (fields.connection != kGraphqlConnectionNone) {
-+                    fields.connection = NextGraphqlConnectionField(fields.connection);
-+                    break;
-+                }
-+                return false;
-+            case kGraphqlFailureGameNeedsObject:
-+                if (fields.game == kGraphqlGameScalar) {
-+                    fields.game = kGraphqlGameObjectName;
-+                    fields.gameSubfieldsDone = false;
-+                    break;
-+                }
-+                fields.game = kGraphqlGameUnsupported;
-+                break;
-+            case kGraphqlFailureGame:
-+                fields.game = kGraphqlGameUnsupported;
-+                break;
-+            case kGraphqlFailureGameSubfield:
-+                if (fields.game >= kGraphqlGameObjectName &&
-+                    fields.game <= kGraphqlGameObjectId) {
-+                    fields.game = NextGraphqlGameObjectField(fields.game);
-+                    fields.gameSubfieldsDone = false;
-+                    break;
-+                }
-+                return false;
-+            case kGraphqlFailureOther:
-+            case kGraphqlFailureNone:
-+            default:
-+                if (fields.advertise != kGraphqlAdvertiseNone) {
-+                    fields.advertise = NextGraphqlAdvertiseField(fields.advertise);
-+                } else if (fields.connection != kGraphqlConnectionNone) {
-+                    fields.connection = NextGraphqlConnectionField(fields.connection);
-+                } else {
-+                    return false;
-+                }
-+                break;
-+        }
 +    }
 +    return false;
 +}
@@ -3675,8 +3250,7 @@ index 0000000..45d0231
 +    char hostName[MONITOR_PLAYER_LEN + 1] = {};
 +    memcpy(hostName, p + 0x74, MONITOR_PLAYER_LEN);
 +    hostName[MONITOR_PLAYER_LEN] = 0;
-+    FormatGameName(cid, nullptr, nullptr, advertiseHex, hostName,
-+                   out->game, sizeof(out->game));
++    FormatGameName(cid, advertiseHex, hostName, out->game, sizeof(out->game));
 +
 +    u32 maxN = p[0x66];
 +    u32 cnt = p[0x67];
@@ -4440,215 +4014,6 @@ index 0000000..3e9ee8a
 +
 +/* 诊断日志:写 sdmc:/config/ldn_mitm/monitor.log(UI 侧打点用)。 */
 +void MonitorLog(const char *msg);
-diff --git a/overlay/source/monitor_graphql_compat.hpp b/overlay/source/monitor_graphql_compat.hpp
-new file mode 100644
-index 0000000..b356521
---- /dev/null
-+++ b/overlay/source/monitor_graphql_compat.hpp
-@@ -0,0 +1,203 @@
-+#pragma once
-+
-+#include <string>
-+#include <string.h>
-+
-+/* Pure GraphQL schema negotiation helpers. Kept independent of Switch APIs so
-+ * host tests can exercise query construction and field-error fallbacks. */
-+namespace MonitorGraphqlCompat {
-+
-+enum GraphqlTitleField : unsigned char {
-+    kGraphqlTitleNone = 0,
-+    kGraphqlTitleContentId,
-+    kGraphqlTitleContentIdSnake,
-+    kGraphqlTitleId,
-+    kGraphqlTitleIdSnake,
-+    kGraphqlTitleProgramId,
-+    kGraphqlTitleProgramIdSnake,
-+    kGraphqlTitleApplicationId,
-+    kGraphqlTitleApplicationIdSnake,
-+    kGraphqlTitleGameId,
-+    kGraphqlTitleGameIdSnake,
-+    kGraphqlTitleLocalCommunicationId,
-+    kGraphqlTitleLocalCommunicationIdSnake,
-+    kGraphqlTitleCommunicationId,
-+    kGraphqlTitleCommunicationIdSnake,
-+};
-+enum GraphqlAdvertiseField : unsigned char {
-+    kGraphqlAdvertiseNone = 0,
-+    kGraphqlAdvertiseData,
-+    kGraphqlAdvertiseDataSnake,
-+};
-+enum GraphqlConnectionField : unsigned char {
-+    kGraphqlConnectionNone = 0,
-+    kGraphqlConnectionIsConnected,
-+    kGraphqlConnectionIsConnectedSnake,
-+};
-+enum GraphqlGameField : unsigned char {
-+    kGraphqlGameNone = 0,
-+    kGraphqlGameScalar,
-+    kGraphqlGameObjectName,
-+    kGraphqlGameObjectContentId,
-+    kGraphqlGameObjectTitleId,
-+    kGraphqlGameObjectId,
-+    kGraphqlGameUnsupported,
-+};
-+enum GraphqlFieldFailure : unsigned char {
-+    kGraphqlFailureNone = 0,
-+    kGraphqlFailureTitle,
-+    kGraphqlFailureAdvertise,
-+    kGraphqlFailureConnection,
-+    kGraphqlFailureGameNeedsObject,
-+    kGraphqlFailureGame,
-+    kGraphqlFailureGameSubfield,
-+    kGraphqlFailureOther,
-+};
-+struct GraphqlQueryFields {
-+    unsigned char title = kGraphqlTitleContentId;
-+    unsigned char advertise = kGraphqlAdvertiseData;
-+    unsigned char connection = kGraphqlConnectionIsConnected;
-+    unsigned char game = kGraphqlGameNone;
-+    bool gameSubfieldsDone = false;
-+};
-+
-+inline const char *GraphqlTitleFieldName(unsigned char field) {
-+    switch (field) {
-+        case kGraphqlTitleContentId: return "contentId";
-+        case kGraphqlTitleContentIdSnake: return "content_id";
-+        case kGraphqlTitleId: return "titleId";
-+        case kGraphqlTitleIdSnake: return "title_id";
-+        case kGraphqlTitleProgramId: return "programId";
-+        case kGraphqlTitleProgramIdSnake: return "program_id";
-+        case kGraphqlTitleApplicationId: return "applicationId";
-+        case kGraphqlTitleApplicationIdSnake: return "application_id";
-+        case kGraphqlTitleGameId: return "gameId";
-+        case kGraphqlTitleGameIdSnake: return "game_id";
-+        case kGraphqlTitleLocalCommunicationId: return "localCommunicationId";
-+        case kGraphqlTitleLocalCommunicationIdSnake: return "local_communication_id";
-+        case kGraphqlTitleCommunicationId: return "communicationId";
-+        case kGraphqlTitleCommunicationIdSnake: return "communication_id";
-+        default: return nullptr;
-+    }
-+}
-+
-+inline const char *GraphqlAdvertiseFieldName(unsigned char field) {
-+    switch (field) {
-+        case kGraphqlAdvertiseData: return "advertiseData";
-+        case kGraphqlAdvertiseDataSnake: return "advertise_data";
-+        default: return nullptr;
-+    }
-+}
-+
-+inline const char *GraphqlConnectionFieldName(unsigned char field) {
-+    switch (field) {
-+        case kGraphqlConnectionIsConnected: return "isConnected";
-+        case kGraphqlConnectionIsConnectedSnake: return "is_connected";
-+        default: return nullptr;
-+    }
-+}
-+
-+inline const char *GraphqlGameSubfieldName(unsigned char gameField) {
-+    switch (gameField) {
-+        case kGraphqlGameObjectName: return "name";
-+        case kGraphqlGameObjectContentId: return "contentId";
-+        case kGraphqlGameObjectTitleId: return "titleId";
-+        case kGraphqlGameObjectId: return "id";
-+        default: return nullptr;
-+    }
-+}
-+
-+inline std::string BuildGraphqlQuery(const GraphqlQueryFields &fields) {
-+    std::string query = "query PublicRoomSnapshot { serverInfo { online idle } room { sessionId";
-+    if (const char *field = GraphqlTitleFieldName(fields.title)) {
-+        query += ' ';
-+        query += field;
-+    }
-+    if (const char *field = GraphqlAdvertiseFieldName(fields.advertise)) {
-+        query += ' ';
-+        query += field;
-+    }
-+    query += " hostPlayerName nodeCount nodeCountMax";
-+    if (fields.game == kGraphqlGameScalar)
-+        query += " game";
-+    else if (const char *subfield = GraphqlGameSubfieldName(fields.game)) {
-+        query += " game { ";
-+        query += subfield;
-+        query += " }";
-+    }
-+    query += " nodes { playerName";
-+    if (const char *field = GraphqlConnectionFieldName(fields.connection)) {
-+        query += ' ';
-+        query += field;
-+    }
-+    query += " } } }";
-+    return query;
-+}
-+
-+inline bool GraphqlUnknownFieldMessage(const char *message, const char *field) {
-+    if (!message || !field)
-+        return false;
-+    const char *p = strstr(message, "Cannot query field");
-+    if (!p)
-+        p = strstr(message, "cannot query field");
-+    if (!p)
-+        return false;
-+    p += strlen("Cannot query field");
-+    while (*p == ' ')
-+        ++p;
-+    const char quote = *p;
-+    if (quote != '"' && quote != '\'' && quote != '`')
-+        return false;
-+    ++p;
-+    const size_t fieldLen = strlen(field);
-+    return strncmp(p, field, fieldLen) == 0 && p[fieldLen] == quote;
-+}
-+
-+inline GraphqlFieldFailure GraphqlFailureForMessage(
-+        const char *message, const GraphqlQueryFields &fields) {
-+    if (!message)
-+        return kGraphqlFailureOther;
-+    if (fields.game == kGraphqlGameScalar &&
-+        strstr(message, "must have a selection of subfields") &&
-+        strstr(message, "game"))
-+        return kGraphqlFailureGameNeedsObject;
-+    const char *gameSubfield = GraphqlGameSubfieldName(fields.game);
-+    if (gameSubfield && GraphqlUnknownFieldMessage(message, gameSubfield))
-+        return kGraphqlFailureGameSubfield;
-+    if (fields.game != kGraphqlGameNone && fields.game != kGraphqlGameUnsupported &&
-+        GraphqlUnknownFieldMessage(message, "game"))
-+        return kGraphqlFailureGame;
-+    const char *titleField = GraphqlTitleFieldName(fields.title);
-+    if (titleField && GraphqlUnknownFieldMessage(message, titleField))
-+        return kGraphqlFailureTitle;
-+    const char *advertiseField = GraphqlAdvertiseFieldName(fields.advertise);
-+    if (advertiseField && GraphqlUnknownFieldMessage(message, advertiseField))
-+        return kGraphqlFailureAdvertise;
-+    const char *connectionField = GraphqlConnectionFieldName(fields.connection);
-+    if (connectionField && GraphqlUnknownFieldMessage(message, connectionField))
-+        return kGraphqlFailureConnection;
-+    return kGraphqlFailureOther;
-+}
-+
-+inline unsigned char NextGraphqlTitleField(unsigned char field) {
-+    return field < kGraphqlTitleCommunicationIdSnake
-+        ? static_cast<unsigned char>(field + 1)
-+        : static_cast<unsigned char>(kGraphqlTitleNone);
-+}
-+inline unsigned char NextGraphqlAdvertiseField(unsigned char field) {
-+    return field < kGraphqlAdvertiseDataSnake
-+        ? static_cast<unsigned char>(field + 1)
-+        : static_cast<unsigned char>(kGraphqlAdvertiseNone);
-+}
-+inline unsigned char NextGraphqlConnectionField(unsigned char field) {
-+    return field < kGraphqlConnectionIsConnectedSnake
-+        ? static_cast<unsigned char>(field + 1)
-+        : static_cast<unsigned char>(kGraphqlConnectionNone);
-+}
-+inline unsigned char NextGraphqlGameObjectField(unsigned char field) {
-+    return field < kGraphqlGameObjectId
-+        ? static_cast<unsigned char>(field + 1)
-+        : static_cast<unsigned char>(kGraphqlGameUnsupported);
-+}
-+
-+} // namespace MonitorGraphqlCompat
 diff --git a/overlay/source/monitor_player_filter.hpp b/overlay/source/monitor_player_filter.hpp
 new file mode 100644
 index 0000000..a96f729
@@ -4717,10 +4082,10 @@ index 0000000..a0a3d78
 +} // namespace MonitorTargetGeneration
 diff --git a/overlay/source/monitor_title_resolver.hpp b/overlay/source/monitor_title_resolver.hpp
 new file mode 100644
-index 0000000..93dae19
+index 0000000..d0ac8cc
 --- /dev/null
 +++ b/overlay/source/monitor_title_resolver.hpp
-@@ -0,0 +1,461 @@
+@@ -0,0 +1,148 @@
 +#pragma once
 +
 +#include <stddef.h>
@@ -4799,291 +4164,6 @@ index 0000000..93dae19
 +    return true;
 +}
 +
-+/* Accept common API spellings and harmless separators, but never infer a title
-+ * from local process state. A valid ID is exactly sixteen hexadecimal digits. */
-+inline bool NormalizeTitleId(const char *src, char *out, size_t outN) {
-+    if (out && outN > 0)
-+        out[0] = 0;
-+    if (!src || !out || outN < 17)
-+        return false;
-+
-+    const char *p = src;
-+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
-+        ++p;
-+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
-+        p += 2;
-+
-+    size_t len = 0;
-+    for (; *p; ++p) {
-+        const int digit = HexDigit(*p);
-+        if (digit >= 0) {
-+            if (len >= 16) {
-+                out[0] = 0;
-+                return false;
-+            }
-+            out[len++] = "0123456789ABCDEF"[digit];
-+        } else if (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' ||
-+                   *p == ':' || *p == '-' || *p == '_') {
-+            continue;
-+        } else {
-+            out[0] = 0;
-+            return false;
-+        }
-+    }
-+    if (len != 16) {
-+        out[0] = 0;
-+        return false;
-+    }
-+    out[16] = 0;
-+    return true;
-+}
-+
-+inline bool IsUnknownTitleId(const char *titleId) {
-+    if (!titleId || strlen(titleId) != 16)
-+        return false;
-+    for (size_t i = 0; i < 16; ++i) {
-+        if (titleId[i] != 'F' && titleId[i] != 'f')
-+            return false;
-+    }
-+    return true;
-+}
-+
-+inline bool AsciiCaseEqual(const char *left, const char *right) {
-+    if (!left || !right)
-+        return false;
-+    while (*left && *right) {
-+        char a = *left++;
-+        char b = *right++;
-+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
-+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
-+        if (a != b)
-+            return false;
-+    }
-+    return *left == 0 && *right == 0;
-+}
-+
-+inline bool AsciiCaseStartsWith(const char *value, const char *prefix) {
-+    if (!value || !prefix)
-+        return false;
-+    while (*prefix) {
-+        char a = *value++;
-+        char b = *prefix++;
-+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
-+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
-+        if (a != b)
-+            return false;
-+    }
-+    return true;
-+}
-+
-+inline bool AsciiCaseContains(const char *value, const char *needle) {
-+    if (!value || !needle || !needle[0])
-+        return false;
-+    const size_t needleLen = strlen(needle);
-+    for (const char *p = value; *p; ++p) {
-+        size_t i = 0;
-+        while (i < needleLen && p[i]) {
-+            char a = p[i];
-+            char b = needle[i];
-+            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
-+            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
-+            if (a != b)
-+                break;
-+            ++i;
-+        }
-+        if (i == needleLen)
-+            return true;
-+    }
-+    return false;
-+}
-+
-+enum class PokemonScarletVioletVersion : unsigned char {
-+    Unspecified = 0,
-+    Scarlet,
-+    Violet,
-+};
-+
-+inline bool IsPokemonScarletVioletFamilyName(const char *name) {
-+    if (!name)
-+        return false;
-+    const bool hasScarlet = strstr(name, "朱") != nullptr ||
-+                            AsciiCaseContains(name, "scarlet");
-+    const bool hasViolet = strstr(name, "紫") != nullptr ||
-+                           AsciiCaseContains(name, "violet");
-+    return hasScarlet && hasViolet;
-+}
-+
-+inline PokemonScarletVioletVersion PokemonVersionFromRoomName(const char *name) {
-+    if (!name || IsPokemonScarletVioletFamilyName(name))
-+        return PokemonScarletVioletVersion::Unspecified;
-+    if (strstr(name, "紫") || AsciiCaseContains(name, "violet"))
-+        return PokemonScarletVioletVersion::Violet;
-+    if (strstr(name, "朱") || AsciiCaseContains(name, "scarlet"))
-+        return PokemonScarletVioletVersion::Scarlet;
-+    return PokemonScarletVioletVersion::Unspecified;
-+}
-+
-+inline bool NormalizeRoomGameName(const char *src, char *out, size_t outN) {
-+    if (out && outN > 0)
-+        out[0] = 0;
-+    if (!src || !out || outN < 2)
-+        return false;
-+
-+    const char *begin = src;
-+    while (*begin == ' ' || *begin == '\t' || *begin == '\r' || *begin == '\n')
-+        ++begin;
-+    size_t inputLen = strlen(begin);
-+    while (inputLen > 0 && (begin[inputLen - 1] == ' ' || begin[inputLen - 1] == '\t' ||
-+                            begin[inputLen - 1] == '\r' || begin[inputLen - 1] == '\n'))
-+        --inputLen;
-+    if (inputLen == 0)
-+        return false;
-+
-+    size_t copyLen = inputLen < outN - 1 ? inputLen : outN - 1;
-+    /* Do not cut a UTF-8 code point when a long remote label fills the UI field. */
-+    if (copyLen < inputLen) {
-+        while (copyLen > 0 && ((unsigned char)begin[copyLen] & 0xc0) == 0x80)
-+            --copyLen;
-+        if (copyLen > 0) {
-+            const unsigned char last = (unsigned char)begin[copyLen - 1];
-+            const size_t need = (last & 0x80) == 0 ? 1 :
-+                ((last & 0xe0) == 0xc0 ? 2 : ((last & 0xf0) == 0xe0 ? 3 :
-+                 ((last & 0xf8) == 0xf0 ? 4 : 1)));
-+            size_t have = 1;
-+            for (size_t i = copyLen; i > 0 &&
-+                 ((unsigned char)begin[i - 1] & 0xc0) == 0x80; --i)
-+                ++have;
-+            if (have < need)
-+                copyLen -= have;
-+        }
-+    }
-+
-+    size_t outLen = 0;
-+    bool pendingSpace = false;
-+    for (size_t i = 0; i < copyLen; ++i) {
-+        unsigned char c = (unsigned char)begin[i];
-+        if (c < 0x20 || c == 0x7f || c == ' ' || c == '\t') {
-+            pendingSpace = outLen > 0;
-+            continue;
-+        }
-+        if (pendingSpace && outLen + 1 < outN)
-+            out[outLen++] = ' ';
-+        pendingSpace = false;
-+        if (outLen + 1 >= outN)
-+            break;
-+        out[outLen++] = (char)c;
-+    }
-+    while (outLen > 0 && out[outLen - 1] == ' ')
-+        --outLen;
-+    out[outLen] = 0;
-+    char maybeTitleId[17] = {};
-+    if (outLen == 0 || NormalizeTitleId(out, maybeTitleId, sizeof(maybeTitleId)))
-+        return false;
-+    if (strncmp(out, "未知", 6) == 0)
-+        return false;
-+    if (AsciiCaseStartsWith(out, "unknown") || AsciiCaseEqual(out, "n/a") ||
-+        AsciiCaseEqual(out, "null") || AsciiCaseEqual(out, "none"))
-+        return false;
-+    return true;
-+}
-+
-+inline unsigned char AdvertiseByte(const char *hex, size_t byteOffset) {
-+    const size_t i = byteOffset * 2;
-+    return (unsigned char)((HexDigit(hex[i]) << 4) | HexDigit(hex[i + 1]));
-+}
-+
-+inline bool AdvertiseBytesAreZero(const char *hex, size_t startByte,
-+                                  size_t byteCount) {
-+    for (size_t i = 0; i < byteCount; ++i) {
-+        if (AdvertiseByte(hex, startByte + i) != 0)
-+            return false;
-+    }
-+    return true;
-+}
-+
-+/* S/V carries 40 game bytes after its 0x5c-byte Pia property header.
-+ * Retail Link Trade search beacons have all-zero game bytes or a changing
-+ * four-byte field at +0x21. Link-Code sessions store a printable code at
-+ * +0x00 and its little-endian length at +0x24. Live rooms showed markers
-+ * aa 88 f4, aa e8 8c and aa 88 72: the final byte varies across sessions,
-+ * while the first byte and marker family remain stable. */
-+inline bool IsPokemonScarletVioletGameData(const char *hex) {
-+    static constexpr size_t kGameStart = 0x5c;
-+    static constexpr size_t kGameSize = 40;
-+
-+    if (AdvertiseBytesAreZero(hex, kGameStart, kGameSize))
-+        return true;
-+
-+    /* Searching Link Trade beacon: changing bytes at game-data +0x21..+0x24. */
-+    if (AdvertiseBytesAreZero(hex, kGameStart, 0x21) &&
-+        !AdvertiseBytesAreZero(hex, kGameStart + 0x21, 4) &&
-+        AdvertiseBytesAreZero(hex, kGameStart + 0x25, 3))
-+        return true;
-+
-+    /* Link Code sessions use a printable code and a little-endian u32 length. */
-+    const unsigned int codeLen =
-+        (unsigned int)AdvertiseByte(hex, kGameStart + 0x24) |
-+        ((unsigned int)AdvertiseByte(hex, kGameStart + 0x25) << 8) |
-+        ((unsigned int)AdvertiseByte(hex, kGameStart + 0x26) << 16) |
-+        ((unsigned int)AdvertiseByte(hex, kGameStart + 0x27) << 24);
-+    if (codeLen == 0) {
-+        /* Also allow an open Union Circle with its observed marker. */
-+        return AdvertiseBytesAreZero(hex, kGameStart, 0x21) &&
-+               AdvertiseByte(hex, kGameStart + 0x21) == 0xaa &&
-+               AdvertiseByte(hex, kGameStart + 0x22) == 0x08 &&
-+               AdvertiseByte(hex, kGameStart + 0x23) == 0x3e &&
-+               AdvertiseBytesAreZero(hex, kGameStart + 0x24, 4);
-+    }
-+    if (codeLen > 16)
-+        return false;
-+
-+    for (size_t i = 0; i < codeLen; ++i) {
-+        const unsigned char c = AdvertiseByte(hex, kGameStart + i);
-+        if (c < 0x21 || c > 0x7e)
-+            return false;
-+    }
-+    if (!AdvertiseBytesAreZero(hex, kGameStart + codeLen, 0x21 - codeLen))
-+        return false;
-+
-+    const bool noModeMarker =
-+        AdvertiseBytesAreZero(hex, kGameStart + 0x21, 3);
-+    const bool unionCircleMarker =
-+        AdvertiseByte(hex, kGameStart + 0x21) == 0xaa &&
-+        AdvertiseByte(hex, kGameStart + 0x22) == 0x08 &&
-+        AdvertiseByte(hex, kGameStart + 0x23) == 0x3e;
-+    const unsigned char observedMarkerPrefix =
-+        AdvertiseByte(hex, kGameStart + 0x21);
-+    const unsigned char observedMarkerMode =
-+        AdvertiseByte(hex, kGameStart + 0x22);
-+    const bool observedScarletVioletMarker =
-+        observedMarkerPrefix == 0xaa &&
-+        (observedMarkerMode == 0x08 || observedMarkerMode == 0x88 ||
-+         observedMarkerMode == 0xe8);
-+    return (noModeMarker || unionCircleMarker || observedScarletVioletMarker) &&
-+           AdvertiseByte(hex, kGameStart + 0x24) == codeLen &&
-+           AdvertiseBytesAreZero(hex, kGameStart + 0x25, 3);
-+}
-+
-+/* Scarlet and Violet share Scarlet's local-communication ID on the air.
-+ * Their 132-byte app data is a 0x5c Pia block plus 40 game-specific bytes. */
-+inline bool IsPokemonScarletVioletAdvertiseHex(const char *hex, size_t hexLen) {
-+    static constexpr size_t kAdvertiseBytes = 132;
-+    if (!hex || hexLen != kAdvertiseBytes * 2 ||
-+        memcmp(hex, "005c150015", 10) != 0)
-+        return false;
-+
-+    /* Pia header: player limit enabled, 1-4 players, UTF-8 single-space name. */
-+    if (AdvertiseByte(hex, 0x15) != 1 ||
-+        AdvertiseByte(hex, 0x16) < 1 || AdvertiseByte(hex, 0x16) > 4 ||
-+        AdvertiseByte(hex, 0x17) != 0 || AdvertiseByte(hex, 0x18) != 0 ||
-+        AdvertiseByte(hex, 0x19) != 0 || AdvertiseByte(hex, 0x1a) != 1 ||
-+        AdvertiseByte(hex, 0x1b) != 1 || AdvertiseByte(hex, 0x1c) != 0x20 ||
-+        !AdvertiseBytesAreZero(hex, 0x1d, 0x5c - 0x1d))
-+        return false;
-+
-+    return IsPokemonScarletVioletGameData(hex);
-+}
-+
 +/* Returns false when the advertisement is absent or does not match a known
 + * signature. The caller must then show the safe unknown-game fallback. */
 +inline bool ResolveAdvertisedTitleId(const char *advertiseData,
@@ -5107,9 +4187,6 @@ index 0000000..93dae19
 +    if (hexLen >= 4 && hex[0] == '7' && hex[1] == 'b' &&
 +        hex[hexLen - 2] == '7' && hex[hexLen - 1] == 'd')
 +        return CopyTitleId("01005EE0036EC000", outTitleId, outN);
-+
-+    if (IsPokemonScarletVioletAdvertiseHex(hex, hexLen))
-+        return CopyTitleId("0100A3D008C5C000", outTitleId, outN);
 +
 +    static const char kDelimiter[] = "00000004";
 +    const size_t delimiterLen = sizeof(kDelimiter) - 1;
@@ -5156,123 +4233,7 @@ index 0000000..93dae19
 +    return false;
 +}
 +
-+/* Resolve IDs from the room's explicit title field or game value, then use only
-+ * that room's own advertisement when the ID is absent/all-F. */
-+inline bool ResolveRoomTitleId(const char *contentId, const char *gameValue,
-+                               const char *advertiseData,
-+                               const char *hostPlayerName,
-+                               char *outTitleId, size_t outN) {
-+    if (outTitleId && outN > 0)
-+        outTitleId[0] = 0;
-+    if (!outTitleId || outN < 17)
-+        return false;
-+
-+    char candidate[17] = {};
-+    if (NormalizeTitleId(contentId, candidate, sizeof(candidate)) &&
-+        !IsUnknownTitleId(candidate))
-+        return CopyTitleId(candidate, outTitleId, outN);
-+    if (NormalizeTitleId(gameValue, candidate, sizeof(candidate)) &&
-+        !IsUnknownTitleId(candidate))
-+        return CopyTitleId(candidate, outTitleId, outN);
-+
-+    if (ResolveAdvertisedTitleId(advertiseData, hostPlayerName,
-+                                 candidate, sizeof(candidate)))
-+        return CopyTitleId(candidate, outTitleId, outN);
-+    return false;
-+}
-+
 +} // namespace MonitorTitleResolver
-diff --git a/overlay/tests/monitor_graphql_compat_test.cpp b/overlay/tests/monitor_graphql_compat_test.cpp
-new file mode 100644
-index 0000000..ee02595
---- /dev/null
-+++ b/overlay/tests/monitor_graphql_compat_test.cpp
-@@ -0,0 +1,85 @@
-+#include "../source/monitor_graphql_compat.hpp"
-+
-+#include <cassert>
-+#include <string>
-+
-+using namespace MonitorGraphqlCompat;
-+
-+int main() {
-+    GraphqlQueryFields fields{};
-+    std::string query = BuildGraphqlQuery(fields);
-+    assert(query.find("contentId") != std::string::npos);
-+    assert(query.find("advertiseData") != std::string::npos);
-+    assert(query.find("isConnected") != std::string::npos);
-+    assert(query.find(" game") == std::string::npos);
-+    fields.title = kGraphqlTitleLocalCommunicationId;
-+    assert(BuildGraphqlQuery(fields).find("localCommunicationId") != std::string::npos);
-+    fields.title = kGraphqlTitleCommunicationIdSnake;
-+    assert(BuildGraphqlQuery(fields).find("communication_id") != std::string::npos);
-+    fields.title = kGraphqlTitleContentIdSnake;
-+    fields.advertise = kGraphqlAdvertiseDataSnake;
-+    fields.connection = kGraphqlConnectionIsConnectedSnake;
-+    fields.game = kGraphqlGameScalar;
-+    query = BuildGraphqlQuery(fields);
-+    assert(query.find("content_id") != std::string::npos);
-+    assert(query.find("advertise_data") != std::string::npos);
-+    assert(query.find("is_connected") != std::string::npos);
-+    assert(query.find(" game ") != std::string::npos);
-+
-+    fields.game = kGraphqlGameObjectName;
-+    assert(BuildGraphqlQuery(fields).find("game { name }") != std::string::npos);
-+    fields.game = kGraphqlGameObjectContentId;
-+    assert(BuildGraphqlQuery(fields).find("game { contentId }") != std::string::npos);
-+    fields.game = kGraphqlGameObjectTitleId;
-+    assert(BuildGraphqlQuery(fields).find("game { titleId }") != std::string::npos);
-+    fields.game = kGraphqlGameObjectId;
-+    assert(BuildGraphqlQuery(fields).find("game { id }") != std::string::npos);
-+
-+    fields.game = kGraphqlGameNone;
-+    fields.title = kGraphqlTitleContentId;
-+    assert(GraphqlFailureForMessage(
-+        "Cannot query field \"contentId\" on type \"Room\".", fields) ==
-+        kGraphqlFailureTitle);
-+    fields.advertise = kGraphqlAdvertiseData;
-+    assert(GraphqlFailureForMessage(
-+        "Cannot query field \"advertiseData\" on type \"Room\".", fields) ==
-+        kGraphqlFailureAdvertise);
-+    fields.connection = kGraphqlConnectionIsConnected;
-+    assert(GraphqlFailureForMessage(
-+        "Cannot query field \"isConnected\" on type \"NodeInfo\".", fields) ==
-+        kGraphqlFailureConnection);
-+
-+    fields.game = kGraphqlGameScalar;
-+    assert(GraphqlFailureForMessage(
-+        "Field \"game\" of type \"Game\" must have a selection of subfields.",
-+        fields) == kGraphqlFailureGameNeedsObject);
-+    assert(GraphqlFailureForMessage(
-+        "Cannot query field \"game\" on type \"Room\".", fields) ==
-+        kGraphqlFailureGame);
-+    fields.game = kGraphqlGameObjectContentId;
-+    assert(GraphqlFailureForMessage(
-+        "Cannot query field \"contentId\" on type \"Game\".", fields) ==
-+        kGraphqlFailureGameSubfield);
-+
-+    assert(NextGraphqlTitleField(kGraphqlTitleContentId) ==
-+           kGraphqlTitleContentIdSnake);
-+    assert(NextGraphqlTitleField(kGraphqlTitleGameIdSnake) ==
-+           kGraphqlTitleLocalCommunicationId);
-+    assert(NextGraphqlTitleField(kGraphqlTitleLocalCommunicationId) ==
-+           kGraphqlTitleLocalCommunicationIdSnake);
-+    assert(NextGraphqlTitleField(kGraphqlTitleCommunicationIdSnake) ==
-+           kGraphqlTitleNone);
-+    assert(NextGraphqlAdvertiseField(kGraphqlAdvertiseData) ==
-+           kGraphqlAdvertiseDataSnake);
-+    assert(NextGraphqlConnectionField(kGraphqlConnectionIsConnected) ==
-+           kGraphqlConnectionIsConnectedSnake);
-+    assert(NextGraphqlGameObjectField(kGraphqlGameObjectName) ==
-+           kGraphqlGameObjectContentId);
-+    assert(NextGraphqlGameObjectField(kGraphqlGameObjectContentId) ==
-+           kGraphqlGameObjectTitleId);
-+    assert(NextGraphqlGameObjectField(kGraphqlGameObjectTitleId) ==
-+           kGraphqlGameObjectId);
-+    assert(NextGraphqlGameObjectField(kGraphqlGameObjectId) ==
-+           kGraphqlGameUnsupported);
-+    return 0;
-+}
 diff --git a/overlay/tests/monitor_player_filter_test.cpp b/overlay/tests/monitor_player_filter_test.cpp
 new file mode 100644
 index 0000000..bd1fe8d
@@ -5338,23 +4299,16 @@ index 0000000..a0e003f
 +}
 diff --git a/overlay/tests/monitor_title_resolver_test.cpp b/overlay/tests/monitor_title_resolver_test.cpp
 new file mode 100644
-index 0000000..24aa3b2
+index 0000000..f716702
 --- /dev/null
 +++ b/overlay/tests/monitor_title_resolver_test.cpp
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,49 @@
 +#include "../source/monitor_title_resolver.hpp"
 +
 +#include <assert.h>
 +#include <string.h>
 +
-+using MonitorTitleResolver::kAdvertiseDataMaxHex;
-+using MonitorTitleResolver::NormalizeRoomGameName;
-+using MonitorTitleResolver::NormalizeTitleId;
-+using MonitorTitleResolver::PokemonScarletVioletVersion;
-+using MonitorTitleResolver::PokemonVersionFromRoomName;
-+using MonitorTitleResolver::IsPokemonScarletVioletFamilyName;
 +using MonitorTitleResolver::ResolveAdvertisedTitleId;
-+using MonitorTitleResolver::ResolveRoomTitleId;
 +
 +static void ExpectResolved(const char *advertiseData, const char *hostName,
 +                          const char *expectedTitleId) {
@@ -5369,68 +4323,6 @@ index 0000000..24aa3b2
 +    assert(!ResolveAdvertisedTitleId(advertiseData, hostName,
 +                                     titleId, sizeof(titleId)));
 +    assert(titleId[0] == 0);
-+}
-+
-+static void SetByte(char *hex, size_t byteOffset, unsigned char value) {
-+    static const char digits[] = "0123456789abcdef";
-+    hex[byteOffset * 2] = digits[value >> 4];
-+    hex[byteOffset * 2 + 1] = digits[value & 0x0f];
-+}
-+
-+/* Build the documented 132-byte Scarlet/Violet application-data shape:
-+ * 0x5c-byte Pia header plus the game's 40 bytes. mode 0 = no code, mode 1 =
-+ * changing trade-search value, mode 2 = Link Code, mode 3 = Union Circle,
-+ * mode 4 = aa 88 f4, mode 5 = aa e8 8c, mode 6 = aa 88 72 (latest live). */
-+static void BuildScarletVioletAdvertiseData(char *hex, size_t hexSize, int mode) {
-+    static const size_t kBytes = 132;
-+    assert(hexSize >= kBytes * 2 + 1);
-+    memset(hex, '0', kBytes * 2);
-+    hex[kBytes * 2] = 0;
-+
-+    SetByte(hex, 0, 0x00);
-+    SetByte(hex, 1, 0x5c);
-+    SetByte(hex, 2, 0x15); // system communication version
-+    SetByte(hex, 3, 0x00);
-+    SetByte(hex, 4, 0x15); // application communication version
-+    SetByte(hex, 0x15, 1); // player limit enabled
-+    SetByte(hex, 0x16, 1); // one participant
-+    SetByte(hex, 0x17, 0);
-+    SetByte(hex, 0x18, 0);
-+    SetByte(hex, 0x19, 0);
-+    SetByte(hex, 0x1a, 1); // one-byte nickname
-+    SetByte(hex, 0x1b, 1); // UTF-8
-+    SetByte(hex, 0x1c, 0x20); // the published nickname is one space
-+
-+    const size_t game = 0x5c;
-+    if (mode == 1) {
-+        SetByte(hex, game + 0x21, 0xfb);
-+        SetByte(hex, game + 0x22, 0x14);
-+        SetByte(hex, game + 0x23, 0x97);
-+        SetByte(hex, game + 0x24, 0x00);
-+    } else if (mode >= 2 && mode <= 6) {
-+        SetByte(hex, game + 0, '1');
-+        SetByte(hex, game + 1, '2');
-+        SetByte(hex, game + 2, '3');
-+        SetByte(hex, game + 3, '4');
-+        if (mode >= 3) {
-+            unsigned char markerMode = 0x08;
-+            unsigned char markerTail = 0x3e;
-+            if (mode == 4) {
-+                markerMode = 0x88;
-+                markerTail = 0xf4;
-+            } else if (mode == 5) {
-+                markerMode = 0xe8;
-+                markerTail = 0x8c;
-+            } else if (mode == 6) {
-+                markerMode = 0x88;
-+                markerTail = 0x72;
-+            }
-+            SetByte(hex, game + 0x21, 0xaa);
-+            SetByte(hex, game + 0x22, markerMode);
-+            SetByte(hex, game + 0x23, markerTail);
-+        }
-+        SetByte(hex, game + 0x24, 4); // little-endian code length
-+    }
 +}
 +
 +int main() {
@@ -5449,13 +4341,6 @@ index 0000000..24aa3b2
 +    ExpectResolved("00112233445566778899aabbccddeeff4d6961", "Mia",
 +                   "0100D71004694000");
 +
-+    /* Scarlet and Violet use Scarlet's local-communication ID on both builds. */
-+    char sv[kAdvertiseDataMaxHex + 1] = {};
-+    for (int mode = 0; mode < 7; ++mode) {
-+        BuildScarletVioletAdvertiseData(sv, sizeof(sv), mode);
-+        ExpectResolved(sv, nullptr, "0100A3D008C5C000");
-+    }
-+
 +    /* Case/spacing normalization is harmless, while partial signatures are
 +     * not promoted to a title. Unknown sentinels must remain unknown. */
 +    ExpectResolved("FF FF 00 00", nullptr, "0100A250097F0000");
@@ -5465,76 +4350,6 @@ index 0000000..24aa3b2
 +                     nullptr); // Rise signature is missing its second delimiter.
 +    ExpectUnresolved("00112233445566778899aabbccddeeff4d6961", "Not-Mia");
 +    ExpectUnresolved("11223344", nullptr);
-+
-+    BuildScarletVioletAdvertiseData(sv, sizeof(sv), 0);
-+    SetByte(sv, 2, 0x14); // wrong Pia system version
-+    ExpectUnresolved(sv, nullptr);
-+    BuildScarletVioletAdvertiseData(sv, sizeof(sv), 0);
-+    SetByte(sv, 0x1c, 'A'); // unexpected nickname
-+    ExpectUnresolved(sv, nullptr);
-+    BuildScarletVioletAdvertiseData(sv, sizeof(sv), 0);
-+    SetByte(sv, 0x5c + 10, 0xaa); // unknown game-data shape
-+    ExpectUnresolved(sv, nullptr);
-+    BuildScarletVioletAdvertiseData(sv, sizeof(sv), 2);
-+    SetByte(sv, 0x5c + 0x21, 0xaa);
-+    SetByte(sv, 0x5c + 0x22, 0x12); // unrecognized marker remains unknown
-+    SetByte(sv, 0x5c + 0x23, 0xef);
-+    ExpectUnresolved(sv, nullptr);
-+    BuildScarletVioletAdvertiseData(sv, sizeof(sv), 0);
-+    strcat(sv, "00"); // app-data size is not 132 bytes
-+    ExpectUnresolved(sv, nullptr);
-+
-+    /* API title IDs may arrive under aliases and with a 0x prefix/separators. */
-+    char normalizedId[17] = {};
-+    assert(NormalizeTitleId(" 0x0100-abcd-ef01-2000 ",
-+                            normalizedId, sizeof(normalizedId)));
-+    assert(strcmp(normalizedId, "0100ABCDEF012000") == 0);
-+    assert(!NormalizeTitleId("not-a-title-id", normalizedId, sizeof(normalizedId)));
-+    assert(normalizedId[0] == 0);
-+
-+    /* A room-provided game name is usable without contentId; placeholders and
-+     * ID-shaped labels must not masquerade as human-readable names. */
-+    char roomGameName[52] = {};
-+    assert(NormalizeRoomGameName("  Room API Game\n", roomGameName,
-+                                 sizeof(roomGameName)));
-+    assert(strcmp(roomGameName, "Room API Game") == 0);
-+    assert(!NormalizeRoomGameName("FFFFFFFFFFFFFFFF", roomGameName,
-+                                  sizeof(roomGameName)));
-+    assert(!NormalizeRoomGameName("未知游戏", roomGameName,
-+                                  sizeof(roomGameName)));
-+    assert(!NormalizeRoomGameName("Unknown game (unknown)", roomGameName,
-+                                  sizeof(roomGameName)));
-+
-+    /* Only an explicit room game name can refine the shared Scarlet/Violet
-+     * communication ID to a single version. Combined family names stay
-+     * ambiguous and therefore retain the safe family fallback. */
-+    assert(PokemonVersionFromRoomName("Pokémon Violet") ==
-+           PokemonScarletVioletVersion::Violet);
-+    assert(PokemonVersionFromRoomName("宝可梦紫") ==
-+           PokemonScarletVioletVersion::Violet);
-+    assert(PokemonVersionFromRoomName("Pokemon Scarlet") ==
-+           PokemonScarletVioletVersion::Scarlet);
-+    assert(PokemonVersionFromRoomName("宝可梦朱") ==
-+           PokemonScarletVioletVersion::Scarlet);
-+    assert(PokemonVersionFromRoomName("Pokémon Scarlet and Violet") ==
-+           PokemonScarletVioletVersion::Unspecified);
-+    assert(PokemonVersionFromRoomName("宝可梦 朱/紫") ==
-+           PokemonScarletVioletVersion::Unspecified);
-+    assert(IsPokemonScarletVioletFamilyName("宝可梦 朱/紫"));
-+    assert(IsPokemonScarletVioletFamilyName("Pokémon Scarlet/Violet"));
-+    assert(!IsPokemonScarletVioletFamilyName("Pokémon Violet"));
-+
-+    /* Missing and all-F IDs both try the advertisement belonging to this room. */
-+    BuildScarletVioletAdvertiseData(sv, sizeof(sv), 6);
-+    assert(ResolveRoomTitleId("", "", sv, nullptr,
-+                              normalizedId, sizeof(normalizedId)));
-+    assert(strcmp(normalizedId, "0100A3D008C5C000") == 0);
-+    assert(ResolveRoomTitleId("0100ABCDEF012000", "", "ffff0000",
-+                              nullptr, normalizedId, sizeof(normalizedId)));
-+    assert(strcmp(normalizedId, "0100ABCDEF012000") == 0);
-+    assert(ResolveRoomTitleId("FFFFFFFFFFFFFFFF", "Room API Game", "11223344",
-+                              nullptr, normalizedId, sizeof(normalizedId)) == false);
-+    assert(normalizedId[0] == 0);
 +    return 0;
 +}
 -- 
