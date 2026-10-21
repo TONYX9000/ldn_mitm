@@ -464,7 +464,7 @@ index 5838ff6..7c810be 100644
      return rc;
  }
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..1bc82ad 100644
+index 8e07c19..f7ba367 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,8 @@
@@ -511,7 +511,7 @@ index 8e07c19..1bc82ad 100644
  
  /* Traditional / Simplified Chinese switch. The overlay used to hardcode
     Simplified strings, which left Traditional Chinese consoles with the
-@@ -34,6 +44,479 @@ static bool g_isTraditional = false;
+@@ -34,6 +44,481 @@ static bool g_isTraditional = false;
  
  #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
  
@@ -806,7 +806,9 @@ index 8e07c19..1bc82ad 100644
 +    void clearNote() { m_note[0] = 0; }
 +    bool hasNote() const { return m_note[0] != 0; }
 +    bool selected() const { return m_selected; }
-+    void setClickListener(std::function<void()> fn) { m_click = std::move(fn); }
++    /* 名字故意不用 setClickListener:基类 Element 有个同名虚函数
++       (std::function<bool(u64)>),重载会触发 -Woverloaded-virtual。 */
++    void setActivateListener(std::function<void()> fn) { m_click = std::move(fn); }
 +    void setDeleteListener(std::function<void()> fn) { m_delete = std::move(fn); }
 +
 +    virtual void layout(u16, u16, u16, u16) override {
@@ -912,8 +914,8 @@ index 8e07c19..1bc82ad 100644
 +    u32 m_index = 0;
 +    char m_name[32] = {};
 +    char m_addr[80] = {};  // up to 63-byte host + colon + 5-digit port
-+    char m_online[8] = {};       /* 在线人数 */
-+    char m_rooms[8] = {};        /* 房间数 */
++    char m_online[12] = {};      /* 在线人数 */
++    char m_rooms[12] = {};       /* 房间数 */
 +    char m_latency[16] = {};     /* 延迟文本,如 "38ms" / "--" */
 +    char m_note[32] = {};        /* 切换/删除失败提示(临时占用数值行) */
 +    u32 m_noteFrames = 0;        /* 提示还要显示多少帧 */
@@ -991,7 +993,7 @@ index 8e07c19..1bc82ad 100644
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -66,8 +549,109 @@ static void detectLanguage()
+@@ -66,8 +551,109 @@ static void detectLanguage()
      char code[9] = {};
      memcpy(code, &langCode, 8);
      g_isTraditional = (strncmp(code, "zh-Hant", 7) == 0);
@@ -1102,7 +1104,7 @@ index 8e07c19..1bc82ad 100644
  }
  
  class MainGui : public tsl::Gui {
-@@ -75,199 +659,448 @@ public:
+@@ -75,199 +661,448 @@ public:
      MainGui() { }
  
      virtual tsl::elm::Element* createUI() override {
@@ -1507,7 +1509,7 @@ index 8e07c19..1bc82ad 100644
 +                if (i == selected)
 +                    snprintf(g_selectedName, sizeof(g_selectedName), "%s", name);
 +
-+                row->setClickListener([i, name = std::string(name), row]() {
++                row->setActivateListener([i, name = std::string(name), row]() {
 +                    if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
 +                        row->setNote(T("切换失败", "切換失敗"));
 +                        return;
@@ -1705,7 +1707,7 @@ index 8e07c19..1bc82ad 100644
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,14 +1121,34 @@ public:
+@@ -288,14 +1123,34 @@ public:
              g_state = State::Loaded;
          });
  
@@ -1744,10 +1746,10 @@ index 8e07c19..1bc82ad 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..7b1bb42
+index 0000000..529778e
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2826 @@
+@@ -0,0 +1,2839 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -1773,7 +1775,6 @@ index 0000000..7b1bb42
 +#include <fcntl.h>
 +#include <unistd.h>
 +#include <ctype.h>
-+#include <errno.h>
 +#include <strings.h>
 +
 +#include <atomic>
@@ -2413,10 +2414,14 @@ index 0000000..7b1bb42
 +    sa.sin_family = AF_INET;
 +    sa.sin_port = htons(53);
 +    sa.sin_addr.s_addr = htonl(srvHost);
-+    struct timeval tv;
-+    tv.tv_sec = 2;
-+    tv.tv_usec = 0;
-+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++    /* devkitA64 的 newlib 没有 MSG_DONTWAIT,非阻塞只能走 O_NONBLOCK
++     * (fcntl)。设成非阻塞后 recvfrom 无数据返回 -1 + EAGAIN,再配合下面
++     * 10ms 一轮的等待循环,就能随时被中止标志打断。 */
++    {
++        int fl = fcntl(fd, F_GETFL, 0);
++        if (fl >= 0)
++            fcntl(fd, F_SETFL, fl | O_NONBLOCK);
++    }
 +    u32 ip = 0;
 +    if (sendto(fd, q, (int)qlen, 0, (struct sockaddr *)&sa, sizeof(sa)) >= 0) {
 +        u8 r[512];
@@ -2425,7 +2430,7 @@ index 0000000..7b1bb42
 +        for (int wait = 0; wait < 20 * 100; wait++) {
 +            if (IoAbort())
 +                break;
-+            n = recvfrom(fd, r, sizeof(r), MSG_DONTWAIT, nullptr, nullptr);
++            n = recvfrom(fd, r, sizeof(r), 0, nullptr, nullptr);
 +            if (n > 0)
 +                break;
 +            svcSleepThread(10'000'000);          /* 10ms */
@@ -2654,20 +2659,32 @@ index 0000000..7b1bb42
 +            close(fd);
 +            return false;
 +        }
-+        HttpSetNonBlock(fd, true);
++        /* 先 select 等 15ms 再看有没有数据:这样既能每 15ms 检查一次中止
++         * 标志,又不用依赖 errno。libnx 的 bsd 把错误放在线程私有的
++         * g_bsdErrno 里,不写 newlib 的 errno,靠 errno 判断 EAGAIN 不可靠。 */
++        fd_set rset;
++        FD_ZERO(&rset);
++        FD_SET(fd, &rset);
++        struct timeval wtv;
++        wtv.tv_sec = 0;
++        wtv.tv_usec = 15 * 1000;
++        int sel = select(fd + 1, &rset, nullptr, nullptr, &wtv);
++        if (sel < 0) {
++            if (haveHeaders)
++                break;
++            g_httpErr = 5;
++            close(fd);
++            return false;
++        }
++        if (sel == 0)
++            continue;                                /* 还没数据:回去查中止标志 */
 +        ssize_t n = recv(fd, buf, sizeof(buf), 0);
-+        HttpSetNonBlock(fd, false);
 +        if (n < 0) {
-+            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-+                if (haveHeaders)
-+                    break;
-+                g_httpErr = 5;
-+                close(fd);
-+                return false;
-+            }
-+            /* 暂时没数据:睡 15ms 再看一眼中止标志 */
-+            svcSleepThread(15'000'000);
-+            continue;
++            if (haveHeaders)
++                break;
++            g_httpErr = 5;
++            close(fd);
++            return false;
 +        }
 +        if (n == 0)
 +            break;                                   /* 对端关闭:EOF 定界 */
@@ -4180,7 +4197,6 @@ index 0000000..7b1bb42
 +static u32 g_statCount = 0;
 +static char g_statCfgKey[64];        /* relay.cfg 指纹,变了就重建表 */
 +static u32 g_statCursor = 0;
-+static u64 g_statSelectedRetryMs = 0;
 +
 +static u64 MonNowMs() {
 +    return armTicksToNs(armGetSystemTick()) / 1000000ull;
@@ -4259,7 +4275,9 @@ index 0000000..7b1bb42
 +    s32 ms = 0;
 +    Deadline start = std::chrono::steady_clock::now();
 +    int rc = connect(fd, (struct sockaddr *)&sa, sizeof(sa));
-+    if (rc != 0 && errno == EINPROGRESS) {
++    /* 非阻塞 connect 正常会立刻返回非 0(EINPROGRESS);成功与否由 select +
++     * SO_ERROR 判定。这里不能看 errno:libnx 的 bsd 不写 newlib 的 errno。 */
++    if (rc != 0) {
 +        for (;;) {
 +            if (IoAbort()) { close(fd); return 0; }
 +            long left = (long)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -4286,9 +4304,6 @@ index 0000000..7b1bb42
 +                std::chrono::steady_clock::now() - start).count();
 +            break;
 +        }
-+    } else if (rc != 0) {
-+        close(fd);
-+        return 0;
 +    }
 +    close(fd);
 +    return ms > 0 ? ms : 1;
