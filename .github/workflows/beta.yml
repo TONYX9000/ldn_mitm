@@ -102,7 +102,13 @@ jobs:
           git am --3way "${patches[@]}"
 
       - name: Setup ccache
-        uses: hendrikmuhs/ccache-action@v1.2
+        # hendrikmuhs/ccache-action 在这台 runner 上会卡住十几分钟,改用官方 cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ github.ref_name }}-
 
       - name: update Atmosphere-libs (适配最新系统)
         run: |
