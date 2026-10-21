@@ -127,7 +127,7 @@ jobs:
           pushd /tmp
           git clone https://github.com/switchbrew/libnx
           cd libnx
-          make -j8 PREFIX="ccache aarch64-none-elf-"
+          make -j8 PREFIX="aarch64-none-elf-"
           make install
           popd
 
@@ -155,7 +155,7 @@ jobs:
         id: build
         env:
           TARGET_VERSION: ${{ steps.beta_version.outputs.version }}
-        run: make -j8 PREFIX="ccache aarch64-none-elf-" TARGET_VERSION="$TARGET_VERSION"
+        run: make -j8 PREFIX="aarch64-none-elf-" TARGET_VERSION="$TARGET_VERSION"
 
       - name: Upload sdcard
         uses: actions/upload-artifact@v7
