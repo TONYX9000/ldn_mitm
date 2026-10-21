@@ -208,7 +208,7 @@ index d3a0597..000a660 100644
      return rc;
  }
 diff --git a/overlay/Makefile b/overlay/Makefile
-index da2bd21..476caa1 100644
+index da2bd21..a08980f 100644
 --- a/overlay/Makefile
 +++ b/overlay/Makefile
 @@ -38,7 +38,9 @@ include $(DEVKITPRO)/libnx/switch_rules
@@ -227,7 +227,7 @@ index da2bd21..476caa1 100644
  SOURCES		:=	source
  DATA		:=	data
 -INCLUDES	:=	include ../libtesla/include
-+INCLUDES	:=	include ../libtesla/include $(PORTLIBS)/include
++INCLUDES	:=	source include ../libtesla/include $(PORTLIBS)/include
  
  NO_ICON		:=  1
  
@@ -1566,7 +1566,7 @@ index 8e07c19..15f228b 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..00f256b
+index 0000000..51f1ae7
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
 @@ -0,0 +1,2839 @@
@@ -1579,9 +1579,9 @@ index 0000000..00f256b
 + *   LDN 主动扫描补房间(对应 LanPlayMonitor 的 active-udp-scan)。
 + */
 +#include "monitor.hpp"
-+#include "source/monitor_title_resolver.hpp"
-+#include "source/monitor_player_filter.hpp"
-+#include "source/monitor_target_generation.hpp"
++#include "monitor_title_resolver.hpp"
++#include "monitor_player_filter.hpp"
++#include "monitor_target_generation.hpp"
 +
 +#include <switch.h>
 +
