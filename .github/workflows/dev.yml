@@ -43,10 +43,23 @@ jobs:
             echo "No patches found; skipping."
             exit 0
           fi
-          if [[ -f ldn_mitm/source/relay_client.cpp ]]; then
-            [[ "$DECISION" == yes ]] && { echo "::error::Patches already applied"; exit 1; }
-            echo "Patches already applied; skipping."
-            exit 0
+          # 检查多个补丁应用标记: 0001(relay_client.cpp) + 0008(ServerRow) + 0010(Makefile INCLUDES)
+          PATCHES_APPLIED=0
+          [ -f ldn_mitm/source/relay_client.cpp ] && PATCHES_APPLIED=$((PATCHES_APPLIED + 1))
+          [ -f overlay/source/monitor.cpp ] && grep -q 'ServerRow' overlay/source/monitor.cpp && PATCHES_APPLIED=$((PATCHES_APPLIED + 1))
+          [ -f overlay/Makefile ] && grep -q 'INCLUDES.*source' overlay/Makefile && PATCHES_APPLIED=$((PATCHES_APPLIED + 1))
+
+          if [[ "$DECISION" == yes ]]; then
+            if [[ $PATCHES_APPLIED -ge 3 ]]; then
+              echo "::error::Patches already applied"
+              exit 1
+            fi
+          else
+            # auto 模式: 3 个标记都存在才认为已应用
+            if [[ $PATCHES_APPLIED -ge 3 ]]; then
+              echo "Patches already applied; skipping."
+              exit 0
+            fi
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
