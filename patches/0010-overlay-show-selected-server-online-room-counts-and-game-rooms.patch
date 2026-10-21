@@ -1,7 +1,7 @@
-From 67ac83e28a49e6eea4f266ed7887ebf6650fba30 Mon Sep 17 00:00:00 2001
+From 7d4be52ce78e88c8cf883fbb24ff34f4c398cb0e Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
-Subject: [PATCH] overlay: online counts/room list and relay management
+Subject: [PATCH 10/10] overlay: online counts/room list and relay management
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -142,16 +142,16 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
  .github/workflows/release.yml                 |   44 +-
  Makefile                                      |    6 +
  overlay/Makefile                              |   13 +-
- overlay/source/main.cpp                       | 1215 ++++++-
- overlay/source/monitor.cpp                    | 3139 +++++++++++++++++
- overlay/source/monitor.hpp                    |   90 +
+ overlay/source/main.cpp                       | 1225 +++++-
+ overlay/source/monitor.cpp                    | 3831 +++++++++++++++++
+ overlay/source/monitor.hpp                    |   94 +
  overlay/source/monitor_player_filter.hpp      |   32 +
  overlay/source/monitor_target_generation.hpp  |   22 +
  overlay/source/monitor_title_resolver.hpp     |  148 +
  overlay/tests/monitor_player_filter_test.cpp  |   29 +
  .../tests/monitor_target_generation_test.cpp  |   22 +
  overlay/tests/monitor_title_resolver_test.cpp |   49 +
- 14 files changed, 4691 insertions(+), 189 deletions(-)
+ 14 files changed, 5397 insertions(+), 189 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
  create mode 100644 overlay/source/monitor_player_filter.hpp
@@ -396,7 +396,7 @@ index da2bd21..a08980f 100644
  #---------------------------------------------------------------------------------
  # list of directories containing libraries, this must be the top level containing
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..41ce869 100644
+index 8e07c19..7989228 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,8 @@
@@ -931,7 +931,7 @@ index 8e07c19..41ce869 100644
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -66,208 +557,580 @@ static void detectLanguage()
+@@ -66,208 +557,590 @@ static void detectLanguage()
      char code[9] = {};
      memcpy(code, &langCode, 8);
      g_isTraditional = (strncmp(code, "zh-Hant", 7) == 0);
@@ -951,7 +951,8 @@ index 8e07c19..41ce869 100644
 +    else
 +        snprintf(header, sizeof(header), "%s", T("游戏房间", "遊戲房間"));
 +    g_roomHeader->setText(header);
-+
+ 
+-    strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
 +    u32 need = snap.roomN > 0 ? snap.roomN : 1;   /* 0 房间时用 1 行提示 */
 +    while (g_roomRows.size() < need) {
 +        auto *row = new RoomRow();
@@ -981,8 +982,7 @@ index 8e07c19..41ce869 100644
 +    }
 +    g_list->invalidate();
 +}
- 
--    strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
++
 +/* 把每台服务器自己的在线/房间/延迟刷到列表行上。
 + *
 + * 以前只有选中的那一行有数值(因为只有它连着中继);现在后台线程会轮转
@@ -1030,10 +1030,10 @@ index 8e07c19..41ce869 100644
 +        else
 +            snprintf(roomsBuf, sizeof(roomsBuf), "--");
 +
-+        /* 延迟:选中的服务器用 sysmodule 实测的 relay 延迟(比 TCP 连接耗时
-+           更贴近真实联机),拿不到再退回后台探测值 */
++        /* 延迟:所有服务器(含选中服)在每轮刷新周期中通过同一套 5 字节 UDP PING
++           同步测量写入 st->latencyMs;尚未测出时退回 sysmodule 测量值 */
 +        s32 lat = st ? st->latencyMs : 0;
-+        if (row->selected()) {
++        if (row->selected() && lat <= 0) {
 +            u32 ms = 0;
 +            if (R_SUCCEEDED(ldnMitmGetRelayLatency(&g_ldnConfig, &ms)) && ms > 0)
 +                lat = (s32)ms;
@@ -1192,39 +1192,18 @@ index 8e07c19..41ce869 100644
 +        }
 +
 +
-+        // 游戏房间区块:监视器快照 version 变化时重建行,同时立即刷新服务器行统计。
++        // 游戏房间区块:监视器快照 version 变化时重建行,并在同一帧同步刷新全部服务器行的统计。
 +        static MonitorSnapshot snap;   /* 8.6KB:static,别放栈上(见 draw 注释) */
 +        MonitorCopySnapshot(&snap);
 +        if (snap.version != g_monitorVersion) {
 +            g_monitorVersion = snap.version;
 +            rebuildRoomSection(snap);
 +            invalidateServerStats();
-+        }
-+
-+        // 选中服务器的在线/房间周期刷新(3 秒一次)。间隔不能太短:工作线程
-+        // 只有在两轮刷新之间有空闲时才会去探测其它服务器(见 monitor.cpp
-+        // RefreshOneServerStat),1 秒一轮会把空闲时间全占掉,别的行就永远
-+        // 显示 "--"。
-+        if (g_visible && g_state == State::Loaded) {
-+            u64 nowNs = armTicksToNs(armGetSystemTick());
-+            if (g_lastPollNs == 0)
-+                g_lastPollNs = nowNs;
-+            if (nowNs - g_lastPollNs >= 3000000000ull) {
-+                g_lastPollNs = nowNs;
-+                MonitorRequestPoll();
++            if (g_visible && g_state == State::Loaded && !g_serverRows.empty()) {
++                refreshServerRowStats(snap);
++                g_lastStatsNs = armTicksToNs(armGetSystemTick());
              }
 +        }
-+        // 服务器行右侧三列「在线 / 房间 / 延迟」:每一行都显示。
-+        // 后台线程每空闲一次就探测一台(MonitorListServerStats),没测过的
-+        // 先显示 "--";这里每 500ms 取一次表刷到行上,不用先选中服务器。
-+        if (g_visible && g_state == State::Loaded && !g_serverRows.empty()) {
-+            u64 nowNs = armTicksToNs(armGetSystemTick());
-+            if (g_lastStatsNs == 0 || nowNs - g_lastStatsNs >= 500000000ull) {
-+                g_lastStatsNs = nowNs;
-+                refreshServerRowStats(snap);
-+            }
-+        }
-+    }
  
 -            u32 vaddr = 0;
 -            const bool addr_ok = R_SUCCEEDED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr));
@@ -1238,6 +1217,46 @@ index 8e07c19..41ce869 100644
 -                         (vaddr >> 24) & 0xff, (vaddr >> 16) & 0xff,
 -                         (vaddr >> 8) & 0xff, vaddr & 0xff, vaddr & 0xffff);
 -                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), buf));
++        // 所有服务器的在线/房间/延迟每 3 秒与当前选中服务器同步批量刷新一轮。
++        if (g_visible && g_state == State::Loaded) {
++            u64 nowNs = armTicksToNs(armGetSystemTick());
++            if (g_lastPollNs == 0)
++                g_lastPollNs = nowNs;
++            if (nowNs - g_lastPollNs >= 3000000000ull) {
++                g_lastPollNs = nowNs;
++                MonitorRequestPoll();
++            }
++        }
++        // 服务器行右侧三列「在线 / 房间 / 延迟」兜底定时刷新。
++        if (g_visible && g_state == State::Loaded && !g_serverRows.empty()) {
++            u64 nowNs = armTicksToNs(armGetSystemTick());
++            if (g_lastStatsNs == 0 || nowNs - g_lastStatsNs >= 500000000ull) {
++                g_lastStatsNs = nowNs;
++                refreshServerRowStats(snap);
+             }
++        }
++    }
+ 
+-            // Tell the user whether the address is stable. T("硬件派生", "硬體衍生") is
+-            // derived from this console's LAN address, so it is the same on
+-            // every boot even when the SD card is write-protected. T("启动随机", "啟動隨機")
+-            // still gets written to relay.cfg, so check it again after a
+-            // reboot -- if the number changes, the write is failing.
+-            if (addr_ok && vaddr != 0) {
+-                u32 src = 0;
+-                if (R_FAILED(ldnMitmGetRelayIdSource(&g_ldnConfig, &src))) {
+-                    src = 0;
+-                }
+-                if (src == 1) {
+-                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("硬件派生", "硬體衍生")));
+-                } else if (src == 2) {
+-                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("启动随机", "啟動隨機")));
+-                } else if (src == 3) {
+-                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("已自动更换", "已自動更換")));
+-                } else {
+-                    // The id either predates hardware derivation or was cached
+-                    // before this console's LAN address changed.
+-                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("未知来源", "未知來源")));
 +    // Called once every frame to handle inputs not handled by other UI elements
 +    virtual bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos,
 +                             HidAnalogStickState joyStickPosLeft,
@@ -1294,18 +1313,17 @@ index 8e07c19..41ce869 100644
 +                    strcmp(cur.host, info.host) == 0 && cur.port == info.port) {
 +                    present = true;
 +                    break;
-+                }
+                 }
              }
+-            list->addItem(new tsl::elm::ListItem(T("两台机器的地址必须不同", "兩台機器的位址必須不同")));
+-            list->addItem(new tsl::elm::ListItem(T("重启后地址不变即正常", "重新啟動後位址不變即正常")));
  
--            // Tell the user whether the address is stable. T("硬件派生", "硬體衍生") is
--            // derived from this console's LAN address, so it is the same on
--            // every boot even when the SD card is write-protected. T("启动随机", "啟動隨機")
--            // still gets written to relay.cfg, so check it again after a
--            // reboot -- if the number changes, the write is failing.
--            if (addr_ok && vaddr != 0) {
--                u32 src = 0;
--                if (R_FAILED(ldnMitmGetRelayIdSource(&g_ldnConfig, &src))) {
--                    src = 0;
+-            // Release signature. Kept at the very bottom so it never gets in
+-            // the way of the settings, but every user scrolling down sees it.
+-            list->addItem(new tsl::elm::CategoryHeader(T("关于", "關於")));
+-            list->addItem(new tsl::elm::ListItem(T("制作", "製作"), T("阿东 & 大肥鱼", "阿東 & 大肥魚")));
+-            list->addItem(new tsl::elm::ListItem(T("版本", "版本"), g_version));
+-            list->addItem(new tsl::elm::ListItem(T("声明", "聲明"), T("免费分享 禁止倒卖", "免費分享 禁止轉賣")));
 +            /* Do not paint host:port here. libtesla's ListItem does not
 +               truncate the value, and a long address (e.g.
 +               muitxobem-lanplay.ddns.net:11451) is wider than the row, so it
@@ -1322,13 +1340,7 @@ index 8e07c19..41ce869 100644
 +                }
 +                if (*added) {
 +                    return true;
-                 }
--                if (src == 1) {
--                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("硬件派生", "硬體衍生")));
--                } else if (src == 2) {
--                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("启动随机", "啟動隨機")));
--                } else if (src == 3) {
--                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("已自动更换", "已自動更換")));
++                }
 +                if (*count >= LDN_MAX_SERVERS) {
 +                    item->setValue(T("先删一台", "先刪一台"), true);
 +                    return true;
@@ -1338,22 +1350,9 @@ index 8e07c19..41ce869 100644
 +                    (*count)++;
 +                    item->setValue(T("已添加", "已新增"), true);
 +                    g_main_list_dirty = true;
-                 } else {
--                    // The id either predates hardware derivation or was cached
--                    // before this console's LAN address changed.
--                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("未知来源", "未知來源")));
++                } else {
 +                    item->setValue(T("添加失败", "新增失敗"), true);
-                 }
--            }
--            list->addItem(new tsl::elm::ListItem(T("两台机器的地址必须不同", "兩台機器的位址必須不同")));
--            list->addItem(new tsl::elm::ListItem(T("重启后地址不变即正常", "重新啟動後位址不變即正常")));
--
--            // Release signature. Kept at the very bottom so it never gets in
--            // the way of the settings, but every user scrolling down sees it.
--            list->addItem(new tsl::elm::CategoryHeader(T("关于", "關於")));
--            list->addItem(new tsl::elm::ListItem(T("制作", "製作"), T("阿东 & 大肥鱼", "阿東 & 大肥魚")));
--            list->addItem(new tsl::elm::ListItem(T("版本", "版本"), g_version));
--            list->addItem(new tsl::elm::ListItem(T("声明", "聲明"), T("免费分享 禁止倒卖", "免費分享 禁止轉賣")));
++                }
 +                return true;
 +            });
 +            list->addItem(item);
@@ -1449,6 +1448,8 @@ index 8e07c19..41ce869 100644
 +            if (R_FAILED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &selected))) {
 +                selected = count;
 +            }
++            static MonitorServer monServers[MONITOR_MAX_SERVERS];
++            u32 monCount = 0;
 +            for (u32 i = 0; i < count; i++) {
 +                LdnRelayServerInfo info = {};
 +                char name[32] = {};
@@ -1461,6 +1462,14 @@ index 8e07c19..41ce869 100644
 +                    }
 +                } else {
 +                    ldnMitmGetRelayServerName(&g_ldnConfig, i, name);
++                }
++
++                if (addr[0] && monCount < MONITOR_MAX_SERVERS) {
++                    snprintf(monServers[monCount].name, sizeof(monServers[monCount].name),
++                             "%.31s", name);
++                    snprintf(monServers[monCount].addr, sizeof(monServers[monCount].addr),
++                             "%.63s", addr);
++                    monCount++;
 +                }
 +
 +                auto *row = new ServerRow();
@@ -1499,6 +1508,7 @@ index 8e07c19..41ce869 100644
 +                g_serverRows.push_back(row);
 +                list->addItem(row);
 +            }
++            MonitorSetServerList(monServers, monCount);
          }
 -        // Rebuild the label only when the measurement actually changes.
 -        if (ms == g_shown_latency) {
@@ -1667,7 +1677,7 @@ index 8e07c19..41ce869 100644
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,14 +1151,34 @@ public:
+@@ -288,14 +1161,34 @@ public:
              g_state = State::Loaded;
          });
  
@@ -1706,10 +1716,10 @@ index 8e07c19..41ce869 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..34d15b0
+index 0000000..4bf681a
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,3139 @@
+@@ -0,0 +1,3831 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -1987,7 +1997,7 @@ index 0000000..34d15b0
 +static bool IoAbort() {
 +    if (g_paused.load() || g_exit.load())
 +        return true;
-+    if (g_auxPhase.load() && !g_targetGen.IsCurrent(g_auxTargetGen.load()))
++    if (!g_targetGen.IsCurrent(g_auxTargetGen.load()))
 +        return true;
 +    return false;
 +}
@@ -4009,10 +4019,20 @@ index 0000000..34d15b0
 +}
 +
 +static u8 StatsGetProtoByAddr(const char *host, u16 port);
++static u8 StatsGetProtoByAddr(const char *host, u16 port);
 +static void StatsSetProtoByAddr(const char *host, u16 port, u8 proto);
 +static s32 StatsGetLatencyByAddr(const char *host, u16 port);
 +static void StatsStoreByAddr(const char *host, u16 port, s32 online, s32 rooms, s32 latencyMs);
 +static s32 ProbeLatencyMs(const char *host, u16 port);
++static void StatsBuildTableIfNeeded(bool force = false);
++static bool ResolveSelectedFromStats(const char *wantName,
++                                     char *nameOut, size_t nameN,
++                                     char *hostOut, size_t hostN, u16 *portOut);
++static void RefreshAllServersBatch(const char *selHost, u16 selPort,
++                                   QueryResult *selQr, bool *selOkOut,
++                                   s32 *selLatOut, int *selHttpErrOut);
++static void StatsCommitBatchLocked(const char *selHost, u16 selPort,
++                                   s32 selOnline, s32 selRooms, s32 selLat);
 +
 +/* 按协议类型(含缓存提示与自动回退)查询服务器在线人数与房间列表,
 + * 同时带出本次 HTTP 往返折算的单程 RTT(供未开启 UDP PING 回显的服务器兜底延迟)。 */
@@ -4078,15 +4098,20 @@ index 0000000..34d15b0
 +
 +    LogWorkerStack("refresh-start");
 +    EnsureSockets();
++    StatsBuildTableIfNeeded(false);
 +
 +    static QueryResult qr;            /* 约 8.7KB:static,不占工作线程栈 */
 +    qr = QueryResult{};
 +
-+    /* 1. 当前选择的服务器 */
++    /* 1. 当前选择的服务器:优先从内存统计表匹配(由 UI 从 sysmodule 同步),再读 relay.cfg */
 +    char name[48] = {}, host[64] = {};
 +    u16 port = 11451;
-+    bool haveServer = ResolveSelectedServer(nameOverride, name, sizeof(name),
-+                                            host, sizeof(host), &port);
++    bool haveServer = ResolveSelectedFromStats(nameOverride, name, sizeof(name),
++                                               host, sizeof(host), &port);
++    if (!haveServer) {
++        haveServer = ResolveSelectedServer(nameOverride, name, sizeof(name),
++                                           host, sizeof(host), &port);
++    }
 +    {
 +        char m[160];
 +        if (haveServer)
@@ -4188,45 +4213,28 @@ index 0000000..34d15b0
 +        return;
 +    }
 +
-+    /* 4. 查询:按协议提示自动选择 graphql / rest 并互相回退 */
-+    s32 httpRtt = 0;
-+    bool ok = QueryAuto(host, port, &qr, 4000, &httpRtt);
-+    /* 返回/退出时查询会被 HTTP 层中止:此时不要写任何快照,
-+       免得把 "查询失败 e=6" 显示到界面上。 */
++    /* 4. 同步批量探测:在同一次刷新周期内并行探测当前选中的服务器以及列表中的
++     *    全部其它服务器(共享 UDP DNS + 共享 UDP PING + 4 路非阻塞 HTTP 滑动窗口
++     *    + 并行 UDP 房间扫描),并在同一把锁内同步提交 g_stats 与 g_snap,确保所有
++     *    服务器的在线、房间、延迟与选中服务器在同一帧同步刷新。 */
++    bool ok = false;
++    s32 selLat = 0;
++    int selHttpErr = 0;
++    RefreshAllServersBatch(host, port, &qr, &ok, &selLat, &selHttpErr);
 +    if (IoAbort()) {
 +        MonLog("refresh-discard aborted");
 +        return;
 +    }
 +    {
-+        char m[56];
-+        snprintf(m, sizeof(m), "query auto e=%d on=%d rooms=%u",
-+                 g_httpErr, qr.online, (unsigned)qr.roomN);
++        char m[64];
++        snprintf(m, sizeof(m), "batch query e=%d on=%d rooms=%u lat=%d",
++                 selHttpErr, qr.online, (unsigned)qr.roomN, (int)selLat);
 +        MonLog(m);
 +    }
 +
-+    /* 6. 有人在线(online > 0)但 HTTP 接口没返回房间时,用 UDP 主动扫描补房间;
-+     *    online == 0 时服务器无任何客户端连接,必为 0 房间,免去无效扫描等待。 */
-+    if (ok && qr.online > 0 && qr.roomN == 0 && !IoAbort()) {
-+        UdpRoomScan(host, port, &qr, 1000);
-+        if (IoAbort()) {
-+            MonLog("refresh-discard aborted");
-+            return;
-+        }
-+        char m[24];
-+        snprintf(m, sizeof(m), "scan rooms=%u", (unsigned)qr.roomN);
-+        MonLog(m);
-+    }
-+
-+    /* 若选中服务器还没有延迟值,顺带测一次 UDP PING(无回显则用 httpRtt 兜底) */
-+    s32 selLat = StatsGetLatencyByAddr(host, port);
-+    if (ok && selLat <= 0 && !IoAbort()) {
-+        selLat = ProbeLatencyMs(host, port);
-+        if (selLat <= 0)
-+            selLat = httpRtt;
-+    }
-+
-+    /* 7. 并入房间 5 秒 TTL 缓存后写快照:当次查到的房间刷新时间戳,
-+     *    没查到的旧房间再保留 5 秒,列表不再随单次丢包闪烁。 */
++    /* 7. 并入房间 5 秒 TTL 缓存后与全部服务器的统计表同步写快照:
++     *    在同一把 g_mutex 锁内同时更新 g_stats[] 与 g_snap(version++),
++     *    UI 在下一帧同时刷新游戏房间与所有中继服务器行的在线/房间/延迟。 */
 +    u32 mlogN = 0;
 +    s32 mlogOn = -1;
 +    bool staleAfterQuery = false;
@@ -4263,24 +4271,27 @@ index 0000000..34d15b0
 +            } else if (fresh) {
 +                /* 瞬间失败:5 秒内沿用最近一次成功的在线/房间数 */
 +                g_snap.online = g_lastOnline;
-+                g_snap.roomCount = g_lastRoomCount;
++                g_snap.roomCount = (s32)n;
++                g_lastRoomCount = (s32)n;
 +            } else {
 +                g_snap.online = -1;
 +                g_snap.roomCount = -1;
 +            }
-+            if (!ok) {
++            if (!ok && !fresh) {
 +                if (!g_sockInited)
 +                    snprintf(g_snap.status, sizeof(g_snap.status), "%s",
 +                             T_STR("网络初始化失败", "網絡初始化失敗"));
 +                else
 +                    snprintf(g_snap.status, sizeof(g_snap.status), "%s e=%d",
-+                             T_STR("查询失败", "查詢失敗"), g_httpErr);
++                             T_STR("查询失败", "查詢失敗"), selHttpErr);
 +            } else if (n == 0) {
 +                snprintf(g_snap.status, sizeof(g_snap.status), "%s",
 +                         T_STR("暂无房间", "暫無房間"));
 +            } else {
 +                g_snap.status[0] = 0;
 +            }
++            /* 在同一把锁里同步提交所有服务器的在线/房间/延迟统计与选中服快照 */
++            StatsCommitBatchLocked(host, port, g_snap.online, g_snap.roomCount, selLat);
 +            g_snap.busy = false;
 +            g_snap.version++;
 +            mlogN = n;
@@ -4291,8 +4302,6 @@ index 0000000..34d15b0
 +        MonLog("refresh-discard stale-target-after-query");
 +        return;
 +    }
-+    if (ok)
-+        StatsStoreByAddr(host, port, mlogOn, (s32)mlogN, selLat);
 +    {
 +        char m[48];
 +        snprintf(m, sizeof(m), "cache rooms=%u on=%d", (unsigned)mlogN, (int)mlogOn);
@@ -4301,21 +4310,14 @@ index 0000000..34d15b0
 +}
 +
 +/* ------------------------------------------------------------------ */
-+/* 每台服务器各自的在线 / 房间 / 延迟                                    */
++/* 每台服务器各自的在线 / 房间 / 延迟 (同步批量探测引擎)                 */
 +/* ------------------------------------------------------------------ */
 +
-+/* 背景:选中的服务器由 DoRefresh 全量查询;这里负责把其余服务器也测一遍,
-+ * 让界面上每一行都能显示准确数值(不用先点选):
-+ *   延迟      = 与 sysmodule 同协议的 5 字节 UDP PING({0x02,'l','d','n','p'})
-+ *               实测往返耗时;若个别服务器未开 UDP 回显则以 HTTP 实测单程 RTT 兜底
-+ *   在线/房间 = 与 DoRefresh 及 LanPlayMonitor 同口径:GraphQL/REST 查在线与房间
-+ *               数组,当 online > 0 且接口未返回房间时用 UDP 扫描补齐真实房间数
-+ *               (绝不把 online - idle 误当成房间数,也不会在 1.0 服务器上留 "--") */
-+static constexpr u32  kStatUnknown    = 0xFFFFFFFFu;
-+static constexpr u64  kStatFreshMs    = 10ull * 1000;
-+static constexpr int  kStatProbeMs    = 2000;
-+static constexpr int  kStatScanMs     = 750;
-+static constexpr u32  kStatMaxServers = MONITOR_MAX_SERVERS;
++static constexpr u32  kStatMaxServers   = MONITOR_MAX_SERVERS;
++static constexpr int  kBatchHttpSlots   = 6;
++static constexpr int  kBatchHttpMs      = 1800;
++static constexpr int  kBatchScanMs      = 520;
++static constexpr u64  kStatKeepOnFailMs = 8000;
 +
 +struct ServerStat {
 +    char name[32];
@@ -4324,6 +4326,7 @@ index 0000000..34d15b0
 +    s32  rooms;         /* -1 = 未知 */
 +    s32  latencyMs;     /* 0 = 未知 */
 +    u64  stampMs;       /* 上次测量时刻;0 = 从未测过 */
++    u64  lastScanMs;    /* 上次向该服发送 UDP kScanFrame 的时刻(用于扣除自身扫描器占用的 1 个在线名额) */
 +    u8   proto;         /* ServerProto: 缓存 graphql/rest 类型 */
 +    u8   failCount;     /* 连续失败次数 */
 +};
@@ -4331,20 +4334,110 @@ index 0000000..34d15b0
 +static ServerStat g_stats[kStatMaxServers];
 +static u32 g_statCount = 0;
 +static char g_statCfgKey[64];        /* 服务器列表指纹,仅在条目增删改时更新表 */
-+static u32 g_statCursor = 0;
++static int g_scanUdpFd = -1;         /* 持久化复用同一个 UDP 扫描端口,避免每次扫描在服务端新增临时客户端 */
 +
 +static u64 MonNowMs() {
-+    return armTicksToNs(armGetSystemTick()) / 1000000ull;
++    return (u64)std::chrono::duration_cast<std::chrono::milliseconds>(
++               std::chrono::steady_clock::now().time_since_epoch())
++               .count() + 1ull;
++}
++
++static void SplitAddrHostPort(const char *addrIn, char *hostOut, size_t hostN, u16 *portOut) {
++    char buf[64];
++    snprintf(buf, sizeof(buf), "%s", addrIn ? addrIn : "");
++    u16 port = 11451;
++    char *colon = strrchr(buf, ':');
++    if (colon) {
++        *colon = 0;
++        int p = atoi(colon + 1);
++        if (p > 0 && p <= 65535)
++            port = (u16)p;
++    }
++    snprintf(hostOut, hostN, "%s", buf);
++    if (portOut)
++        *portOut = port;
++}
++
++static void StatsApplyFreshListLocked(ServerStat *fresh, u32 n) {
++    for (u32 k = 0; k < n; k++) {
++        for (u32 oldIdx = 0; oldIdx < g_statCount; oldIdx++) {
++            if (strcmp(fresh[k].addr, g_stats[oldIdx].addr) == 0) {
++                fresh[k].online = g_stats[oldIdx].online;
++                fresh[k].rooms = g_stats[oldIdx].rooms;
++                fresh[k].latencyMs = g_stats[oldIdx].latencyMs;
++                fresh[k].stampMs = g_stats[oldIdx].stampMs;
++                fresh[k].lastScanMs = g_stats[oldIdx].lastScanMs;
++                if (g_stats[oldIdx].proto != ProtoUnknown)
++                    fresh[k].proto = g_stats[oldIdx].proto;
++                fresh[k].failCount = g_stats[oldIdx].failCount;
++                break;
++            }
++        }
++    }
++    memcpy(g_stats, fresh, sizeof(ServerStat) * kStatMaxServers);
++    g_statCount = n;
++}
++
++void MonitorSetServerList(const MonitorServer *servers, u32 count) {
++    if (!servers && count > 0)
++        return;
++    if (count > kStatMaxServers)
++        count = kStatMaxServers;
++    ServerStat fresh[kStatMaxServers] = {};
++    u32 hash = 2166136261u;
++    for (u32 i = 0; i < count; i++) {
++        char host[64] = {};
++        u16 port = 11451;
++        SplitAddrHostPort(servers[i].addr, host, sizeof(host), &port);
++        snprintf(fresh[i].name, sizeof(fresh[i].name), "%.31s", servers[i].name);
++        snprintf(fresh[i].addr, sizeof(fresh[i].addr), "%.55s:%u", host, (unsigned)port);
++        fresh[i].online = -1;
++        fresh[i].rooms = -1;
++        fresh[i].proto = DefaultProtoForHostPort(host, port);
++        for (const char *p = fresh[i].addr; *p; p++)
++            hash = (hash ^ (u8)*p) * 16777619u;
++    }
++    char key[64];
++    snprintf(key, sizeof(key), "%u:%08x", (unsigned)count, (unsigned)hash);
++    std::scoped_lock lk(g_mutex);
++    snprintf(g_statCfgKey, sizeof(g_statCfgKey), "%s", key);
++    StatsApplyFreshListLocked(fresh, count);
++}
++
++static bool ResolveSelectedFromStats(const char *wantName,
++                                     char *nameOut, size_t nameN,
++                                     char *hostOut, size_t hostN, u16 *portOut) {
++    if (!wantName || !wantName[0])
++        return false;
++    char want[48];
++    snprintf(want, sizeof(want), "%s", wantName);
++    size_t wl = strlen(want);
++    while (wl > 0 && (want[wl - 1] == ' ' || want[wl - 1] == '\t'))
++        want[--wl] = 0;
++    if (!want[0])
++        return false;
++    std::scoped_lock lk(g_mutex);
++    for (u32 i = 0; i < g_statCount; i++) {
++        if (strcmp(g_stats[i].name, want) == 0) {
++            snprintf(nameOut, nameN, "%s", g_stats[i].name);
++            SplitAddrHostPort(g_stats[i].addr, hostOut, hostN, portOut);
++            return hostOut[0] != 0;
++        }
++    }
++    return false;
 +}
 +
 +static u64 g_statCfgCheckedMs = 0;
 +
-+static void StatsBuildTableIfNeeded(bool force = false) {
++static void StatsBuildTableIfNeeded(bool force) {
 +    if (IoAbort())
 +        return;
-+    /* relay.cfg 不必每 200ms 读一次:3 秒查一次足够(新增/删除服务器是用户
-+       在界面里操作,下一次轮询就会重建)。 */
-+    const u64 nowMs = armTicksToNs(armGetSystemTick()) / 1000000ull;
++    {
++        std::scoped_lock lk(g_mutex);
++        if (!force && g_statCount > 0)
++            return;
++    }
++    const u64 nowMs = MonNowMs();
 +    if (!force && g_statCfgCheckedMs != 0 && nowMs - g_statCfgCheckedMs < 3000)
 +        return;
 +    g_statCfgCheckedMs = nowMs;
@@ -4381,24 +4474,7 @@ index 0000000..34d15b0
 +
 +    {
 +        std::scoped_lock lk(g_mutex);
-+        /* 保留仍在表中的服务器已测出的在线/房间/延迟数据,避免切换/增删服务器时
-+         * 把其它服务器已探测好的数值全部清空回 "--"。 */
-+        for (u32 k = 0; k < n; k++) {
-+            for (u32 oldIdx = 0; oldIdx < g_statCount; oldIdx++) {
-+                if (strcmp(fresh[k].addr, g_stats[oldIdx].addr) == 0) {
-+                    fresh[k].online = g_stats[oldIdx].online;
-+                    fresh[k].rooms = g_stats[oldIdx].rooms;
-+                    fresh[k].latencyMs = g_stats[oldIdx].latencyMs;
-+                    fresh[k].stampMs = g_stats[oldIdx].stampMs;
-+                    if (g_stats[oldIdx].proto != ProtoUnknown)
-+                        fresh[k].proto = g_stats[oldIdx].proto;
-+                    fresh[k].failCount = g_stats[oldIdx].failCount;
-+                    break;
-+                }
-+            }
-+        }
-+        memcpy(g_stats, fresh, sizeof(fresh));
-+        g_statCount = n;
++        StatsApplyFreshListLocked(fresh, n);
 +    }
 +    char m[48];
 +    snprintf(m, sizeof(m), "stats table n=%u", (unsigned)n);
@@ -4439,34 +4515,7 @@ index 0000000..34d15b0
 +    return 0;
 +}
 +
-+static void StatsStore(u32 idx, bool ok, s32 online, s32 rooms, s32 latency, u64 nowMs) {
-+    std::scoped_lock lk(g_mutex);
-+    if (idx >= g_statCount)
-+        return;
-+    ServerStat &st = g_stats[idx];
-+    if (ok) {
-+        st.failCount = 0;
-+        if (online >= 0)
-+            st.online = online;
-+        if (rooms >= 0)
-+            st.rooms = rooms;
-+        if (latency > 0)
-+            st.latencyMs = latency;
-+    } else {
-+        if (latency > 0)
-+            st.latencyMs = latency;
-+        if (++st.failCount >= 2) {
-+            st.online = -1;
-+            st.rooms = -1;
-+            if (latency <= 0)
-+                st.latencyMs = 0;
-+        }
-+    }
-+    st.stampMs = nowMs;
-+}
-+
 +static void StatsStoreByAddr(const char *host, u16 port, s32 online, s32 rooms, s32 latencyMs) {
-+    StatsBuildTableIfNeeded();
 +    char addr[64];
 +    snprintf(addr, sizeof(addr), "%.55s:%u", host, (unsigned)port);
 +    const u64 nowMs = MonNowMs();
@@ -4486,27 +4535,806 @@ index 0000000..34d15b0
 +    }
 +}
 +
-+static bool StatsHasUnprobedServer() {
-+    std::scoped_lock lk(g_mutex);
-+    for (u32 i = 0; i < g_statCount; i++) {
-+        if (g_stats[i].stampMs == 0)
-+            return true;
++struct BatchServerItem {
++    char addr[64];
++    char host[64];
++    u16  port;
++    u8   proto;
++    bool resolved;
++    bool hadRecentScan;
++    bool didScan;
++    struct sockaddr_in sa;
++    s32  latMs;
++    s32  httpRttMs;
++    s32  online;
++    s32  rooms;
++    bool httpOk;
++    int  httpErr;
++};
++
++static BatchServerItem g_batch[kStatMaxServers];
++static u32 g_batchCount = 0;
++
++/* 并行 DNS 解析:已命中缓存或 IP 字面量的 0ms 直接填充;其余未缓存域名通过单个
++ * 非阻塞 UDP 套接字并发向 DNS 服务器查询(以 txid1=索引区分应答),一次性解析全部服务器。 */
++static void BatchResolveAll(BatchServerItem *items, u32 count) {
++    DnsInitServers();
++    u32 unresolved = 0;
++    for (u32 i = 0; i < count; i++) {
++        memset(&items[i].sa, 0, sizeof(items[i].sa));
++        items[i].sa.sin_family = AF_INET;
++        items[i].sa.sin_port = htons(items[i].port);
++        items[i].resolved = false;
++
++        in_addr_t lit = inet_addr(items[i].host);
++        if (lit != INADDR_NONE) {
++            items[i].sa.sin_addr.s_addr = lit;
++            items[i].resolved = true;
++            continue;
++        }
++        for (int c = 0; c < g_dnsCacheN; c++) {
++            if (strcasecmp(g_dnsCache[c].host, items[i].host) == 0 && g_dnsCache[c].ip != 0) {
++                items[i].sa.sin_addr.s_addr = htonl(g_dnsCache[c].ip);
++                items[i].resolved = true;
++                break;
++            }
++        }
++        if (!items[i].resolved)
++            unresolved++;
 +    }
-+    return false;
++    if (unresolved == 0 || IoAbort())
++        return;
++
++    int fd = socket(AF_INET, SOCK_DGRAM, 0);
++    if (fd >= 0) {
++        HttpSetNonBlock(fd, true);
++        for (int s = 0; s < g_dnsSrvN && unresolved > 0 && !IoAbort(); s += 2) {
++            for (u32 i = 0; i < count; i++) {
++                if (items[i].resolved)
++                    continue;
++                u8 q[300];
++                size_t qlen = DnsBuildQuery(items[i].host, q, sizeof(q), 0xA5, (u8)i);
++                if (qlen == 0)
++                    continue;
++                for (int k = s; k < s + 2 && k < g_dnsSrvN; k++) {
++                    struct sockaddr_in dsa;
++                    memset(&dsa, 0, sizeof(dsa));
++                    dsa.sin_family = AF_INET;
++                    dsa.sin_port = htons(53);
++                    dsa.sin_addr.s_addr = htonl(g_dnsSrv[k]);
++                    sendto(fd, q, (int)qlen, 0, (struct sockaddr *)&dsa, sizeof(dsa));
++                }
++            }
++            Deadline waitEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(420);
++            while (std::chrono::steady_clock::now() < waitEnd && unresolved > 0 && !IoAbort()) {
++                fd_set rset;
++                FD_ZERO(&rset);
++                FD_SET(fd, &rset);
++                struct timeval tv = { 0, 10 * 1000 };
++                int sel = select(fd + 1, &rset, nullptr, nullptr, &tv);
++                if (sel <= 0)
++                    continue;
++                u8 r[512];
++                for (;;) {
++                    ssize_t n = recv(fd, r, sizeof(r), 0);
++                    if (n <= 0)
++                        break;
++                    if (n >= 12 && r[0] == 0xA5) {
++                        u32 idx = r[1];
++                        u32 netIp = 0;
++                        if (idx < count && !items[idx].resolved &&
++                            DnsParseA(r, n, 0xA5, (u8)idx, &netIp) && netIp != 0) {
++                            u32 hostIp = ntohl(netIp);
++                            if (g_dnsCacheN < (int)(sizeof(g_dnsCache) / sizeof(g_dnsCache[0]))) {
++                                snprintf(g_dnsCache[g_dnsCacheN].host,
++                                         sizeof(g_dnsCache[0].host), "%s", items[idx].host);
++                                g_dnsCache[g_dnsCacheN].ip = hostIp;
++                                g_dnsCacheN++;
++                            }
++                            /* 相同域名的其它端口条目一并标记解析完成 */
++                            for (u32 j = 0; j < count; j++) {
++                                if (!items[j].resolved &&
++                                    strcasecmp(items[j].host, items[idx].host) == 0) {
++                                    items[j].sa.sin_addr.s_addr = netIp;
++                                    items[j].resolved = true;
++                                    if (unresolved > 0)
++                                        unresolved--;
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++        }
++        close(fd);
++    }
++
++    for (u32 i = 0; i < count && !IoAbort(); i++) {
++        if (!items[i].resolved) {
++            if (HttpResolve(items[i].host, &items[i].sa)) {
++                items[i].sa.sin_port = htons(items[i].port);
++                items[i].resolved = true;
++            }
++        }
++    }
 +}
 +
-+/* UDP 5 字节中继 PING({0x02,'l','d','n','p'})往返耗时(毫秒,0 = 未回显)。
-+ * 与 sysmodule (relay_client.cpp ProbeSelectedLatency)完全同协议同口径:
-+ *   - 1.0 服务器(switch-lan-play)回显前 4 字节(首字节 0x02)
-+ *   - 2.0/3.0 服务器(slp-server-rust)严格校验 4 字节 payload 并原样回显 5 字节
-+ * 之前用非阻塞 TCP connect 的 select(wset) 测延迟,在真机 bsd:u 或透明代理/
-+ * 加速器环境下会在 1~3ms 内本地返回,导致非选中服务器延迟失真显示 1ms/3ms。
-+ * 改为等待远端真正回包的 UDP PING;支持 IoAbort 10ms 内打断。 */
++static bool ParseBatchHttpResponse(std::string &raw, bool restMode,
++                                   QueryResult *qrOut, bool *retrySchemaOut,
++                                   int *errOut) {
++    if (retrySchemaOut)
++        *retrySchemaOut = false;
++    *qrOut = QueryResult{};
++
++    int status = 0;
++    std::string body;
++    if (!HttpParseResponse(raw, &status, &body)) {
++        if (errOut) *errOut = 7;
++        return false;
++    }
++    if (status < 200 || status >= 300) {
++        if (errOut) *errOut = 100 + status;
++        if (!restMode && retrySchemaOut && (status == 400 || status == 422))
++            *retrySchemaOut = true;
++        return false;
++    }
++
++    if (restMode) {
++        const char *root = JsWs(SkipBom(body.c_str()));
++        u32 v = 0;
++        if (JsonGetU32(root, "online", &v) || JsonGetU32(root, "clientCount", &v))
++            qrOut->online = (s32)v;
++        const char *rooms = JsonGet(root, "rooms");
++        if (rooms)
++            ParseRoomArray(rooms, qrOut);
++        if (qrOut->online >= 0) {
++            if (errOut) *errOut = 0;
++            return true;
++        }
++        if (errOut) *errOut = 8;
++        return false;
++    }
++
++    const char *errors = JsonGet(body.c_str(), "errors");
++    if (errors && *errors == '[' && *JsWs(errors + 1) != ']') {
++        if (retrySchemaOut) *retrySchemaOut = true;
++        if (errOut) *errOut = 9;
++        return false;
++    }
++    const char *data = JsonGet(body.c_str(), "data");
++    if (!data) {
++        if (retrySchemaOut) *retrySchemaOut = true;
++        if (errOut) *errOut = 9;
++        return false;
++    }
++    u32 v = 0;
++    const char *info = JsonGet(data, "serverInfo");
++    if (!info || !JsonGetU32(info, "online", &v)) {
++        if (retrySchemaOut) *retrySchemaOut = true;
++        if (errOut) *errOut = 9;
++        return false;
++    }
++    qrOut->online = (s32)v;
++    const char *rooms = JsonGet(data, "room");
++    if (rooms)
++        ParseRoomArray(rooms, qrOut);
++    if (errOut) *errOut = 0;
++    return true;
++}
++
++/* 并行 UDP 房间扫描:复用持久非阻塞 UDP 套接字对所有 online > 0 且 HTTP 未返回房间
++ * 的服务器同时发送 kScanFrame,既避免每次新建临时端口在服务端叠加在线人数,又能在一个
++ * 520ms 窗口内完成全部服务器的房间补齐。 */
++static void BatchUdpRoomScan(BatchServerItem *items, const u32 *scanIdxs, u32 scanN,
++                             s32 selIdx, QueryResult *selQr) {
++    if (scanN == 0 || IoAbort())
++        return;
++    if (g_scanUdpFd < 0) {
++        g_scanUdpFd = socket(AF_INET, SOCK_DGRAM, 0);
++        if (g_scanUdpFd < 0)
++            return;
++        HttpSetNonBlock(g_scanUdpFd, true);
++    }
++    int fd = g_scanUdpFd;
++    u8 drain[1024];
++    while (recvfrom(fd, drain, sizeof(drain), 0, nullptr, nullptr) > 0) {}
++
++    static char s_seen[kStatMaxServers][kMaxScanRooms][36];
++    u32 seenN[kStatMaxServers] = {};
++    s32 udpOnline[kStatMaxServers] = {};
++
++    memset(g_frags, 0, sizeof(g_frags));
++    Deadline start = std::chrono::steady_clock::now();
++    Deadline deadline = start + std::chrono::milliseconds(kBatchScanMs);
++    Deadline nextSend = start;
++    u8 frame[2048];
++
++    while (std::chrono::steady_clock::now() < deadline && !IoAbort()) {
++        Deadline now = std::chrono::steady_clock::now();
++        if (now >= nextSend) {
++            for (u32 s = 0; s < scanN; s++) {
++                u32 idx = scanIdxs[s];
++                if (sendto(fd, kScanFrame, sizeof(kScanFrame), 0,
++                           (struct sockaddr *)&items[idx].sa, sizeof(items[idx].sa)) >= 0) {
++                    items[idx].didScan = true;
++                }
++            }
++            nextSend = now + std::chrono::milliseconds(260);
++        }
++        fd_set rset;
++        FD_ZERO(&rset);
++        FD_SET(fd, &rset);
++        struct timeval tv = { 0, 10 * 1000 };
++        int sel = select(fd + 1, &rset, nullptr, nullptr, &tv);
++        if (sel <= 0)
++            continue;
++
++        for (;;) {
++            struct sockaddr_in fromSa;
++            socklen_t fromLen = sizeof(fromSa);
++            memset(&fromSa, 0, sizeof(fromSa));
++            ssize_t n = recvfrom(fd, frame, sizeof(frame), 0,
++                                 (struct sockaddr *)&fromSa, &fromLen);
++            if (n <= 0)
++                break;
++
++            s32 matchS = -1;
++            for (u32 s = 0; s < scanN; s++) {
++                u32 idx = scanIdxs[s];
++                if (items[idx].sa.sin_addr.s_addr == fromSa.sin_addr.s_addr &&
++                    items[idx].sa.sin_port == fromSa.sin_port) {
++                    matchS = (s32)s;
++                    break;
++                }
++            }
++            if (matchS < 0)
++                continue;
++            u32 idx = scanIdxs[matchS];
++
++            const u8 *pkt = nullptr;
++            size_t pktLen = 0;
++            if (frame[0] == 1) {
++                pkt = frame + 1;
++                pktLen = (size_t)n - 1;
++            } else if (frame[0] == 3) {
++                if (n >= 5) {
++                    u32 tagIp = 0x7F000000u | idx;
++                    memcpy(frame + 1, &tagIp, 4);
++                }
++                if (!FragAdd(frame + 1, (size_t)n - 1, &pkt, &pktLen))
++                    continue;
++            } else {
++                continue;
++            }
++
++            MonitorRoom room;
++            memset(&room, 0, sizeof(room));
++            char tag[36] = {};
++            if (!ParseLdnResponse(pkt, pktLen, &room, tag, sizeof(tag)))
++                continue;
++
++            bool dup = false;
++            for (u32 k = 0; k < seenN[matchS]; k++) {
++                if (strcmp(s_seen[matchS][k], tag) == 0) {
++                    dup = true;
++                    break;
++                }
++            }
++            if (dup)
++                continue;
++            if (seenN[matchS] < kMaxScanRooms)
++                snprintf(s_seen[matchS][seenN[matchS]++], sizeof(s_seen[matchS][0]), "%s", tag);
++
++            items[idx].rooms++;
++            udpOnline[matchS] += (room.players > 0) ? (s32)room.players : 1;
++            if ((s32)idx == selIdx && selQr && selQr->roomN < MONITOR_MAX_ROOMS)
++                selQr->rooms[selQr->roomN++] = room;
++        }
++    }
++
++    for (u32 s = 0; s < scanN; s++) {
++        u32 idx = scanIdxs[s];
++        if (udpOnline[s] > items[idx].online)
++            items[idx].online = udpOnline[s];
++        if ((s32)idx == selIdx && selQr && items[idx].online > selQr->online)
++            selQr->online = items[idx].online;
++    }
++}
++
++struct BatchHttpSlot {
++    int  srvIdx = -1;
++    int  fd = -1;
++    int  state = 0;          /* 0=空闲, 1=连接中, 2=发送中, 3=接收中 */
++    bool restMode = false;
++    bool triedGql = false;
++    bool triedRest = false;
++    u8   gqlVariant = 0;
++    std::string req;
++    size_t sent = 0;
++    std::string raw;
++    bool gotFirstByte = false;
++    Deadline start{};
++    Deadline deadline{};
++};
++
++/* 同步批量探测所有服务器(选中服 + 全部其它服):
++ *   1. BatchResolveAll 一次性解析全部域名;
++ *   2. 1 个共享 UDP 套接字并发向全部服务器发送 5 字节中继 PING ({0x02,'l','d',tag,'p'}),
++ *      其中 tag = (attempt<<6)|idx,1.0 与 2.0/3.0 服务器均原样回显前 4 字节;
++ *   3. 4 个非阻塞 TCP 套接字滑动窗口并发查询全部服务器的 GraphQL / REST /info
++ *      (选中服务器排在第 0 号槽位最先启动);
++ *   4. 对所有 online > 0 且 rooms == 0 的服务器并发执行 BatchUdpRoomScan。 */
++static void RefreshAllServersBatch(const char *selHost, u16 selPort,
++                                   QueryResult *selQr, bool *selOkOut,
++                                   s32 *selLatOut, int *selHttpErrOut) {
++    *selQr = QueryResult{};
++    if (selOkOut) *selOkOut = false;
++    if (selLatOut) *selLatOut = 0;
++    if (selHttpErrOut) *selHttpErrOut = 0;
++    if (!g_sockInited) {
++        if (selHttpErrOut) *selHttpErrOut = 1;
++        return;
++    }
++
++    char selAddr[64];
++    snprintf(selAddr, sizeof(selAddr), "%.55s:%u", selHost, (unsigned)selPort);
++
++    u32 count = 0;
++    s32 selIdx = -1;
++    const u64 nowMs = MonNowMs();
++    {
++        std::scoped_lock lk(g_mutex);
++        count = g_statCount;
++        if (count > kStatMaxServers)
++            count = kStatMaxServers;
++        for (u32 i = 0; i < count; i++) {
++            memset(&g_batch[i], 0, sizeof(g_batch[i]));
++            snprintf(g_batch[i].addr, sizeof(g_batch[i].addr), "%s", g_stats[i].addr);
++            SplitAddrHostPort(g_stats[i].addr, g_batch[i].host, sizeof(g_batch[i].host), &g_batch[i].port);
++            g_batch[i].proto = g_stats[i].proto;
++            if (g_batch[i].proto == ProtoUnknown)
++                g_batch[i].proto = DefaultProtoForHostPort(g_batch[i].host, g_batch[i].port);
++            g_batch[i].hadRecentScan = (g_stats[i].lastScanMs != 0 &&
++                                        nowMs >= g_stats[i].lastScanMs &&
++                                        (nowMs - g_stats[i].lastScanMs) < 30000);
++            g_batch[i].online = -1;
++            g_batch[i].rooms = -1;
++            if (strcmp(g_batch[i].addr, selAddr) == 0)
++                selIdx = (s32)i;
++        }
++    }
++    if (selIdx < 0 && count < kStatMaxServers) {
++        selIdx = (s32)count++;
++        memset(&g_batch[selIdx], 0, sizeof(g_batch[selIdx]));
++        snprintf(g_batch[selIdx].addr, sizeof(g_batch[selIdx].addr), "%s", selAddr);
++        snprintf(g_batch[selIdx].host, sizeof(g_batch[selIdx].host), "%s", selHost);
++        g_batch[selIdx].port = selPort;
++        g_batch[selIdx].proto = DefaultProtoForHostPort(selHost, selPort);
++        g_batch[selIdx].online = -1;
++        g_batch[selIdx].rooms = -1;
++    }
++    g_batchCount = count;
++    if (count == 0 || IoAbort())
++        return;
++
++    BatchResolveAll(g_batch, count);
++    if (IoAbort())
++        return;
++
++    /* 队列顺序:选中服务器排第 0 位优先跑,其余服务器紧随其后 */
++    u32 order[kStatMaxServers];
++    u32 orderN = 0;
++    if (selIdx >= 0 && g_batch[selIdx].resolved)
++        order[orderN++] = (u32)selIdx;
++    for (u32 i = 0; i < count; i++) {
++        if ((s32)i != selIdx && g_batch[i].resolved)
++            order[orderN++] = i;
++    }
++    if (selIdx >= 0 && !g_batch[selIdx].resolved && selHttpErrOut)
++        *selHttpErrOut = 2;
++
++    int pingFd = socket(AF_INET, SOCK_DGRAM, 0);
++    if (pingFd >= 0)
++        HttpSetNonBlock(pingFd, true);
++    Deadline pingSend[2][kStatMaxServers] = {};
++    Deadline loopStart = std::chrono::steady_clock::now();
++    if (pingFd >= 0) {
++        for (u32 i = 0; i < count; i++) {
++            if (!g_batch[i].resolved)
++                continue;
++            pingSend[0][i] = std::chrono::steady_clock::now();
++            u8 pkt[5] = { 0x02, 'l', 'd', (u8)(i & 0x3F), 'p' };
++            sendto(pingFd, pkt, sizeof(pkt), 0,
++                   (struct sockaddr *)&g_batch[i].sa, sizeof(g_batch[i].sa));
++        }
++    }
++    bool pingResent = false;
++
++    static const char *const kGqlVariants[4] = {
++        kGraphqlQuery,
++        kGraphqlQueryNoAdvert,
++        kGraphqlQueryNoConnection,
++        kGraphqlQueryOldest,
++    };
++    static BatchHttpSlot slots[kBatchHttpSlots];
++    for (int s = 0; s < kBatchHttpSlots; s++)
++        slots[s] = BatchHttpSlot{};
++
++    auto launchSlot = [&](BatchHttpSlot &sl, int idx, bool restMode, u8 gqlVar) {
++        sl.srvIdx = idx;
++        sl.restMode = restMode;
++        sl.gqlVariant = gqlVar;
++        if (restMode)
++            sl.triedRest = true;
++        else
++            sl.triedGql = true;
++        sl.sent = 0;
++        sl.raw.clear();
++        sl.gotFirstByte = false;
++        sl.start = std::chrono::steady_clock::now();
++        sl.deadline = sl.start + std::chrono::milliseconds(kBatchHttpMs);
++
++        sl.fd = socket(AF_INET, SOCK_STREAM, 0);
++        if (sl.fd < 0) {
++            sl.state = 0;
++            g_batch[idx].httpErr = 3;
++            return false;
++        }
++        HttpSetNonBlock(sl.fd, true);
++
++        if (restMode) {
++            char hdr[320];
++            snprintf(hdr, sizeof(hdr),
++                     "GET /info HTTP/1.1\r\n"
++                     "Host: %s:%u\r\n"
++                     "User-Agent: ldn_mitm/1.0\r\n"
++                     "Accept: */*\r\n"
++                     "Connection: close\r\n\r\n",
++                     g_batch[idx].host, (unsigned)g_batch[idx].port);
++            sl.req = hdr;
++        } else {
++            const char *qstr = (idx == selIdx) ? kGqlVariants[gqlVar < 4 ? gqlVar : 3]
++                                               : kGraphqlQueryOldest;
++            std::string body = "{\"query\":\"";
++            body += qstr;
++            body += "\"}";
++            char hdr[384];
++            snprintf(hdr, sizeof(hdr),
++                     "POST / HTTP/1.1\r\n"
++                     "Host: %s:%u\r\n"
++                     "User-Agent: ldn_mitm/1.0\r\n"
++                     "Accept: */*\r\n"
++                     "Content-Type: application/json\r\n"
++                     "Content-Length: %zu\r\n"
++                     "Connection: close\r\n\r\n",
++                     g_batch[idx].host, (unsigned)g_batch[idx].port, body.size());
++            sl.req = hdr;
++            sl.req += body;
++        }
++
++        int rc = connect(sl.fd, (struct sockaddr *)&g_batch[idx].sa, sizeof(g_batch[idx].sa));
++        if (rc == 0) {
++            sl.state = 2;
++            return true;
++        }
++        if (errno == EINPROGRESS || errno == EWOULDBLOCK || errno == EAGAIN) {
++            sl.state = 1;
++            return true;
++        }
++        close(sl.fd);
++        sl.fd = -1;
++        sl.state = 0;
++        g_batch[idx].httpErr = 4;
++        return false;
++    };
++
++    u32 nextOrder = 0;
++    auto assignNextServer = [&](BatchHttpSlot &sl) {
++        while (nextOrder < orderN) {
++            int idx = (int)order[nextOrder++];
++            sl = BatchHttpSlot{};
++            bool startRest = (g_batch[idx].proto == ProtoRest);
++            if (launchSlot(sl, idx, startRest, 0))
++                return;
++            if (!startRest && launchSlot(sl, idx, true, 0))
++                return;
++        }
++    };
++
++    for (int s = 0; s < kBatchHttpSlots && nextOrder < orderN; s++)
++        assignNextServer(slots[s]);
++
++    static QueryResult s_auxQr;
++    auto completeSlot = [&](BatchHttpSlot &sl, bool hasResponse, int transportErr) {
++        int idx = sl.srvIdx;
++        if (sl.fd >= 0) {
++            close(sl.fd);
++            sl.fd = -1;
++        }
++        sl.state = 0;
++
++        bool retrySchema = false;
++        int parseErr = transportErr;
++        QueryResult *targetQr = (idx == selIdx) ? selQr : &s_auxQr;
++        bool ok = false;
++        if (hasResponse)
++            ok = ParseBatchHttpResponse(sl.raw, sl.restMode, targetQr, &retrySchema, &parseErr);
++
++        if (ok) {
++            if (g_batch[idx].hadRecentScan && targetQr->online > 0)
++                targetQr->online--;
++            g_batch[idx].httpOk = true;
++            g_batch[idx].httpErr = 0;
++            g_batch[idx].online = targetQr->online;
++            g_batch[idx].rooms = (s32)targetQr->roomN;
++            g_batch[idx].proto = sl.restMode ? ProtoRest : ProtoGraphql;
++        } else {
++            g_batch[idx].httpErr = parseErr;
++            if (!sl.restMode && retrySchema && idx == selIdx && sl.gqlVariant + 1 < 4) {
++                if (launchSlot(sl, idx, false, (u8)(sl.gqlVariant + 1)))
++                    return;
++            }
++            if (!sl.triedRest) {
++                if (launchSlot(sl, idx, true, 0))
++                    return;
++            } else if (!sl.triedGql) {
++                if (launchSlot(sl, idx, false, 0))
++                    return;
++            }
++        }
++        assignNextServer(sl);
++    };
++
++    while (!IoAbort()) {
++        Deadline now = std::chrono::steady_clock::now();
++        long elapsedMs = (long)std::chrono::duration_cast<std::chrono::milliseconds>(now - loopStart).count();
++        if (pingFd >= 0 && !pingResent && elapsedMs >= 320) {
++            pingResent = true;
++            for (u32 i = 0; i < count; i++) {
++                if (g_batch[i].resolved && g_batch[i].latMs == 0) {
++                    pingSend[1][i] = std::chrono::steady_clock::now();
++                    u8 pkt[5] = { 0x02, 'l', 'd', (u8)(0x40 | (i & 0x3F)), 'p' };
++                    sendto(pingFd, pkt, sizeof(pkt), 0,
++                           (struct sockaddr *)&g_batch[i].sa, sizeof(g_batch[i].sa));
++                }
++            }
++        }
++
++        fd_set rset, wset;
++        FD_ZERO(&rset);
++        FD_ZERO(&wset);
++        int maxFd = -1;
++        if (pingFd >= 0) {
++            FD_SET(pingFd, &rset);
++            maxFd = pingFd;
++        }
++
++        bool anyHttpActive = false;
++        for (int s = 0; s < kBatchHttpSlots; s++) {
++            BatchHttpSlot &sl = slots[s];
++            if (sl.state == 0)
++                continue;
++            if (now >= sl.deadline) {
++                completeSlot(sl, !sl.raw.empty(), 6);
++                if (sl.state == 0)
++                    continue;
++            }
++            anyHttpActive = true;
++            if (sl.fd > maxFd)
++                maxFd = sl.fd;
++            if (sl.state == 1 || sl.state == 2)
++                FD_SET(sl.fd, &wset);
++            else if (sl.state == 3)
++                FD_SET(sl.fd, &rset);
++        }
++
++        bool allPingsDone = true;
++        for (u32 i = 0; i < count; i++) {
++            if (g_batch[i].resolved && g_batch[i].latMs == 0) {
++                allPingsDone = false;
++                break;
++            }
++        }
++        if (!anyHttpActive && (pingFd < 0 || allPingsDone || elapsedMs >= 600))
++            break;
++        if (maxFd < 0)
++            break;
++
++        struct timeval tv = { 0, 10 * 1000 };
++        int sel = select(maxFd + 1, &rset, &wset, nullptr, &tv);
++        if (sel <= 0)
++            continue;
++        now = std::chrono::steady_clock::now();
++
++        if (pingFd >= 0 && FD_ISSET(pingFd, &rset)) {
++            u8 reply[32];
++            for (;;) {
++                ssize_t n = recv(pingFd, reply, sizeof(reply), 0);
++                if (n < 4)
++                    break;
++                if (reply[0] == 0x02 && reply[1] == 'l' && reply[2] == 'd') {
++                    u32 att = (reply[3] >> 6) & 1u;
++                    u32 idx = reply[3] & 0x3Fu;
++                    if (idx < count && g_batch[idx].latMs == 0 &&
++                        pingSend[att][idx].time_since_epoch().count() != 0) {
++                        s32 ms = (s32)std::chrono::duration_cast<std::chrono::milliseconds>(
++                            now - pingSend[att][idx]).count();
++                        g_batch[idx].latMs = ms > 0 ? ms : 1;
++                    }
++                }
++            }
++        }
++
++        for (int s = 0; s < kBatchHttpSlots; s++) {
++            BatchHttpSlot &sl = slots[s];
++            if (sl.state == 0 || sl.fd < 0)
++                continue;
++            if (sl.state == 1 && FD_ISSET(sl.fd, &wset)) {
++                int soErr = 0;
++                socklen_t slen = sizeof(soErr);
++                if (getsockopt(sl.fd, SOL_SOCKET, SO_ERROR, &soErr, &slen) != 0 || soErr != 0) {
++                    completeSlot(sl, false, 4);
++                    continue;
++                }
++                sl.state = 2;
++            }
++            if (sl.state == 2 && sl.fd >= 0 && FD_ISSET(sl.fd, &wset)) {
++                ssize_t n = send(sl.fd, sl.req.data() + sl.sent, sl.req.size() - sl.sent, 0);
++                if (n < 0) {
++                    if (errno != EAGAIN && errno != EWOULDBLOCK)
++                        completeSlot(sl, false, 5);
++                } else if (n == 0) {
++                    completeSlot(sl, false, 5);
++                } else {
++                    sl.sent += (size_t)n;
++                    if (sl.sent >= sl.req.size())
++                        sl.state = 3;
++                }
++            }
++            if (sl.state == 3 && sl.fd >= 0 && FD_ISSET(sl.fd, &rset)) {
++                char buf[2048];
++                ssize_t n = recv(sl.fd, buf, sizeof(buf), 0);
++                if (n < 0) {
++                    if (errno != EAGAIN && errno != EWOULDBLOCK)
++                        completeSlot(sl, !sl.raw.empty(), 6);
++                } else if (n == 0) {
++                    completeSlot(sl, !sl.raw.empty(), 7);
++                } else {
++                    if (!sl.gotFirstByte) {
++                        sl.gotFirstByte = true;
++                        s32 rtt = (s32)std::chrono::duration_cast<std::chrono::milliseconds>(
++                            now - sl.start).count() / 2;
++                        g_batch[sl.srvIdx].httpRttMs = rtt > 0 ? rtt : 1;
++                    }
++                    sl.raw.append(buf, (size_t)n);
++                    if (sl.raw.size() >= kMaxHttpBody) {
++                        completeSlot(sl, true, 0);
++                        continue;
++                    }
++                    size_t hdrEnd = sl.raw.find("\r\n\r\n");
++                    if (hdrEnd != std::string::npos) {
++                        long contentLen = -1;
++                        for (size_t p = 0; p < hdrEnd; ) {
++                            size_t e = sl.raw.find("\r\n", p);
++                            if (e == std::string::npos || e > hdrEnd)
++                                break;
++                            if (e - p >= 15 &&
++                                strncasecmp(sl.raw.c_str() + p, "Content-Length:", 15) == 0) {
++                                contentLen = atol(sl.raw.c_str() + p + 15);
++                                break;
++                            }
++                            p = e + 2;
++                        }
++                        if (contentLen >= 0 &&
++                            sl.raw.size() >= hdrEnd + 4 + (size_t)contentLen) {
++                            completeSlot(sl, true, 0);
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    if (pingFd >= 0)
++        close(pingFd);
++    for (int s = 0; s < kBatchHttpSlots; s++) {
++        if (slots[s].fd >= 0) {
++            close(slots[s].fd);
++            slots[s].fd = -1;
++        }
++        slots[s].state = 0;
++    }
++    if (IoAbort())
++        return;
++
++    /* 收集所有 online > 0 且 HTTP 未给出房间的服务器,并发执行 UDP 房间扫描 */
++    u32 scanIdxs[kStatMaxServers];
++    u32 scanN = 0;
++    if (selIdx >= 0 && g_batch[selIdx].httpOk &&
++        g_batch[selIdx].online > 0 && g_batch[selIdx].rooms == 0) {
++        scanIdxs[scanN++] = (u32)selIdx;
++    }
++    for (u32 i = 0; i < count; i++) {
++        if ((s32)i != selIdx && g_batch[i].httpOk &&
++            g_batch[i].online > 0 && g_batch[i].rooms == 0) {
++            scanIdxs[scanN++] = i;
++        }
++    }
++    if (scanN > 0 && !IoAbort())
++        BatchUdpRoomScan(g_batch, scanIdxs, scanN, selIdx, selQr);
++    if (IoAbort())
++        return;
++
++    for (u32 i = 0; i < count; i++) {
++        if (g_batch[i].latMs <= 0 && g_batch[i].httpRttMs > 0)
++            g_batch[i].latMs = g_batch[i].httpRttMs;
++    }
++
++    if (selIdx >= 0) {
++        if (selOkOut) *selOkOut = g_batch[selIdx].httpOk;
++        if (selLatOut) *selLatOut = g_batch[selIdx].latMs;
++        if (selHttpErrOut) *selHttpErrOut = g_batch[selIdx].httpErr;
++    }
++}
++
++/* 在持有 g_mutex 的情况下将本轮批量探测结果一次性写入 g_stats[]。 */
++static void StatsCommitBatchLocked(const char *selHost, u16 selPort,
++                                   s32 selOnline, s32 selRooms, s32 selLat) {
++    const u64 nowMs = MonNowMs();
++    char selAddr[64];
++    snprintf(selAddr, sizeof(selAddr), "%.55s:%u", selHost, (unsigned)selPort);
++
++    for (u32 i = 0; i < g_batchCount; i++) {
++        const BatchServerItem &b = g_batch[i];
++        for (u32 k = 0; k < g_statCount; k++) {
++            if (strcmp(g_stats[k].addr, b.addr) != 0)
++                continue;
++            ServerStat &st = g_stats[k];
++            if (b.proto != ProtoUnknown)
++                st.proto = b.proto;
++            if (b.didScan)
++                st.lastScanMs = nowMs;
++            if (strcmp(st.addr, selAddr) == 0) {
++                st.failCount = 0;
++                st.online = selOnline;
++                st.rooms = selRooms;
++                if (selLat > 0)
++                    st.latencyMs = selLat;
++                st.stampMs = nowMs;
++            } else if (b.httpOk) {
++                st.failCount = 0;
++                st.online = b.online;
++                st.rooms = b.rooms;
++                if (b.latMs > 0)
++                    st.latencyMs = b.latMs;
++                st.stampMs = nowMs;
++            } else {
++                if (b.latMs > 0)
++                    st.latencyMs = b.latMs;
++                st.failCount++;
++                const bool keepRecent = (st.stampMs != 0 && nowMs >= st.stampMs &&
++                                         (nowMs - st.stampMs) <= kStatKeepOnFailMs &&
++                                         st.failCount < 2);
++                if (!keepRecent) {
++                    st.online = -1;
++                    st.rooms = -1;
++                    if (b.latMs <= 0)
++                        st.latencyMs = 0;
++                    st.stampMs = nowMs;
++                }
++            }
++            break;
++        }
++    }
++}
++
++/* 兼容单台 UDP PING 测量(供单点回退使用) */
 +static s32 ProbeLatencyMs(const char *host, u16 port) {
 +    struct sockaddr_in sa;
 +    if (!HttpResolve(host, &sa))
 +        return 0;
 +    sa.sin_port = htons(port);
++
 +    int fd = socket(AF_INET, SOCK_DGRAM, 0);
 +    if (fd < 0)
 +        return 0;
@@ -4555,123 +5383,9 @@ index 0000000..34d15b0
 +    return ms;
 +}
 +
-+/* 与 DoRefresh / LanPlayMonitor 同口径探测单台服务器的在线人数与房间数量:
-+ *   1. 按缓存/默认协议查询 GraphQL 或 REST /info,解析真实的 room 数组;
-+ *   2. 若服务器有人在线(online > 0)但 HTTP 未返回房间(如 1.0 REST 服务器),
-+ *      执行快速 UDP LDN 扫描补齐真实房间数;若 online == 0 则直接确定为 0 房间;
-+ *   3. 绝不把 online - idle (活跃玩家数)误作房间数,也不会在可达的 1.0 服务器上
-+ *      遗留 -1 ("--")。 */
-+static bool ProbeOnlineRooms(const char *host, u16 port,
-+                             s32 *online, s32 *rooms, s32 *httpRttMs) {
-+    static QueryResult pqr;   /* 仅 worker 线程单线程调用,static 免占栈 */
-+    pqr = QueryResult{};
-+    if (!QueryAuto(host, port, &pqr, kStatProbeMs, httpRttMs))
-+        return false;
-+    if (IoAbort())
-+        return false;
-+
-+    if (pqr.online > 0 && pqr.roomN == 0 && !IoAbort()) {
-+        UdpRoomScan(host, port, &pqr, kStatScanMs);
-+        if (IoAbort())
-+            return false;
-+    }
-+
-+    s32 udpOnline = 0;
-+    for (u32 i = 0; i < pqr.roomN; i++)
-+        udpOnline += (pqr.rooms[i].players > 0) ? (s32)pqr.rooms[i].players : 1;
-+    if (udpOnline > pqr.online)
-+        pqr.online = udpOnline;
-+
-+    *online = pqr.online;
-+    *rooms = (s32)pqr.roomN;
-+    return true;
-+}
-+
-+/* 工作线程空闲时调用:测一台(轮转),本轮测完再睡。 */
-+static void RefreshOneServerStat() {
-+    StatsBuildTableIfNeeded();
-+    if (IoAbort())
-+        return;
-+    u32 n;
-+    {
-+        std::scoped_lock lk(g_mutex);
-+        n = g_statCount;
-+    }
-+    if (n == 0) {
-+        AbortableSleepMs(200);
-+        return;
-+    }
-+    const u64 now = MonNowMs();
-+
-+    /* 选一台:优先测从未测过的(stampMs == 0),其次选最久没测过的;全都很新就睡一会儿 */
-+    u32 pick = kStatUnknown;
-+    u64 oldest = 0;
-+    bool pickedUnprobed = false;
-+    {
-+        std::scoped_lock lk(g_mutex);
-+        for (u32 k = 0; k < n; k++) {
-+            u32 idx = (g_statCursor + k) % n;
-+            if (g_stats[idx].stampMs == 0) {
-+                pick = idx;
-+                pickedUnprobed = true;
-+                break;
-+            }
-+            u64 age = (now > g_stats[idx].stampMs) ? (now - g_stats[idx].stampMs) : 0;
-+            if (age > oldest || pick == kStatUnknown) {
-+                oldest = age;
-+                pick = idx;
-+            }
-+        }
-+    }
-+    if (pick == kStatUnknown)
-+        pick = g_statCursor % n;
-+    if (!pickedUnprobed && oldest < kStatFreshMs) {
-+        AbortableSleepMs(200);               /* 都还新鲜:歇 200ms 再看 */
-+        return;
-+    }
-+
-+    char addr[64], host[64] = {};
-+    u16 port = 11451;
-+    {
-+        std::scoped_lock lk(g_mutex);
-+        snprintf(addr, sizeof(addr), "%s", g_stats[pick].addr);
-+    }
-+    char *colon = strrchr(addr, ':');
-+    if (colon) {
-+        *colon = 0;
-+        port = (u16)atoi(colon + 1);
-+    }
-+    snprintf(host, sizeof(host), "%s", addr);
-+    if (host[0] == 0) {
-+        g_statCursor = (pick + 1) % n;
-+        return;
-+    }
-+
-+    s32 lat = ProbeLatencyMs(host, port);
-+    if (IoAbort())
-+        return;
-+    s32 online = -1, rooms = -1, httpRtt = 0;
-+    bool ok = ProbeOnlineRooms(host, port, &online, &rooms, &httpRtt);
-+    if (IoAbort())
-+        return;
-+    if (lat <= 0 && httpRtt > 0)
-+        lat = httpRtt;
-+
-+    g_statCursor = (pick + 1) % n;
-+    StatsStore(pick, ok, online, rooms, lat, MonNowMs());
-+    {
-+        char m[144];
-+        snprintf(m, sizeof(m), "stat #%u %s:%u ok=%d on=%d rooms=%d lat=%d(http=%d)",
-+                 (unsigned)pick, host, (unsigned)port, (int)ok, (int)online,
-+                 (int)rooms, (int)lat, (int)httpRtt);
-+        MonLog(m);
-+    }
-+}
-+
 +u32 MonitorListServerStats(MonitorServerStat *out, u32 max) {
 +    if (!out || max == 0)
 +        return 0;
-+    StatsBuildTableIfNeeded();     /* 节流 3 秒,避免界面刷新时频繁读 SD */
 +    const u64 now = MonNowMs();
 +    u32 n = 0;
 +    std::scoped_lock lk(g_mutex);
@@ -4709,18 +5423,9 @@ index 0000000..34d15b0
 +        MonLog("worker-ready");
 +    }
 +
-+    u32 auxStreak = 0;
 +    while (!g_exit.load()) {
 +        u32 want = g_reqGen.load();
-+        const bool targetChanged = !g_targetGen.IsCurrent(g_auxTargetGen.load());
-+        const bool needInitialSweep = StatsHasUnprobedServer();
-+        /* 用户切换服务器/打开插件(targetChanged)时立即刷新选中服务器;
-+         * 若还有未测过的其它服务器,在两次周期轮询之间连测最多 3 台再回刷选中服,
-+         * 让全部服务器的在线/房间/延迟尽快填充完毕。 */
-+        if (want != g_doneGen.load() &&
-+            (targetChanged || !needInitialSweep || auxStreak >= 3)) {
-+            auxStreak = 0;
-+            g_auxPhase.store(false);
++        if (want != g_doneGen.load()) {
 +            g_doneGen.store(want);
 +            char name[48];
 +            bool subs;
@@ -4735,13 +5440,6 @@ index 0000000..34d15b0
 +            }
 +            DoRefresh(name[0] ? name : nullptr, subs, targetGen);
 +            MonLog("refresh-done");
-+        } else if (!IoAbort()) {
-+            /* 空闲:给其它服务器(非选中行)测一轮延迟 + 在线/房间,
-+               界面就能"每行都显示数值"而不必先选中它。 */
-+            g_auxPhase.store(true);
-+            RefreshOneServerStat();
-+            g_auxPhase.store(false);
-+            auxStreak++;
 +        } else {
 +            svcSleepThread(10'000'000);      /* 10ms:按返回退出时无需等 50ms */
 +        }
@@ -4799,6 +5497,10 @@ index 0000000..34d15b0
 +    g_exit.store(true);
 +    threadWaitForExit(&g_thread);
 +    threadClose(&g_thread);
++    if (g_scanUdpFd >= 0) {
++        close(g_scanUdpFd);
++        g_scanUdpFd = -1;
++    }
 +    if (g_sockInited) {
 +        socketExit();
 +        g_sockInited = false;
@@ -4851,10 +5553,10 @@ index 0000000..34d15b0
 +}
 diff --git a/overlay/source/monitor.hpp b/overlay/source/monitor.hpp
 new file mode 100644
-index 0000000..8380b32
+index 0000000..2ad9995
 --- /dev/null
 +++ b/overlay/source/monitor.hpp
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,94 @@
 +#pragma once
 +#include <switch.h>
 +
@@ -4914,6 +5616,10 @@ index 0000000..8380b32
 +    char addr[64];
 +};
 +u32 MonitorListRelayServers(MonitorServer *out, u32 max);
++
++/* 由 UI 层在构建服务器列表时直接把从 sysmodule 读到的服务器列表同步给监视器,
++ * 确保与界面行完全一致且无需在 UI 线程读 SD 卡。 */
++void MonitorSetServerList(const MonitorServer *servers, u32 count);
 +
 +/* 每台服务器自己的在线/房间/延迟(界面所有行都显示,不只是选中行)。
 + * 后台线程按轮转顺序逐台探测,所以数值是"最近一次测到的":
