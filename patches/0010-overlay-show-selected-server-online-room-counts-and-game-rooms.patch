@@ -116,27 +116,35 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
 - 单 worker 的旧服务器查询返回后，若请求代次已过期，则不写入房间缓存、在线/房间数或快照，避免把旧结果显示到新服务器下；新增纯主机 generation gate 回归测试。
 
 界面布局与打开速度（本轮反馈，2026-10-21）：
-- 删除标题下方的「阿东版 · 版本号」副标题整行区域：MonitorFrame 不再接收 brand，
-  改用重写的 layout() 把内容区从 y=125 上移到自己算出的 y=96，头部更紧凑、列表能多
-  显示一行；版本号仍保留在底部「关于」区块。
-- 「在线 / 房间」不再画在头部，改为移到每台中继服务器右侧，与「延迟」并列成三列：
-  上排列名（在线 / 房间 / 延迟）、下排数值（如 0 / 0 / 38ms），列内右对齐，因此各行
-  数值天然成一竖排。列宽固定（36 / 36 / 56，间距 6，右边距 20）；未选中的服务器显示
-  "--"（只有选中服务器连着中继、也只有它会被查询）。
-- 去掉选中服务器前面的 "*" 标记：选中状态只由服务器名的高亮色表示；切换/删除失败的
-  提示改用 ServerRow::setNote()，临时占用下排数值区，约 2 秒后自动消失。
-- 游戏房间行：人数 N/M 移到与游戏名同一行（右对齐），玩家名单那一行不再为人数让位，
-  可以用满整行宽度，长名单铺到人数下方后仍按原逻辑在行内滚动。
-- 打开/返回卡顿（「点开插件后返回要过一会才弹出特斯拉菜单」）：
-  * 首帧之前不再碰 SD 卡：日志改成内存缓冲（g_logBuf），fsdevMountSdmc / mkdir /
-    日志截断 / 堆余量探针 / socket 探针全部挪到 monitor worker 线程启动时执行
-    （MonitorOpenLog）；initServices 只剩语言检测、ldn:u 服务与 bsd socket 初始化
-    （bsd 必须留在帧缓冲之前，否则 tmem 堆上 0x559）。
-  * monitor worker 优先级由 0x2C 降到 0x3B（低于 libtesla 的 UI 线程）：订阅下载 /
-    查询再重也抢不过界面绘制。
-  * onHide 调用 MonitorSetPaused(true)，curl 通过 CURLOPT_XFERINFOFUNCTION 回调立刻
-    以 CURLE_ABORTED_BY_CALLBACK 中止进行中的订阅下载，并跳过后续订阅拉取；onShow 恢复。
-
+- 标题下方那一行彻底清空：MonitorFrame 不再调用 libtesla 的 OverlayFrame::draw()
+  （它会固定画一行副标题 + 英文 Back/OK），整帧自己画；并在 draw() 最后把标题
+  下方 56~94 这条区域刷成底色，任何来源的杂字都不会留在「联机插件」下面。
+  内容区同时从 y=125 上移到 y=96，列表能多显示一行。
+- 顺带修掉那行乱码的真正来源：LdnMitmVersion::raw 只有 32 字节，而 sysmodule 的
+  GetVersion 用 std::strcpy 拷贝 GITDESCVER；无 tag 的浅克隆/CI 里 git describe
+  会退回 40 位 SHA（还可能 -dirty），strcpy 直接写穿 SF 输出结构，客户端读到的
+  就是命令缓冲里的残留字节。现在三层都做了边界：Makefile 把 TARGET_VERSION 截到
+  31 字符，sysmodule 改用 snprintf(sizeof(raw))，两个客户端 ldnMitmGetVersion
+  改成定长 memcpy + 手动补 NUL（不再依赖服务端结尾 0）。
+- 服务器行三列的数值与列名同字号（15px）并在各自列内水平居中；列名与数值共用
+  同一列中心，所以上下天然对齐成一竖排。
+- 在线 / 房间 / 延迟不再需要"先选中"：后台线程在两次刷新之间的空闲时间里按轮转
+  顺序逐台探测（monitor.cpp 新增 RefreshOneServerStat / MonitorListServerStats）：
+  延迟用 TCP connect 到 host:port 的往返耗时，在线/房间用只有 serverInfo 的轻量
+  GraphQL，不支持就退回 /info；结果按 relay.cfg 顺序缓存在 g_stats 里（20 秒内算
+  新鲜，选中最久没测的那台）。界面每 500ms 取一次表刷到行上，没测到的仍显示 "--"。
+  选中服务器的在线/房间优先用监视器快照、延迟优先用 sysmodule 实测值。
+- 返回特斯拉菜单不再等查询跑完（"正在查询房间期间按返回特别慢"）：
+  * 所有阻塞点都可中止：HttpExchange 的收包循环改成 15ms 短轮询 + 每轮查中止标志
+    （原来 recv 会卡满 6 秒超时）；DnsQueryServer 改成 10ms 分片等待；UdpRoomScan
+    每轮循环检查；curl 用 CURLOPT_XFERINFOFUNCTION 立刻返回 ABORTED_BY_CALLBACK。
+  * onHide → MonitorSetPaused(true) 立即中止；被中止的刷新不写快照（日志记
+    refresh-discard aborted），不会把"查询失败 e=6"显示到界面。
+  * 首帧前不碰 SD：日志进内存缓冲，fsdevMountSdmc / mkdir / 日志截断 / 堆探针 /
+    socket 探针全部挪到 worker 线程启动时（MonitorOpenLog）。
+  * worker 优先级 0x2C → 0x3B（低于 libtesla 的 UI 线程）；选中服务器的周期刷新
+    由 1s 放宽到 3s，给逐台探测留出空闲时间，网络与 CPU 占用都更低。
+  * 新增 g_auxPhase：逐台探测期间一旦有新的刷新请求就立刻放弃本轮探测。
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
 index 3d7bc8b..b37dab7 100644
 --- a/.github/workflows/build.yml
@@ -325,11 +333,84 @@ index efcb5e7..cd62b35 100644
  #---------------------------------------------------------------------------------
  
  .PHONY: all clean PACK atmosphere-patch $(SUBFOLDERS)
+diff --git a/ldn_mitm/Makefile b/ldn_mitm/Makefile
+index f054842..0ff72f9 100644
+--- a/ldn_mitm/Makefile
++++ b/ldn_mitm/Makefile
+@@ -7,7 +7,9 @@ include $(dir $(abspath $(lastword $(MAKEFILE_LIST))))/../Atmosphere-libs/config
+ # version control constants
+ #---------------------------------------------------------------------------------
+ # Ignore submodules for -dirty: Atmosphere-libs carries the docs/ patch.
+-TARGET_VERSION := $(shell git describe --tags --always 2>/dev/null || echo unknown)$(shell git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)
++# 版本串最终会经 IPC 塞进 32 字节的 LdnMitmVersion::raw,这里先截到 31 字符:
++# 浅克隆/CI 里 git describe 会退回 40 位 SHA,加上 -dirty 必然溢出。
++TARGET_VERSION := $(shell (git describe --tags --always 2>/dev/null || echo unknown)$(git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty) | cut -c1-31)
+ 
+ #---------------------------------------------------------------------------------
+ # options for code generation
+diff --git a/ldn_mitm/source/ldnmitm_config.cpp b/ldn_mitm/source/ldnmitm_config.cpp
+index e6e501b..36665f2 100644
+--- a/ldn_mitm/source/ldnmitm_config.cpp
++++ b/ldn_mitm/source/ldnmitm_config.cpp
+@@ -1,3 +1,4 @@
++#include <cstdio>
+ #include <cstring>
+ #include "ldnmitm_config.hpp"
+ #include "relay_client.hpp"
+@@ -8,8 +9,13 @@ namespace ams::mitm::ldn {
+     std::atomic_bool LdnConfig::BroadcastRelay = true;
+ 
+     Result LdnConfig::GetVersion(sf::Out<LdnMitmVersion> version) {
+-        std::strcpy(version.GetPointer()->raw, GITDESCVER);
+-        
++        /* 必须截断:LdnMitmVersion::raw 只有 32 字节,而 GITDESCVER 来自
++         * `git describe --tags --always`——在没有 tag 的浅克隆/CI 里会是
++         * 40 位完整 SHA(还可能带 -dirty),strcpy 会直接写穿 SF 输出结构,
++         * 客户端读到的就是后面命令缓冲里的残留字节(界面标题下那行看不懂的
++         * 乱码就是这么来的)。 */
++        std::snprintf(version.GetPointer()->raw, sizeof(version.GetPointer()->raw),
++                      "%s", GITDESCVER);
+         R_SUCCEED();
+     }
+     Result LdnConfig::GetLogging(sf::Out<u32> enabled) {
+diff --git a/ldnmitm_config/source/ldn.c b/ldnmitm_config/source/ldn.c
+index d3a0597..000a660 100644
+--- a/ldnmitm_config/source/ldn.c
++++ b/ldnmitm_config/source/ldn.c
+@@ -34,10 +34,15 @@ Result ldnMitmSetEnabled(LdnMitmConfigService *s, u32 enabled) {
+ }
+ 
+ Result ldnMitmGetVersion(LdnMitmConfigService *s, char *version) {
+-    char version_s[32];
++    /* 以 0 填满:即使服务端漏了结尾 NUL,strnlen 也不会越界读。 */
++    char version_s[32] = {};
+     Result rc = serviceDispatchOut(&s->s, 65001, version_s);
+     if (R_SUCCEEDED(rc)) {
+-        strcpy(version, version_s);
++        size_t n = 0;
++        while (n < sizeof(version_s) && version_s[n] != 0)
++            n++;
++        memcpy(version, version_s, n);
++        version[n] = 0;
+     }
+     return rc;
+ }
 diff --git a/overlay/Makefile b/overlay/Makefile
-index da2bd21..788dac7 100644
+index da2bd21..476caa1 100644
 --- a/overlay/Makefile
 +++ b/overlay/Makefile
-@@ -48,7 +48,7 @@ TARGET		:=	$(notdir $(CURDIR))
+@@ -38,7 +38,9 @@ include $(DEVKITPRO)/libnx/switch_rules
+ #   NACP building is skipped as well.
+ #---------------------------------------------------------------------------------
+ # Ignore submodule state for the dirty flag (see ldn_mitm/Makefile).
+-TARGET_VERSION := $(shell git describe --tags --always 2>/dev/null || echo unknown)$(shell git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)
++# 版本串最终会经 IPC 塞进 32 字节的 LdnMitmVersion::raw,这里先截到 31 字符:
++# 浅克隆/CI 里 git describe 会退回 40 位 SHA,加上 -dirty 必然溢出。
++TARGET_VERSION := $(shell (git describe --tags --always 2>/dev/null || echo unknown)$(git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty) | cut -c1-31)
+ VERSION_DEFINES	:= -DGITDESCVER="\"${TARGET_VERSION}\""
+ 
+ APP_TITLE	:=	ldn_mitm
+@@ -48,7 +50,7 @@ TARGET		:=	$(notdir $(CURDIR))
  BUILD		:=	build
  SOURCES		:=	source
  DATA		:=	data
@@ -338,7 +419,7 @@ index da2bd21..788dac7 100644
  
  NO_ICON		:=  1
  
-@@ -57,7 +57,8 @@ NO_ICON		:=  1
+@@ -57,7 +59,8 @@ NO_ICON		:=  1
  #---------------------------------------------------------------------------------
  ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
  
@@ -348,7 +429,7 @@ index da2bd21..788dac7 100644
  			$(ARCH) $(DEFINES) $(VERSION_DEFINES)
  
  CFLAGS	+=	$(INCLUDE) -D__SWITCH__
-@@ -65,9 +66,9 @@ CFLAGS	+=	$(INCLUDE) -D__SWITCH__
+@@ -65,9 +68,9 @@ CFLAGS	+=	$(INCLUDE) -D__SWITCH__
  CXXFLAGS	:= $(CFLAGS) -fno-exceptions -std=c++20
  
  ASFLAGS	:=	-g $(ARCH)
@@ -360,8 +441,30 @@ index da2bd21..788dac7 100644
  
  #---------------------------------------------------------------------------------
  # list of directories containing libraries, this must be the top level containing
+diff --git a/overlay/source/ldn.c b/overlay/source/ldn.c
+index 5838ff6..7c810be 100644
+--- a/overlay/source/ldn.c
++++ b/overlay/source/ldn.c
+@@ -133,10 +133,15 @@ Result ldnMitmGetBuiltinRelayServerInfo(LdnMitmConfigService *s, u32 index, LdnR
+ }
+ 
+ Result ldnMitmGetVersion(LdnMitmConfigService *s, char *version) {
+-    char version_s[32];
++    /* 以 0 填满:即使服务端漏了结尾 NUL,strnlen 也不会越界读。 */
++    char version_s[32] = {};
+     Result rc = serviceDispatchOut(&s->s, 65001, version_s);
+     if (R_SUCCEEDED(rc)) {
+-        strcpy(version, version_s);
++        size_t n = 0;
++        while (n < sizeof(version_s) && version_s[n] != 0)
++            n++;
++        memcpy(version, version_s, n);
++        version[n] = 0;
+     }
+     return rc;
+ }
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..b202ee3 100644
+index 8e07c19..1bc82ad 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,8 @@
@@ -373,7 +476,7 @@ index 8e07c19..b202ee3 100644
  #include <vector>
  
  enum class State {
-@@ -14,17 +16,31 @@ LdnMitmConfigService g_ldnConfig;
+@@ -14,17 +16,25 @@ LdnMitmConfigService g_ldnConfig;
  State g_state;
  char g_version[32];
  
@@ -391,29 +494,24 @@ index 8e07c19..b202ee3 100644
 -   rather than as a function-local static so createUI() can invalidate it:
 -   rebuilt rows start with a bare "*", and a stale cache made update() skip
 -   painting them entirely. */
-+/* 服务器行右侧三列「在线 / 房间 / 延迟」当前画出的数值缓存。放在文件作用域
-+   而不用函数内 static,是为了让 createUI() 能在列表重建后把缓存作废:
-+   重建出来的行是 "-- / -- / --",缓存不失效会让 update() 直接跳过绘制。 */
- u32 g_shown_latency = 0xFFFFFFFFu;
-+s32 g_shown_online = -2;      /* -2 = 尚未画过 */
-+s32 g_shown_rooms = -2;
-+
-+/* 列表重建/切换服务器后把三列缓存一次性作废,让 update() 立刻重画。 */
-+static void invalidateServerStats() {
-+    g_shown_latency = 0xFFFFFFFFu;
-+    g_shown_online = -2;
-+    g_shown_rooms = -2;
-+}
-+
+-u32 g_shown_latency = 0xFFFFFFFFu;
 +/* 在线/房间周期刷新计时(与延迟 ping 的 1s 节奏对齐);0 = 尚未起表。 */
 +static u64 g_lastPollNs = 0;
++
++/* 服务器行三列数值的界面刷新计时(后台探测是另一条线,这里只管取值上屏)。 */
++static u64 g_lastStatsNs = 0;
++
++/* 列表重建/切换服务器后:让下一帧立刻重刷三列与延迟。 */
++static void invalidateServerStats() {
++    g_lastStatsNs = 0;
++}
 +
 +/* overlay 是否可见(onShow/onHide 维护);隐藏时不发周期刷新,不扰网。 */
 +static bool g_visible = false;
  
  /* Traditional / Simplified Chinese switch. The overlay used to hardcode
     Simplified strings, which left Traditional Chinese consoles with the
-@@ -34,6 +50,451 @@ static bool g_isTraditional = false;
+@@ -34,6 +44,479 @@ static bool g_isTraditional = false;
  
  #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
  
@@ -706,6 +804,7 @@ index 8e07c19..b202ee3 100644
 +        m_noteFrames = text && text[0] ? 120 : 0;   /* 约 2 秒后自动消失 */
 +    }
 +    void clearNote() { m_note[0] = 0; }
++    bool hasNote() const { return m_note[0] != 0; }
 +    bool selected() const { return m_selected; }
 +    void setClickListener(std::function<void()> fn) { m_click = std::move(fn); }
 +    void setDeleteListener(std::function<void()> fn) { m_delete = std::move(fn); }
@@ -719,14 +818,14 @@ index 8e07c19..b202ee3 100644
 +        renderer->drawRect(this->getX(), this->getY(), this->getWidth(), 1,
 +                           R::a(tsl::style::color::ColorFrame));
 +
-+        /* 三列的右边界(从右往左):延迟 | 房间 | 在线 */
-+        const s32 latRight = this->getX() + this->getWidth() - kRightMargin;
-+        const s32 roomRight = latRight - kLatencyCol - kColGap;
-+        const s32 onlRight = roomRight - kRoomCol - kColGap;
++        /* 三列:标签与数值同一字号、各自在列内水平居中 */
++        constexpr float kStatFont = 15;
++        const s32 latCx = this->getX() + this->getWidth() - kRightMargin - kLatencyCol / 2;
++        const s32 roomCx = latCx - kLatencyCol / 2 - kColGap - kRoomCol / 2;
++        const s32 onlCx = roomCx - kRoomCol / 2 - kColGap - kOnlineCol / 2;
 +
-+        /* 服务器名/地址:默认完整显示;只有会伸进右侧统计列区域时才截到该
-+         * 边界加省略号,没超过就一个字符都不截。 */
-+        s32 avail = (onlRight - kOnlineCol) - (this->getX() + 20) - 10;
++        /* 服务器名/地址:默认完整显示;只有会伸进右侧统计列时才截断加省略号。 */
++        s32 avail = (onlCx - kOnlineCol / 2) - (this->getX() + 20) - 10;
 +        if (avail < 60)
 +            avail = 60;     /* 窄屏兜底,别把名字挤成空串 */
 +        auto fit = [&](const char *s, float fs) -> std::string {
@@ -746,34 +845,34 @@ index 8e07c19..b202ee3 100644
 +                             this->getY() + 58, 16,
 +                             R::a(tsl::style::color::ColorDescription));
 +
-+        /* 上排:列名(在线 / 房间 / 延迟);下排:对应数值 */
-+        auto rightDraw = [&](const char *text, float fs, s32 rightX, s32 y,
-+                             tsl::Color color) {
-+            auto [w, h] = renderer->drawString(text, false, 0, 0, fs,
++        auto centerDraw = [&](const char *text, s32 cx, s32 y, tsl::Color color) {
++            auto [w, h] = renderer->drawString(text, false, 0, 0, kStatFont,
 +                                               R::a(tsl::style::color::ColorTransparent));
-+            renderer->drawString(text, false, rightX - (s32)w, y, fs, R::a(color));
++            renderer->drawString(text, false, cx - (s32)w / 2, y, kStatFont,
++                                 R::a(color));
 +        };
-+        rightDraw(T("在线", "線上"), 15, onlRight, this->getY() + 30,
-+                  tsl::style::color::ColorDescription);
-+        rightDraw(T("房间", "房間"), 15, roomRight, this->getY() + 30,
-+                  tsl::style::color::ColorDescription);
-+        rightDraw(T("延迟", "延遲"), 15, latRight, this->getY() + 30,
-+                  tsl::style::color::ColorDescription);
++        /* 上排:列名;下排:数值(同字号、同行内居中排列) */
++        centerDraw(T("在线", "線上"), onlCx, this->getY() + 30,
++                   tsl::style::color::ColorDescription);
++        centerDraw(T("房间", "房間"), roomCx, this->getY() + 30,
++                   tsl::style::color::ColorDescription);
++        centerDraw(T("延迟", "延遲"), latCx, this->getY() + 30,
++                   tsl::style::color::ColorDescription);
 +
 +        if (m_note[0]) {
-+            rightDraw(m_note, 16, latRight, this->getY() + 58,
-+                      tsl::style::color::ColorDescription);
++            centerDraw(m_note, latCx, this->getY() + 58,
++                       tsl::style::color::ColorDescription);
 +            if (m_noteFrames > 0 && --m_noteFrames == 0)
 +                m_note[0] = 0;
 +            return;
 +        }
-+        rightDraw(m_online, 20, onlRight, this->getY() + 56,
-+                  tsl::style::color::ColorText);
-+        rightDraw(m_rooms, 20, roomRight, this->getY() + 56,
-+                  tsl::style::color::ColorText);
-+        rightDraw(m_latency, 20, latRight, this->getY() + 56,
-+                  m_latencyKnown ? tsl::style::color::ColorHighlight
-+                                 : tsl::style::color::ColorDescription);
++        centerDraw(m_online, onlCx, this->getY() + 58,
++                   tsl::style::color::ColorText);
++        centerDraw(m_rooms, roomCx, this->getY() + 58,
++                   tsl::style::color::ColorText);
++        centerDraw(m_latency, latCx, this->getY() + 58,
++                   m_latencyKnown ? tsl::style::color::ColorHighlight
++                                  : tsl::style::color::ColorDescription);
 +    }
 +
 +    virtual tsl::elm::Element *requestFocus(tsl::elm::Element *oldFocus,
@@ -825,31 +924,58 @@ index 8e07c19..b202ee3 100644
 +    std::function<void()> m_delete;
 +};
 +
-+/* 帧:标题下面不再有副标题(原「阿东版 · 版本号」整行区域已删除),
-+   在线/房间也没了头部常驻统计 —— 它们移到每台服务器行右侧,与延迟
-+   三列并排竖排显示。头部因此变矮,列表整体上移,能多显示一行内容。 */
++/* 帧:整帧自己画,不调用 libtesla 的 OverlayFrame::draw()。
++ *
++ * 原因:OverlayFrame::draw() 会在标题下面固定画一行副标题(以及英文的
++ * Back/OK 提示)。那份副标题的字符串是别人给的,一旦是空的/没初始化的/
++ * 被字体映射过的内容,就会出现「联机插件」下面多出一行看不懂的字(现场
++ * 看到的是 R R键 那种)。这里直接把整帧渲染接管过来:只画标题、底部分隔线、
++ * 本地化的按键提示和内容区,标题下面 54~92 这段再显式清一次底 ——
++ * 保证那一行区域永远是空的。 */
 +class MonitorFrame : public tsl::elm::OverlayFrame {
 +public:
-+    /* 标题基线 50、字号 30;内容从 96 开始(原 OverlayFrame 固定 125)。 */
++    /* 内容区从 96 开始(原 OverlayFrame 固定 125,其中 70 附近是副标题行) */
 +    static constexpr u16 kContentY = 96;
++    static constexpr u16 kTitleBaseline = 50;
++    static constexpr float kTitleFont = 30;
 +
 +    explicit MonitorFrame(const std::string &title)
 +        : tsl::elm::OverlayFrame(title, std::string()) {}
 +
 +    virtual void draw(tsl::gfx::Renderer *renderer) override {
++        using R = tsl::gfx::Renderer;
 +        { static bool once = false; if (!once) { once = true; MonitorLog("first-frame"); } }
-+        tsl::elm::OverlayFrame::draw(renderer);
 +
-+        /* OverlayFrame 的底部提示固定为英文;覆盖后按系统语言重绘。 */
++        renderer->fillScreen(R::a(tsl::style::color::ColorFrameBackground));
++        renderer->drawRect(tsl::cfg::FramebufferWidth - 1, 0, 1,
++                           tsl::cfg::FramebufferHeight, R::a(0xF222));
++
++        /* 标题 */
++        renderer->drawString(this->m_title.c_str(), false, 20, kTitleBaseline,
++                             kTitleFont, R::a(tsl::style::color::ColorText));
++
++        /* 底部分隔线 + 本地化按键提示(盖掉 libtesla 的英文 Back/OK) */
++        renderer->drawRect(15, tsl::cfg::FramebufferHeight - 73,
++                           tsl::cfg::FramebufferWidth - 30, 1,
++                           R::a(tsl::style::color::ColorText));
 +        renderer->drawRect(20, 670, 400, 45,
-+                           tsl::gfx::Renderer::a(tsl::style::color::ColorFrameBackground));
++                           R::a(tsl::style::color::ColorFrameBackground));
 +        renderer->drawString(T("\uE0E1  返回     \uE0E0  确定",
 +                               "\uE0E1  返回     \uE0E0  確定"),
 +                             false, 30, 693, 23,
-+                             tsl::gfx::Renderer::a(tsl::style::color::ColorText));
++                             R::a(tsl::style::color::ColorText));
++
++        if (this->m_contentElement != nullptr)
++            this->m_contentElement->frame(renderer);
++
++        /* 最后再把"标题下面那一行"整条刷成底色:任何来源的文字(副标题、
++           上一帧残留、列表过界)都不会留在标题下方。 */
++        renderer->drawRect(0, kTitleBaseline + 6, tsl::cfg::FramebufferWidth,
++                           kContentY - kTitleBaseline - 8,
++                           R::a(tsl::style::color::ColorFrameBackground));
 +    }
 +
-+    /* 内容区上移:不带副标题时不必再为那一行留白。 */
++    /* 内容区上移:标题下面那一行不再留给副标题。 */
 +    virtual void layout(u16 parentX, u16 parentY, u16 parentWidth,
 +                        u16 parentHeight) override {
 +        this->setBoundaries(parentX, parentY, parentWidth, parentHeight);
@@ -865,7 +991,7 @@ index 8e07c19..b202ee3 100644
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -66,8 +527,51 @@ static void detectLanguage()
+@@ -66,8 +549,109 @@ static void detectLanguage()
      char code[9] = {};
      memcpy(code, &langCode, 8);
      g_isTraditional = (strncmp(code, "zh-Hant", 7) == 0);
@@ -915,10 +1041,68 @@ index 8e07c19..b202ee3 100644
 +        }
 +    }
 +    g_list->invalidate();
++}
++
++/* 把每台服务器自己的在线/房间/延迟刷到列表行上。
++ *
++ * 以前只有选中的那一行有数值(因为只有它连着中继);现在后台线程会轮转
++ * 探测每台服务器(MonitorListServerStats),没测过的先显示 "--",测到之后
++ * 自动出现数字 —— 不需要先选中它。
++ *
++ * static 缓冲:MonitorServerStat × 32 ≈ 3.7KB,不放栈上(见 draw 注释)。 */
++static void refreshServerRowStats(const MonitorSnapshot &snap)
++{
++    static MonitorServerStat stats[MONITOR_MAX_SERVERS];
++
++    u32 n = MonitorListServerStats(stats, MONITOR_MAX_SERVERS);
++
++    char onlineBuf[16], roomsBuf[16], latBuf[16];
++    for (size_t k = 0; k < g_serverRows.size(); k++) {
++        ServerRow *row = g_serverRows[k];
++        if (k >= n) {
++            row->setStats(nullptr, nullptr, nullptr);
++            continue;
++        }
++        const MonitorServerStat &st = stats[k];
++
++        /* 在线:选中的服务器优先用监视器快照(刚查过),否则用后台探测值 */
++        s32 online = st.online;
++        s32 rooms = st.rooms;
++        if (row->selected()) {
++            if (snap.online >= 0)
++                online = snap.online;
++            if (snap.roomCount >= 0)
++                rooms = snap.roomCount;
++        }
++        if (online >= 0)
++            snprintf(onlineBuf, sizeof(onlineBuf), "%d", (int)online);
++        else
++            snprintf(onlineBuf, sizeof(onlineBuf), "--");
++        if (rooms >= 0)
++            snprintf(roomsBuf, sizeof(roomsBuf), "%d", (int)rooms);
++        else
++            snprintf(roomsBuf, sizeof(roomsBuf), "--");
++
++        /* 延迟:选中的服务器用 sysmodule 实测的 relay 延迟(比 TCP 连接耗时
++           更贴近真实联机),拿不到再退回后台探测值 */
++        s32 lat = st.latencyMs;
++        if (row->selected()) {
++            u32 ms = 0;
++            if (R_SUCCEEDED(ldnMitmGetRelayLatency(&g_ldnConfig, &ms)) && ms > 0)
++                lat = (s32)ms;
++        }
++        if (lat > 0)
++            snprintf(latBuf, sizeof(latBuf), lat > 999 ? ">999ms" : "%dms", (int)lat);
++        else
++            snprintf(latBuf, sizeof(latBuf), "--");
++
++        if (!row->hasNote())
++            row->setStats(onlineBuf, roomsBuf, latBuf);
++    }
  }
  
  class MainGui : public tsl::Gui {
-@@ -75,199 +579,482 @@ public:
+@@ -75,199 +659,448 @@ public:
      MainGui() { }
  
      virtual tsl::elm::Element* createUI() override {
@@ -1062,54 +1246,30 @@ index 8e07c19..b202ee3 100644
 +            rebuildRoomSection(snap);
 +        }
 +
-+        // 在线/房间周期刷新:与延迟 ping(sysmodule 每 1s 发一次)同节奏。
-+        // 仅可见时刷新;MonitorRequestPoll 不动目标、不重拉订阅,查询由
-+        // 后台线程合并执行,不会堆积。
++        // 选中服务器的在线/房间周期刷新(3 秒一次)。间隔不能太短:工作线程
++        // 只有在两轮刷新之间有空闲时才会去探测其它服务器(见 monitor.cpp
++        // RefreshOneServerStat),1 秒一轮会把空闲时间全占掉,别的行就永远
++        // 显示 "--"。
 +        if (g_visible && g_state == State::Loaded) {
 +            u64 nowNs = armTicksToNs(armGetSystemTick());
 +            if (g_lastPollNs == 0)
 +                g_lastPollNs = nowNs;
-+            if (nowNs - g_lastPollNs >= 1000000000ull) {
++            if (nowNs - g_lastPollNs >= 3000000000ull) {
 +                g_lastPollNs = nowNs;
 +                MonitorRequestPoll();
++            }
++        }
++        // 服务器行右侧三列「在线 / 房间 / 延迟」:每一行都显示。
++        // 后台线程每空闲一次就探测一台(MonitorListServerStats),没测过的
++        // 先显示 "--";这里每 500ms 取一次表刷到行上,不用先选中服务器。
++        if (g_visible && g_state == State::Loaded && !g_serverRows.empty()) {
++            u64 nowNs = armTicksToNs(armGetSystemTick());
++            if (g_lastStatsNs == 0 || nowNs - g_lastStatsNs >= 500000000ull) {
++                g_lastStatsNs = nowNs;
++                refreshServerRowStats(snap);
              }
 +        }
-+        // 服务器行右侧三列「在线 / 房间 / 延迟」:只有当前选中的服务器
-+        // 真正连着中继、也只有它会发起查询,所以只有那一行显示真实数值,
-+        // 其余行显示 "--"。数值没变就不重绘(缓存见 g_shown_*)。
-+        if (g_state != State::Loaded || g_serverRows.empty()) {
-+            return;
-+        }
-+        u32 ms = 0;
-+        const bool latencyOk = R_SUCCEEDED(ldnMitmGetRelayLatency(&g_ldnConfig, &ms));
-+        if (!latencyOk) {
-+            ms = 0;
-+        }
-+        if (ms == g_shown_latency && snap.online == g_shown_online &&
-+            snap.roomCount == g_shown_rooms) {
-+            return;
-+        }
-+        g_shown_latency = ms;
-+        g_shown_online = snap.online;
-+        g_shown_rooms = snap.roomCount;
-+
-+        char onlineBuf[16];
-+        char roomsBuf[16];
-+        char latBuf[16];
-+        if (snap.online >= 0)
-+            snprintf(onlineBuf, sizeof(onlineBuf), "%d", snap.online);
-+        else
-+            snprintf(onlineBuf, sizeof(onlineBuf), "--");
-+        if (snap.roomCount >= 0)
-+            snprintf(roomsBuf, sizeof(roomsBuf), "%d", snap.roomCount);
-+        else
-+            snprintf(roomsBuf, sizeof(roomsBuf), "--");
-+        if (ms == 0)
-+            snprintf(latBuf, sizeof(latBuf), "%s", "--");
-+        else if (ms > 999)
-+            snprintf(latBuf, sizeof(latBuf), ">999ms");
-+        else
-+            snprintf(latBuf, sizeof(latBuf), "%ums", ms);
++    }
  
 -            u32 vaddr = 0;
 -            const bool addr_ok = R_SUCCEEDED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr));
@@ -1117,21 +1277,12 @@ index 8e07c19..b202ee3 100644
 -                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), T("读取失败", "讀取失敗")));
 -            } else if (vaddr == 0) {
 -                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), T("建立房间后分配", "建立房間後分配")));
-+        for (size_t k = 0; k < g_serverRows.size(); k++) {
-+            ServerRow *row = g_serverRows[k];
-+            if (row->selected()) {
-+                row->setStats(onlineBuf, roomsBuf, latBuf);
-             } else {
+-            } else {
 -                char buf[48];
 -                snprintf(buf, sizeof(buf), "%u.%u.%u.%u  (id=%u)",
 -                         (vaddr >> 24) & 0xff, (vaddr >> 16) & 0xff,
 -                         (vaddr >> 8) & 0xff, vaddr & 0xff, vaddr & 0xffff);
 -                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), buf));
-+                row->setStats(nullptr, nullptr, nullptr);
-+            }
-+        }
-+    }
-+
 +    // Called once every frame to handle inputs not handled by other UI elements
 +    virtual bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos, HidAnalogStickState joyStickPosLeft, HidAnalogStickState joyStickPosRight) {
 +        return false;
@@ -1173,7 +1324,7 @@ index 8e07c19..b202ee3 100644
 +            LdnRelayServerInfo info = {};
 +            if (R_FAILED(ldnMitmGetBuiltinRelayServerInfo(&g_ldnConfig, i, &info))) {
 +                continue;
-+            }
+             }
 +            bool present = false;
 +            for (u32 k = 0; k < current; k++) {
 +                LdnRelayServerInfo cur = {};
@@ -1182,7 +1333,15 @@ index 8e07c19..b202ee3 100644
 +                    present = true;
 +                    break;
 +                }
-             }
++            }
++
++            /* Do not paint host:port here. libtesla's ListItem does not
++               truncate the value, and a long address (e.g.
++               muitxobem-lanplay.ddns.net:11451) is wider than the row, so it
++               was drawn on top of the left-hand name. A short status word
++               keeps the name readable; the addresses live in the README. */
++            auto *item = new tsl::elm::ListItem(info.name);
++            item->setValue(present ? T("已添加", "已新增") : T("可添加", "可新增"), present);
  
 -            // Tell the user whether the address is stable. T("硬件派生", "硬體衍生") is
 -            // derived from this console's LAN address, so it is the same on
@@ -1193,19 +1352,14 @@ index 8e07c19..b202ee3 100644
 -                u32 src = 0;
 -                if (R_FAILED(ldnMitmGetRelayIdSource(&g_ldnConfig, &src))) {
 -                    src = 0;
-+            /* Do not paint host:port here. libtesla's ListItem does not
-+               truncate the value, and a long address (e.g.
-+               muitxobem-lanplay.ddns.net:11451) is wider than the row, so it
-+               was drawn on top of the left-hand name. A short status word
-+               keeps the name readable; the addresses live in the README. */
-+            auto *item = new tsl::elm::ListItem(info.name);
-+            item->setValue(present ? T("已添加", "已新增") : T("可添加", "可新增"), present);
-+
 +            auto added = std::make_shared<bool>(present);
 +            auto count = std::make_shared<u32>(current);
 +            item->setClickListener([item, info, added, count](u64 keys) {
 +                if (!(keys & HidNpadButton_A)) {
 +                    return false;
++                }
++                if (*added) {
++                    return true;
                  }
 -                if (src == 1) {
 -                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("硬件派生", "硬體衍生")));
@@ -1213,9 +1367,6 @@ index 8e07c19..b202ee3 100644
 -                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("启动随机", "啟動隨機")));
 -                } else if (src == 3) {
 -                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("已自动更换", "已自動更換")));
-+                if (*added) {
-+                    return true;
-+                }
 +                if (*count >= LDN_MAX_SERVERS) {
 +                    item->setValue(T("先删一台", "先刪一台"), true);
 +                    return true;
@@ -1448,7 +1599,7 @@ index 8e07c19..b202ee3 100644
 +            list->addItem(new tsl::elm::ListItem(T("本机 IP", "本機 IP"), T("建立房间后显示", "建立房間後顯示")));
          }
 -        g_shown_latency = ms;
- 
+-
 -        // ListItem::setValue(value, faint): faint=false renders in the
 -        // highlight colour, faint=true in the dim description colour. That
 -        // gives a green / grey traffic light without a custom element.
@@ -1460,6 +1611,7 @@ index 8e07c19..b202ee3 100644
 -        } else if (ms > 999) {
 -            snprintf(buf, sizeof(buf), T("* 延迟 >999ms", "* 延遲 >999ms"));
 -            faint = true;
++
 +        u32 vaddr = 0;
 +        const bool addr_ok = R_SUCCEEDED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr));
 +        if (!addr_ok) {
@@ -1553,7 +1705,7 @@ index 8e07c19..b202ee3 100644
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,14 +1075,34 @@ public:
+@@ -288,14 +1121,34 @@ public:
              g_state = State::Loaded;
          });
  
@@ -1592,10 +1744,10 @@ index 8e07c19..b202ee3 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..6e12350
+index 0000000..7b1bb42
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2493 @@
+@@ -0,0 +1,2826 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -1621,6 +1773,7 @@ index 0000000..6e12350
 +#include <fcntl.h>
 +#include <unistd.h>
 +#include <ctype.h>
++#include <errno.h>
 +#include <strings.h>
 +
 +#include <atomic>
@@ -1854,14 +2007,28 @@ index 0000000..6e12350
 +static MonitorTargetGeneration::Gate g_targetGen;
 +static std::atomic<bool> g_exit{false};
 +static std::atomic<bool> g_traditional{false};
-+/* 插件隐藏(=用户按了返回)时置位:后台的订阅下载立刻放弃,worker 回去
-+ * 睡觉,好让特斯拉菜单马上画出来。 */
++/* 插件隐藏(=用户按了返回)/退出时置位:在跑的订阅下载、HTTP 查询、DNS、
++ * UDP 扫描立刻放弃,worker 回去睡觉 —— 返回特斯拉菜单不再等查询跑完。 */
 +static std::atomic<bool> g_paused{false};
-+static u32   g_doneGen = 0;
++/* 辅助阶段(逐台刷新其它服务器的统计)标志:此阶段遇到新的刷新请求就放弃,
++ * 不去拖慢选中服务器的查询。 */
++static std::atomic<bool> g_auxPhase{false};
++
++/* 统一的中止判据:暂停/退出 → 立刻放弃;辅助阶段遇到新请求 → 也放弃。 */
++static bool IoAbort();
++static std::atomic<u32> g_doneGen{0};
 +static Thread g_thread;
 +static bool  g_inited = false;
 +static char  g_pendingName[48];      /* 切换服务器时指定;空 = 读 relay.cfg */
 +static bool  g_pendingSubs = false;  /* 下一次刷新是否重新拉订阅缓存 */
++
++static bool IoAbort() {
++    if (g_paused.load() || g_exit.load())
++        return true;
++    if (g_auxPhase.load() && g_reqGen.load() != g_doneGen.load())
++        return true;
++    return false;
++}
 +
 +#define T_STR(hans, hant) (g_traditional.load() ? (hant) : (hans))
 +
@@ -2253,7 +2420,16 @@ index 0000000..6e12350
 +    u32 ip = 0;
 +    if (sendto(fd, q, (int)qlen, 0, (struct sockaddr *)&sa, sizeof(sa)) >= 0) {
 +        u8 r[512];
-+        ssize_t n = recvfrom(fd, r, sizeof(r), 0, nullptr, nullptr);
++        /* 分片等待:一旦用户返回/退出就立刻跳出,不等满 2 秒超时 */
++        ssize_t n = -1;
++        for (int wait = 0; wait < 20 * 100; wait++) {
++            if (IoAbort())
++                break;
++            n = recvfrom(fd, r, sizeof(r), MSG_DONTWAIT, nullptr, nullptr);
++            if (n > 0)
++                break;
++            svcSleepThread(10'000'000);          /* 10ms */
++        }
 +        if (n > 0) {
 +            u32 net = 0;
 +            if (DnsParseA(r, n, txid0, txid1, &net))
@@ -2304,7 +2480,7 @@ index 0000000..6e12350
 +    char host[48];
 +    u32 ip;                                   /* 主机字序 */
 +};
-+static DnsEnt g_dnsCache[8];
++static DnsEnt g_dnsCache[16];   /* 逐台探测多台服务器时缓存别太小 */
 +static int g_dnsCacheN = 0;
 +
 +static bool DnsResolve(const char *host, u32 *ipNet) {
@@ -2316,6 +2492,8 @@ index 0000000..6e12350
 +        }
 +    }
 +    for (int s = 0; s < g_dnsSrvN; s++) {
++        if (IoAbort())
++            return false;
 +        u32 ip = DnsQueryServer(g_dnsSrv[s], host, 0x13, 0x37);
 +        if (ip != 0) {
 +            if (g_dnsCacheN < (int)(sizeof(g_dnsCache) / sizeof(g_dnsCache[0]))) {
@@ -2374,7 +2552,7 @@ index 0000000..6e12350
 +static bool HttpSendAll(int fd, const char *buf, size_t len, const Deadline &deadline) {
 +    size_t off = 0;
 +    while (off < len) {
-+        if (std::chrono::steady_clock::now() >= deadline)
++        if (std::chrono::steady_clock::now() >= deadline || IoAbort())
 +            return false;
 +        ssize_t n = send(fd, buf + off, len - off, 0);
 +        if (n < 0)
@@ -2395,7 +2573,7 @@ index 0000000..6e12350
 +
 +/* 发起请求,响应(头+体)收进 raw。 */
 +/* HTTP 传输错误码(诊断用):0=ok 1=resolve 2=socket 3=connect 4=timeout
-+ * 5=io;≥100 表示 HTTP 状态码(如 131=301 跳转)。 */
++ * 5=io 6=aborted(返回/退出时主动中止);≥100 表示 HTTP 状态码。 */
 +static int g_httpErr = 0;
 +
 +static bool HttpExchange(const char *host, u16 port, const char *req, size_t reqLen,
@@ -2444,7 +2622,6 @@ index 0000000..6e12350
 +    struct timeval rtv;
 +    rtv.tv_sec = timeoutMs / 1000;
 +    rtv.tv_usec = (timeoutMs % 1000) * 1000;
-+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
 +    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &rtv, sizeof(rtv));
 +
 +    if (!HttpSendAll(fd, req, reqLen, deadline)) {
@@ -2460,23 +2637,40 @@ index 0000000..6e12350
 +    long contentLength = -1;
 +    size_t headerEnd = 0;
 +
++    /* 收包循环改成短超时轮询 + 每轮检查中止标志:
++     * 以前 recv 会一口气卡到超时(最长 6 秒),用户按返回时特斯拉菜单就要等
++     * 这一整轮查询跑完才出来 —— 这就是"返回还是要过一会"的主因之一。 */
 +    for (;;) {
 +        if (std::chrono::steady_clock::now() >= deadline) {
 +            /* 超时:已有完整响应体则接受,否则失败 */
 +            if (haveHeaders)
 +                break;
++            g_httpErr = 4;
 +            close(fd);
 +            return false;
 +        }
++        if (IoAbort()) {
++            g_httpErr = 6;
++            close(fd);
++            return false;
++        }
++        HttpSetNonBlock(fd, true);
 +        ssize_t n = recv(fd, buf, sizeof(buf), 0);
++        HttpSetNonBlock(fd, false);
++        if (n < 0) {
++            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
++                if (haveHeaders)
++                    break;
++                g_httpErr = 5;
++                close(fd);
++                return false;
++            }
++            /* 暂时没数据:睡 15ms 再看一眼中止标志 */
++            svcSleepThread(15'000'000);
++            continue;
++        }
 +        if (n == 0)
 +            break;                                   /* 对端关闭:EOF 定界 */
-+        if (n < 0) {
-+            if (haveHeaders)
-+                break;
-+            close(fd);
-+            return false;
-+        }
 +        if (raw.size() + (size_t)n > maxBody + 8192) {
 +            close(fd);
 +            return false;
@@ -2631,7 +2825,7 @@ index 0000000..6e12350
 +/* curl 进度回调:CURLE_ABORTED_BY_CALLBACK 让 perform 立刻返回,
 + * 3MB 订阅下载不会在用户关掉插件后继续霸占 CPU/网络。 */
 +static int CurlAbort(void *, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
-+    return g_paused.load() ? 1 : 0;
++    return IoAbort() ? 1 : 0;
 +}
 +
 +static bool HttpsGet(const char *url, std::string *outBody, int timeoutMs) {
@@ -3597,6 +3791,10 @@ index 0000000..6e12350
 +
 +    u8 frame[2048];
 +    while (std::chrono::steady_clock::now() < deadline && qr->roomN < MONITOR_MAX_ROOMS) {
++        if (IoAbort()) {
++            close(fd);
++            return;
++        }
 +        Deadline now = std::chrono::steady_clock::now();
 +        if (now >= nextSend) {
 +            send(fd, kScanFrame, sizeof(kScanFrame), 0);
@@ -3814,7 +4012,7 @@ index 0000000..6e12350
 +    /* 2. 订阅(chinese_db.json):开盖/手动刷新时拉取(周期轮询跳过),
 +     *    失败退回本地缓存;servers.json 已彻底移除,服务器列表只读 relay.cfg。
 +     *    下载走 HTTPS 加速镜像(https://v6.gh-proxy.org/),删了缓存也能重拉 */
-+    if (reloadSubs && !g_paused.load()) {
++    if (reloadSubs && !IoAbort()) {
 +        MonLog("subs-start");
 +        std::string chineseJson;
 +        bool gotChinese = DownloadSubscription(kSubChinesePath, &chineseJson);
@@ -3863,8 +4061,14 @@ index 0000000..6e12350
 +    /* 4. 查询:自动识别 —— graphql 优先(含房间),失败再 rest
 +     *    (servers.json 已移除,不再按 host:port 查类型表) */
 +    bool ok = QueryGraphql(host, port, &qr);
-+    if (!ok)
++    if (!ok && !IoAbort())
 +        ok = QueryRest(host, port, &qr);
++    /* 返回/退出时查询会被 HTTP 层中止:此时不要写任何快照,
++       免得把 "查询失败 e=6" 显示到界面上。 */
++    if (IoAbort()) {
++        MonLog("refresh-discard aborted");
++        return;
++    }
 +    {
 +        char m[56];
 +        snprintf(m, sizeof(m), "query auto e=%d on=%d rooms=%u",
@@ -3873,7 +4077,7 @@ index 0000000..6e12350
 +    }
 +
 +    /* 6. 接口不给房间时,用 UDP 主动扫描补房间(rest 1.0 服务器) */
-+    if (ok && qr.roomN == 0) {
++    if (ok && qr.roomN == 0 && !IoAbort()) {
 +        UdpRoomScan(host, port, &qr);
 +        char m[24];
 +        snprintf(m, sizeof(m), "scan rooms=%u", (unsigned)qr.roomN);
@@ -3949,6 +4153,280 @@ index 0000000..6e12350
 +}
 +
 +/* ------------------------------------------------------------------ */
++/* 每台服务器各自的在线 / 房间 / 延迟                                    */
++/* ------------------------------------------------------------------ */
++
++/* 背景:选中的服务器由 DoRefresh 全量查询;这里负责把其余服务器也测一遍,
++ * 让界面上每一行都能显示数值(不用先点选)。实现刻意用"最便宜"的探测:
++ *   延迟  = TCP connect 到 host:port 的往返耗时(中继端口本来就会接受连接)
++ *   在线/房间 = POST 一个只有 serverInfo 的 GraphQL;不支持就退回 /info
++ * 轮转顺序:每次空闲测一台,优先测"最久没测过的",选中服务器隔轮重测一次
++ * (它已经有 DoRefresh,这里只是让延迟也一直新鲜)。 */
++static constexpr u32  kStatUnknown    = 0xFFFFFFFFu;
++static constexpr u64  kStatFreshMs    = 20ull * 1000;
++static constexpr int  kStatProbeMs    = 1500;
++static constexpr u32  kStatMaxServers = MONITOR_MAX_SERVERS;
++
++struct ServerStat {
++    char name[32];
++    char addr[64];
++    s32  online;        /* -1 = 未知 */
++    s32  rooms;         /* -1 = 未知 */
++    s32  latencyMs;     /* 0 = 未知 */
++    u64  stampMs;       /* 上次测量时刻;0 = 从未测过 */
++};
++
++static ServerStat g_stats[kStatMaxServers];
++static u32 g_statCount = 0;
++static char g_statCfgKey[64];        /* relay.cfg 指纹,变了就重建表 */
++static u32 g_statCursor = 0;
++static u64 g_statSelectedRetryMs = 0;
++
++static u64 MonNowMs() {
++    return armTicksToNs(armGetSystemTick()) / 1000000ull;
++}
++
++static u64 g_statCfgCheckedMs = 0;
++
++static void StatsBuildTableIfNeeded(bool force = false) {
++    /* relay.cfg 不必每 200ms 读一次:3 秒查一次足够(新增/删除服务器是用户
++       在界面里操作,下一次轮询就会重建)。 */
++    const u64 nowMs = armTicksToNs(armGetSystemTick()) / 1000000ull;
++    if (!force && g_statCfgCheckedMs != 0 && nowMs - g_statCfgCheckedMs < 3000)
++        return;
++    g_statCfgCheckedMs = nowMs;
++    std::string cfg;
++    if (!LoadFile(kRelayCfgPath, &cfg))
++        return;
++    char key[64];
++    snprintf(key, sizeof(key), "%u:%u", (unsigned)cfg.size(),
++             (unsigned)(cfg.empty() ? 0 : (u8)cfg[0] + (u8)cfg[cfg.size() / 2]));
++    if (strcmp(key, g_statCfgKey) == 0)
++        return;
++    snprintf(g_statCfgKey, sizeof(g_statCfgKey), "%s", key);
++
++    ServerStat fresh[kStatMaxServers] = {};
++    u32 n = 0;
++    size_t i = 0;
++    while (i < cfg.size() && n < kStatMaxServers) {
++        size_t e = cfg.find_first_of("\r\n", i);
++        std::string line = cfg.substr(i, e == std::string::npos ? std::string::npos : e - i);
++        i = (e == std::string::npos) ? cfg.size() : e + 1;
++        char name[32] = {}, host[64] = {};
++        u16 port = 0;
++        if (!RelayParseLine(line.c_str(), name, sizeof(name), host, sizeof(host), &port))
++            continue;
++        snprintf(fresh[n].name, sizeof(fresh[n].name), "%s", name);
++        snprintf(fresh[n].addr, sizeof(fresh[n].addr), "%.55s:%u", host, (unsigned)port);
++        fresh[n].online = -1;
++        fresh[n].rooms = -1;
++        n++;
++    }
++    {
++        std::scoped_lock lk(g_mutex);
++        memcpy(g_stats, fresh, sizeof(fresh));
++        g_statCount = n;
++    }
++    char m[48];
++    snprintf(m, sizeof(m), "stats table n=%u", (unsigned)n);
++    MonLog(m);
++}
++
++static void StatsStore(u32 idx, s32 online, s32 rooms, s32 latency, u64 nowMs) {
++    std::scoped_lock lk(g_mutex);
++    if (idx >= g_statCount)
++        return;
++    ServerStat &st = g_stats[idx];
++    if (online >= 0)
++        st.online = online;
++    if (rooms >= 0)
++        st.rooms = rooms;
++    if (latency > 0)
++        st.latencyMs = latency;
++    st.stampMs = nowMs;
++}
++
++/* TCP connect 往返耗时(毫秒,0 = 连不上)。可被 IoAbort 立刻打断。 */
++static s32 ProbeLatencyMs(const char *host, u16 port) {
++    struct sockaddr_in sa;
++    if (!HttpResolve(host, &sa))
++        return 0;
++    sa.sin_port = htons(port);
++    int fd = socket(AF_INET, SOCK_STREAM, 0);
++    if (fd < 0)
++        return 0;
++    HttpSetNonBlock(fd, true);
++    s32 ms = 0;
++    Deadline start = std::chrono::steady_clock::now();
++    int rc = connect(fd, (struct sockaddr *)&sa, sizeof(sa));
++    if (rc != 0 && errno == EINPROGRESS) {
++        for (;;) {
++            if (IoAbort()) { close(fd); return 0; }
++            long left = (long)std::chrono::duration_cast<std::chrono::milliseconds>(
++                start + std::chrono::milliseconds(kStatProbeMs) -
++                std::chrono::steady_clock::now()).count();
++            if (left <= 0) { close(fd); return 0; }
++            struct timeval tv;
++            tv.tv_sec = 0;
++            tv.tv_usec = left * 1000 < 100000 ? left * 1000 : 100000;
++            fd_set wset;
++            FD_ZERO(&wset);
++            FD_SET(fd, &wset);
++            int sel = select(fd + 1, nullptr, &wset, nullptr, &tv);
++            if (sel < 0) { close(fd); return 0; }
++            if (sel == 0)
++                continue;
++            int err = 0;
++            socklen_t elen = sizeof(err);
++            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen) != 0 || err != 0) {
++                close(fd);
++                return 0;
++            }
++            ms = (s32)std::chrono::duration_cast<std::chrono::milliseconds>(
++                std::chrono::steady_clock::now() - start).count();
++            break;
++        }
++    } else if (rc != 0) {
++        close(fd);
++        return 0;
++    }
++    close(fd);
++    return ms > 0 ? ms : 1;
++}
++
++/* 只有 serverInfo 的轻查询;服务器不支持时退回 /info(与 DoRefresh 同逻辑)。 */
++static bool ProbeOnlineRooms(const char *host, u16 port, s32 *online, s32 *rooms) {
++    static const char *kLightQuery =
++        "query PublicRoomSnapshot { serverInfo { online idle } }";
++    char url[160];
++    snprintf(url, sizeof(url), "http://%s:%u/", host, (unsigned)port);
++    std::string payload = "{\"query\":\"";
++    payload += kLightQuery;
++    payload += "\"}";
++    std::string resp;
++    if (HttpPostJson(url, payload.c_str(), &resp, kStatProbeMs, kMaxHttpBody)) {
++        const char *data = JsonGet(resp.c_str(), "data");
++        const char *info = data ? JsonGet(data, "serverInfo") : nullptr;
++        u32 v = 0;
++        if (info && JsonGetU32(info, "online", &v)) {
++            *online = (s32)v;
++            u32 idle = 0;
++            if (JsonGetU32(info, "idle", &idle)) {
++                /* 部分服务器把"在线 - 空闲"当房间数;没有 idle 就不猜 */
++                *rooms = (v >= idle) ? (s32)(v - idle) : -1;
++            }
++            return true;
++        }
++    }
++    if (IoAbort())
++        return false;
++    snprintf(url, sizeof(url), "http://%s:%u/info", host, (unsigned)port);
++    resp.clear();
++    if (!HttpGet(url, &resp, kStatProbeMs, kMaxHttpBody))
++        return false;
++    const char *root = JsWs(SkipBom(resp.c_str()));
++    u32 v = 0;
++    if (!JsonGetU32(root, "online", &v) && !JsonGetU32(root, "clientCount", &v))
++        return false;
++    *online = (s32)v;
++    u32 rc2 = 0;
++    *rooms = JsonGetU32(root, "roomCount", &rc2) ? (s32)rc2 : -1;
++    return true;
++}
++
++/* 工作线程空闲时调用:测一台(轮转),本轮测完再睡。 */
++static void RefreshOneServerStat() {
++    StatsBuildTableIfNeeded();
++    u32 n;
++    {
++        std::scoped_lock lk(g_mutex);
++        n = g_statCount;
++    }
++    if (n == 0) {
++        svcSleepThread(200'000'000);
++        return;
++    }
++    const u64 now = MonNowMs();
++
++    /* 选一台:最久没测过的;全都很新就睡一会儿 */
++    u32 pick = kStatUnknown;
++    u64 oldest = 0;
++    {
++        std::scoped_lock lk(g_mutex);
++        for (u32 k = 0; k < n; k++) {
++            u32 idx = (g_statCursor + k) % n;
++            if (g_stats[idx].stampMs == 0) {
++                pick = idx;
++                break;
++            }
++            u64 age = now - g_stats[idx].stampMs;
++            if (age > oldest) {
++                oldest = age;
++                if (pick == kStatUnknown)
++                    pick = idx;
++            }
++        }
++    }
++    if (pick == kStatUnknown)
++        pick = g_statCursor % n;
++    if (oldest < kStatFreshMs && oldest != 0) {
++        svcSleepThread(200'000'000);         /* 都还新鲜:歇 200ms 再看 */
++        return;
++    }
++    g_statCursor = (pick + 1) % n;
++
++    char addr[64], host[64] = {};
++    u16 port = 11451;
++    {
++        std::scoped_lock lk(g_mutex);
++        snprintf(addr, sizeof(addr), "%s", g_stats[pick].addr);
++    }
++    char *colon = strrchr(addr, ':');
++    if (colon) {
++        *colon = 0;
++        port = (u16)atoi(colon + 1);
++    }
++    snprintf(host, sizeof(host), "%s", addr);
++    if (host[0] == 0)
++        return;
++
++    const s32 lat = ProbeLatencyMs(host, port);
++    if (IoAbort())
++        return;
++    s32 online = -1, rooms = -1;
++    ProbeOnlineRooms(host, port, &online, &rooms);
++    if (IoAbort())
++        return;
++    StatsStore(pick, online, rooms, lat, MonNowMs());
++    {
++        char m[96];
++        snprintf(m, sizeof(m), "stat #%u %s:%u on=%d rooms=%d lat=%d",
++                 (unsigned)pick, host, (unsigned)port, (int)online, (int)rooms,
++                 (int)lat);
++        MonLog(m);
++    }
++}
++
++u32 MonitorListServerStats(MonitorServerStat *out, u32 max) {
++    if (!out || max == 0)
++        return 0;
++    StatsBuildTableIfNeeded();     /* 节流 3 秒,避免界面刷新时频繁读 SD */
++    const u64 now = MonNowMs();
++    u32 n = 0;
++    std::scoped_lock lk(g_mutex);
++    for (u32 k = 0; k < g_statCount && n < max; k++) {
++        snprintf(out[n].name, sizeof(out[n].name), "%s", g_stats[k].name);
++        snprintf(out[n].addr, sizeof(out[n].addr), "%s", g_stats[k].addr);
++        out[n].online = g_stats[k].online;
++        out[n].rooms = g_stats[k].rooms;
++        out[n].latencyMs = g_stats[k].latencyMs;
++        out[n].ageMs = g_stats[k].stampMs ? (now - g_stats[k].stampMs) : 0;
++        n++;
++    }
++    return n;
++}
++
++/* ------------------------------------------------------------------ */
 +/* 后台线程(libnx 线程,风格同 libtesla)                               */
 +/* ------------------------------------------------------------------ */
 +
@@ -3970,8 +4448,9 @@ index 0000000..6e12350
 +
 +    while (!g_exit.load()) {
 +        u32 want = g_reqGen.load();
-+        if (want != g_doneGen) {
-+            g_doneGen = want;
++        if (want != g_doneGen.load()) {
++            g_auxPhase.store(false);
++            g_doneGen.store(want);
 +            char name[48];
 +            bool subs;
 +            MonitorTargetGeneration::Value targetGen;
@@ -3984,6 +4463,12 @@ index 0000000..6e12350
 +            }
 +            DoRefresh(name[0] ? name : nullptr, subs, targetGen);
 +            MonLog("refresh-done");
++        } else if (!IoAbort()) {
++            /* 空闲:给其它服务器(非选中行)测一轮延迟 + 在线/房间,
++               界面就能"每行都显示数值"而不必先选中它。 */
++            g_auxPhase.store(true);
++            RefreshOneServerStat();
++            g_auxPhase.store(false);
 +        } else {
 +            svcSleepThread(50'000'000);      /* 50ms */
 +        }
@@ -4091,10 +4576,10 @@ index 0000000..6e12350
 +}
 diff --git a/overlay/source/monitor.hpp b/overlay/source/monitor.hpp
 new file mode 100644
-index 0000000..59519da
+index 0000000..95ab8f7
 --- /dev/null
 +++ b/overlay/source/monitor.hpp
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,90 @@
 +#pragma once
 +#include <switch.h>
 +
@@ -4154,6 +4639,21 @@ index 0000000..59519da
 +    char addr[64];
 +};
 +u32 MonitorListRelayServers(MonitorServer *out, u32 max);
++
++/* 每台服务器自己的在线/房间/延迟(界面所有行都显示,不只是选中行)。
++ * 后台线程按轮转顺序逐台探测,所以数值是"最近一次测到的":
++ * ageMs = 距上次测量多久(0 = 还没测过)。 */
++struct MonitorServerStat {
++    char name[32];
++    char addr[64];
++    s32  online;      /* -1 = 未知 */
++    s32  rooms;       /* -1 = 未知 */
++    s32  latencyMs;   /* 0 = 未知 */
++    u64  ageMs;       /* 距上次测量的毫秒数;0 = 从未测过 */
++};
++
++/* 读当前统计表(按 relay.cfg 顺序,与服务器行一一对应)。 */
++u32 MonitorListServerStats(MonitorServerStat *out, u32 max);
 +
 +/* 请求一次后台刷新(每次打开 overlay / 切换服务器时调用)。
 + * serverName:选中的服务器名(可空,空则读 relay.cfg 的 selected=)。
@@ -4508,6 +5008,3 @@ index 0000000..f716702
 +    ExpectUnresolved("11223344", nullptr);
 +    return 0;
 +}
--- 
-2.47.3
-
