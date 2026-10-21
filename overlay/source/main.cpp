@@ -785,48 +785,22 @@ public:
         MonitorSetTraditional(g_isTraditional);
         auto *frame = new MonitorFrame(m_name,
                                        T("B 返回 · X 重新查询", "B 返回 · X 重新查詢"));
-        auto *list = new RebuildList();
-
-        MonitorCopyAllSnapshot(&m_snap);
-
-        const u32 idx = m_index < MONITOR_ALL_MAX ? m_index : 0;
-        const MonitorAllServer &s = m_snap.servers[idx];
-
-        char hdr[80];
-        if (s.online >= 0)
-            snprintf(hdr, sizeof(hdr), T("在线 %d · %u 间", "線上 %d · %u 間"),
-                     static_cast<int>(s.online), static_cast<unsigned>(s.roomN));
-        else
-            snprintf(hdr, sizeof(hdr), "%s", T("该服务器的房间", "該伺服器的房間"));
-        list->addItem(new tsl::elm::CategoryHeader(hdr));
-
-        if (s.state == 1) {
-            list->addItem(new tsl::elm::ListItem(T("查询中…", "查詢中…")));
-        } else if (s.state == 3) {
-            list->addItem(new tsl::elm::ListItem(T("该服务器无房间信息", "該伺服器無房間資訊")));
-        } else if (s.roomN == 0) {
-            list->addItem(new tsl::elm::ListItem(T("暂无房间", "暫無房間")));
-        } else {
-            for (u32 k = 0; k < s.roomN && k < MONITOR_ALL_ROOMS_MAX; k++) {
-                auto *row = new AllServerRow();
-                row->setName(s.rooms[k].game[0] ? s.rooms[k].game
-                                                : T("未知游戏", "未知遊戲"));
-                char val[32] = {};
-                if (s.rooms[k].playersMax > 0)
-                    snprintf(val, sizeof(val), "%u/%u",
-                             static_cast<unsigned>(s.rooms[k].players),
-                             static_cast<unsigned>(s.rooms[k].playersMax));
-                else
-                    snprintf(val, sizeof(val), "%u",
-                             static_cast<unsigned>(s.rooms[k].players));
-                row->setValue(val, false);
-                list->addItem(row);
-            }
-        }
-
-        /* 房间页不占着扫描:回去时总览会重新开扫;这里只保留 X 强制刷新。 */
-        frame->setContent(list);
+        m_list = new RebuildList();
+        frame->setContent(m_list);
+        Rebuild();
         return frame;
+    }
+
+    /* 进来时这台可能还在「查询中」:状态一变就重建一次,数值变化只改文字。 */
+    virtual void update() override {
+        MonitorCopyAllSnapshot(&m_snap);
+        const MonitorAllServer &s = Server();
+        if (s.state != m_builtState || s.roomN != m_builtRooms ||
+            (s.online >= 0) != (m_builtOnline >= 0)) {
+            Rebuild();
+        } else {
+            UpdateValues();
+        }
     }
 
     virtual bool handleInput(u64 keysDown, u64 keysHeld,
@@ -843,8 +817,89 @@ public:
     }
 
 private:
+    const MonitorAllServer &Server() {
+        const u32 idx = m_index < MONITOR_ALL_MAX ? m_index : 0;
+        return m_snap.servers[idx];
+    }
+
+    void Rebuild() {
+        MonitorCopyAllSnapshot(&m_snap);
+        const MonitorAllServer &s = Server();
+
+        m_list->clear();
+
+        char hdr[80];
+        if (s.online >= 0)
+            snprintf(hdr, sizeof(hdr), T("在线 %d · %d 间", "線上 %d · %d 間"),
+                     static_cast<int>(s.online), static_cast<int>(s.roomCount));
+        else
+            snprintf(hdr, sizeof(hdr), "%s", T("该服务器的房间", "該伺服器的房間"));
+        m_header = new tsl::elm::CategoryHeader(hdr);
+        m_list->addItem(m_header);
+
+        m_rows.clear();
+        if (s.state == 1) {
+            m_list->addItem(new tsl::elm::ListItem(T("查询中…", "查詢中…")));
+        } else if (s.state == 3) {
+            m_list->addItem(new tsl::elm::ListItem(T("该服务器无房间信息", "該伺服器無房間資訊")));
+        } else if (s.roomN == 0) {
+            m_list->addItem(new tsl::elm::ListItem(T("暂无房间", "暫無房間")));
+        } else {
+            for (u32 k = 0; k < s.roomN && k < MONITOR_ALL_ROOMS_MAX; k++) {
+                auto *row = new AllServerRow();
+                row->setName(s.rooms[k].game[0] ? s.rooms[k].game
+                                                : T("未知游戏", "未知遊戲"));
+                char val[32] = {};
+                if (s.rooms[k].playersMax > 0)
+                    snprintf(val, sizeof(val), "%u/%u",
+                             static_cast<unsigned>(s.rooms[k].players),
+                             static_cast<unsigned>(s.rooms[k].playersMax));
+                else
+                    snprintf(val, sizeof(val), "%u",
+                             static_cast<unsigned>(s.rooms[k].players));
+                row->setValue(val, false);
+                m_list->addItem(row);
+                m_rows.push_back(row);
+            }
+        }
+
+        m_builtState = s.state;
+        m_builtRooms = s.roomN;
+        m_builtOnline = s.online;
+    }
+
+    void UpdateValues() {
+        const MonitorAllServer &s = Server();
+        if (m_header) {
+            char hdr[80];
+            if (s.online >= 0)
+                snprintf(hdr, sizeof(hdr), T("在线 %d · %d 间", "線上 %d · %d 間"),
+                         static_cast<int>(s.online), static_cast<int>(s.roomCount));
+            else
+                snprintf(hdr, sizeof(hdr), "%s", T("该服务器的房间", "該伺服器的房間"));
+            m_header->setText(hdr);
+        }
+        for (u32 k = 0; k < m_rows.size() && k < s.roomN; k++) {
+            char val[32] = {};
+            if (s.rooms[k].playersMax > 0)
+                snprintf(val, sizeof(val), "%u/%u",
+                         static_cast<unsigned>(s.rooms[k].players),
+                         static_cast<unsigned>(s.rooms[k].playersMax));
+            else
+                snprintf(val, sizeof(val), "%u",
+                         static_cast<unsigned>(s.rooms[k].players));
+            m_rows[k]->setValue(val, false);
+        }
+    }
+
     std::string m_name;
     u32 m_index = 0;
+    tsl::elm::List *m_list = nullptr;
+    tsl::elm::CategoryHeader *m_header = nullptr;
+    std::vector<AllServerRow *> m_rows;
+    u8 m_builtState = 0xFF;
+    u32 m_builtRooms = 0xFFFFFFFFu;
+    s32 m_builtOnline = -2;
     /* 36KB,放静态区 */
     static inline MonitorAllSnapshot m_snap = {};
 };
@@ -853,7 +908,8 @@ private:
    X 强制重查,B 返回。行只在 createUI 里建一次,之后只改数值,不重建。 */
 class AllServersGui : public tsl::Gui {
 public:
-    ~AllServersGui() override { MonitorAllCancel(); }
+    /* 不在这里 Cancel:进单服房间页时总览会被销毁,但扫描还要继续,
+       否则房间页永远停在「查询中」。回主界面后主界面的轮询会自己取消扫描。 */
 
     virtual tsl::elm::Element* createUI() override {
         MonitorSetTraditional(g_isTraditional);
