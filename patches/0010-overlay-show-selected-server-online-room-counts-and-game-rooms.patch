@@ -276,7 +276,7 @@ index 5838ff6..7c810be 100644
      return rc;
  }
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..def5304 100644
+index 8e07c19..15f228b 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,8 @@
@@ -323,7 +323,7 @@ index 8e07c19..def5304 100644
  
  /* Traditional / Simplified Chinese switch. The overlay used to hardcode
     Simplified strings, which left Traditional Chinese consoles with the
-@@ -34,6 +44,481 @@ static bool g_isTraditional = false;
+@@ -34,6 +44,482 @@ static bool g_isTraditional = false;
  
  #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
  
@@ -618,6 +618,7 @@ index 8e07c19..def5304 100644
 +    void clearNote() { m_note[0] = 0; }
 +    bool hasNote() const { return m_note[0] != 0; }
 +    bool selected() const { return m_selected; }
++    const char* addr() const { return m_addr; }
 +    /* 名字故意不用 setClickListener:基类 Element 有个同名虚函数
 +       (std::function<bool(u64)>),重载会触发 -Woverloaded-virtual。 */
 +    void setActivateListener(std::function<void()> fn) { m_click = std::move(fn); }
@@ -805,7 +806,7 @@ index 8e07c19..def5304 100644
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -66,8 +551,116 @@ static void detectLanguage()
+@@ -66,8 +552,116 @@ static void detectLanguage()
      char code[9] = {};
      memcpy(code, &langCode, 8);
      g_isTraditional = (strncmp(code, "zh-Hant", 7) == 0);
@@ -877,7 +878,7 @@ index 8e07c19..def5304 100644
 +           stats(按 relay.cfg 顺序)顺序不一致导致数据错位 */
 +        const MonitorServerStat *st = nullptr;
 +        for (u32 i = 0; i < n; i++) {
-+            if (strcmp(stats[i].addr, row->m_addr) == 0) {
++            if (strcmp(stats[i].addr, row->addr()) == 0) {
 +                st = &stats[i];
 +                break;
 +            }
@@ -923,7 +924,7 @@ index 8e07c19..def5304 100644
  }
  
  class MainGui : public tsl::Gui {
-@@ -75,199 +668,448 @@ public:
+@@ -75,199 +669,448 @@ public:
      MainGui() { }
  
      virtual tsl::elm::Element* createUI() override {
@@ -1526,7 +1527,7 @@ index 8e07c19..def5304 100644
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,14 +1130,34 @@ public:
+@@ -288,14 +1131,34 @@ public:
              g_state = State::Loaded;
          });
  
@@ -1565,7 +1566,7 @@ index 8e07c19..def5304 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..51f1ae7
+index 0000000..00f256b
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
 @@ -0,0 +1,2839 @@
@@ -1578,9 +1579,9 @@ index 0000000..51f1ae7
 + *   LDN 主动扫描补房间(对应 LanPlayMonitor 的 active-udp-scan)。
 + */
 +#include "monitor.hpp"
-+#include "monitor_title_resolver.hpp"
-+#include "monitor_player_filter.hpp"
-+#include "monitor_target_generation.hpp"
++#include "source/monitor_title_resolver.hpp"
++#include "source/monitor_player_filter.hpp"
++#include "source/monitor_target_generation.hpp"
 +
 +#include <switch.h>
 +
