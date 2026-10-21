@@ -1,7 +1,7 @@
-From a10d616c08de56c8cd42f9d13a5d2d6dfd0633f7 Mon Sep 17 00:00:00 2001
+From 835557db1e7e630d81ea3751b336389bf558bf0f Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
-Subject: [PATCH 10/10] overlay: online counts/room list and relay management
+Subject: [PATCH] overlay: online counts/room list and relay management
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -142,8 +142,8 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
  .github/workflows/release.yml                 |   44 +-
  Makefile                                      |    6 +
  overlay/Makefile                              |   13 +-
- overlay/source/main.cpp                       | 1225 +++++-
- overlay/source/monitor.cpp                    | 3831 +++++++++++++++++
+ overlay/source/main.cpp                       | 1225 ++++-
+ overlay/source/monitor.cpp                    | 3998 +++++++++++++++++
  overlay/source/monitor.hpp                    |   94 +
  overlay/source/monitor_player_filter.hpp      |   32 +
  overlay/source/monitor_target_generation.hpp  |   22 +
@@ -151,7 +151,7 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
  overlay/tests/monitor_player_filter_test.cpp  |   29 +
  .../tests/monitor_target_generation_test.cpp  |   22 +
  overlay/tests/monitor_title_resolver_test.cpp |   49 +
- 14 files changed, 5397 insertions(+), 189 deletions(-)
+ 14 files changed, 5564 insertions(+), 189 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
  create mode 100644 overlay/source/monitor_player_filter.hpp
@@ -396,7 +396,7 @@ index da2bd21..a08980f 100644
  #---------------------------------------------------------------------------------
  # list of directories containing libraries, this must be the top level containing
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..3d5ff4e 100644
+index 8e07c19..a063b4c 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,8 @@
@@ -1217,10 +1217,10 @@ index 8e07c19..3d5ff4e 100644
 -                         (vaddr >> 24) & 0xff, (vaddr >> 16) & 0xff,
 -                         (vaddr >> 8) & 0xff, vaddr & 0xff, vaddr & 0xffff);
 -                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), buf));
-+        // 所有服务器的在线/房间/延迟每 3 秒与当前选中服务器同步批量刷新一轮。
++        // 所有服务器的在线/房间/延迟在每次刷新完成后间隔 3 秒同步批量刷新下一轮。
 +        if (g_visible && g_state == State::Loaded) {
 +            u64 nowNs = armTicksToNs(armGetSystemTick());
-+            if (g_lastPollNs == 0)
++            if (g_lastPollNs == 0 || snap.busy)
 +                g_lastPollNs = nowNs;
 +            if (nowNs - g_lastPollNs >= 3000000000ull) {
 +                g_lastPollNs = nowNs;
@@ -1716,10 +1716,10 @@ index 8e07c19..3d5ff4e 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..4bf681a
+index 0000000..52e1963
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,3831 @@
+@@ -0,0 +1,3998 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -3745,7 +3745,7 @@ index 0000000..4bf681a
 +    u64 partsMask;                  /* 已收分片位图(total ≤ 64) */
 +    u8  data[8192];
 +};
-+static FragSlot g_frags[4];
++static FragSlot g_frags[16];
 +
 +static bool FragAdd(const u8 *frame, size_t len, const u8 **outPkt, size_t *outLen) {
 +    if (len < 16)
@@ -3894,21 +3894,25 @@ index 0000000..4bf681a
 +}
 +
 +/* ------------------------------------------------------------------ */
-+/* 房间 5 秒 TTL 缓存                                                   */
++/* 房间过期缓存 (未扫到后保留 3 秒以上,彻底消除偶发丢包导致房间闪隐)     */
 +/* ------------------------------------------------------------------ */
 +
 +/* 查询/UDP 扫描都有偶发丢包与瞬间空列表(日志里 scan rooms=0/1 交替),
-+ * 直接把当次结果写进快照会让房间列表每秒闪一下。
-+ * 缓存以 sessionId 为键:命中即刷新时间戳并更新房间数据;当次没出现
-+ * 的条目再保留 5 秒才删除;服务器身份变化时整体清空。
-+ * 在线人数/房间数量同口径:查询失败时沿用最近一次成功值,超过 5 秒
-+ * 仍失败才退回「未知」。 */
-+static constexpr auto kRoomTtl = std::chrono::seconds(5);
++ * 直接把当次结果写进快照会让房间列表一会儿消失一会儿出现。
++ * 缓存以 sessionId 为键:
++ *   - 命中即刷新 lastSeen 并清空 missingSince;
++ *   - 某轮未扫到时先记录首次缺失时刻 missingSince,从缺失时刻起再保留 3 秒
++ *     (kRoomExpireGrace = 3s),若下一轮重新扫到则无缝恢复,彻底消除单次丢包闪退;
++ *   - 当服务器在线人数已归零(online == 0 且无房间)或切换服务器时清空。 */
++static constexpr auto kRoomTtl         = std::chrono::seconds(8);
++static constexpr auto kRoomExpireGrace = std::chrono::seconds(3);
 +
 +struct RoomCacheEnt {
 +    bool used = false;
++    bool seenInPoll = false;
 +    char key[40] = {};
 +    Deadline lastSeen{};
++    Deadline missingSince{};
 +    MonitorRoom room;
 +};
 +static RoomCacheEnt g_roomCache[MONITOR_MAX_ROOMS];
@@ -3926,17 +3930,28 @@ index 0000000..4bf681a
 +}
 +
 +static void RoomCacheReset() {
-+    for (auto &e : g_roomCache)
++    for (auto &e : g_roomCache) {
 +        e.used = false;
++        e.seenInPoll = false;
++        e.missingSince = Deadline{};
++    }
 +    g_cacheServer[0] = 0;
 +    g_haveLastOk = false;
 +    g_lastOnline = -1;
 +    g_lastRoomCount = -1;
 +}
 +
++static void RoomCacheBeginPoll() {
++    for (auto &e : g_roomCache) {
++        if (e.used)
++            e.seenInPoll = false;
++    }
++}
++
 +static void RoomCacheUpsert(const MonitorRoom &r, const Deadline &now) {
 +    char key[40];
 +    RoomCacheKey(r, key, sizeof(key));
++    const bool hasHostAndGame = (r.game[0] != 0 && r.playerN > 0 && r.player[0][0] != 0);
 +    int freeSlot = -1, oldest = -1;
 +    for (u32 i = 0; i < MONITOR_MAX_ROOMS; i++) {
 +        RoomCacheEnt &e = g_roomCache[i];
@@ -3945,9 +3960,17 @@ index 0000000..4bf681a
 +                freeSlot = (int)i;
 +            continue;
 +        }
-+        if (strcmp(e.key, key) == 0) {
++        const bool sameSession = (strcmp(e.key, key) == 0);
++        const bool sameHostGame = (hasHostAndGame &&
++                                   strcmp(e.room.game, r.game) == 0 &&
++                                   e.room.playerN > 0 &&
++                                   strcmp(e.room.player[0], r.player[0]) == 0);
++        if (sameSession || sameHostGame) {
++            snprintf(e.key, sizeof(e.key), "%s", key);
 +            e.room = r;
 +            e.lastSeen = now;
++            e.missingSince = Deadline{};
++            e.seenInPoll = true;
 +            return;
 +        }
 +        if (oldest < 0 || e.lastSeen < g_roomCache[oldest].lastSeen)
@@ -3958,14 +3981,30 @@ index 0000000..4bf681a
 +        return;
 +    RoomCacheEnt &e = g_roomCache[slot];
 +    e.used = true;
++    e.seenInPoll = true;
 +    snprintf(e.key, sizeof(e.key), "%s", key);
 +    e.lastSeen = now;
++    e.missingSince = Deadline{};
 +    e.room = r;
 +}
 +
-+static void RoomCacheExpire(const Deadline &now) {
++static void RoomCacheExpire(const Deadline &now, bool pollCompletedOk) {
 +    for (auto &e : g_roomCache) {
-+        if (e.used && (now - e.lastSeen) > kRoomTtl)
++        if (!e.used)
++            continue;
++        if (!pollCompletedOk) {
++            if ((now - e.lastSeen) > kRoomTtl)
++                e.used = false;
++            continue;
++        }
++        if (e.seenInPoll)
++            continue;
++        if (e.missingSince.time_since_epoch().count() == 0) {
++            /* 首次未扫到:开始 3 秒过期倒计时,本轮继续保留显示 */
++            e.missingSince = now;
++            continue;
++        }
++        if ((now - e.missingSince) >= kRoomExpireGrace)
 +            e.used = false;
 +    }
 +}
@@ -4244,12 +4283,13 @@ index 0000000..4bf681a
 +        staleAfterQuery = !g_targetGen.IsCurrent(targetGen);
 +        if (!staleAfterQuery) {
 +            if (ok) {
++                RoomCacheBeginPoll();
 +                for (u32 i = 0; i < qr.roomN; i++)
 +                    RoomCacheUpsert(qr.rooms[i], now);
 +                g_lastOk = now;
 +                g_haveLastOk = true;
 +            }
-+            RoomCacheExpire(now);
++            RoomCacheExpire(now, ok);
 +
 +            u32 n = 0;
 +            s32 udpOnline = 0;
@@ -4269,7 +4309,7 @@ index 0000000..4bf681a
 +                g_lastOnline = on;
 +                g_lastRoomCount = (s32)n;
 +            } else if (fresh) {
-+                /* 瞬间失败:5 秒内沿用最近一次成功的在线/房间数 */
++                /* 瞬间失败:沿用最近一次成功的在线/房间数 */
 +                g_snap.online = g_lastOnline;
 +                g_snap.roomCount = (s32)n;
 +                g_lastRoomCount = (s32)n;
@@ -4313,11 +4353,12 @@ index 0000000..4bf681a
 +/* 每台服务器各自的在线 / 房间 / 延迟 (同步批量探测引擎)                 */
 +/* ------------------------------------------------------------------ */
 +
-+static constexpr u32  kStatMaxServers   = MONITOR_MAX_SERVERS;
-+static constexpr int  kBatchHttpSlots   = 6;
-+static constexpr int  kBatchHttpMs      = 1800;
-+static constexpr int  kBatchScanMs      = 520;
-+static constexpr u64  kStatKeepOnFailMs = 8000;
++static constexpr u32  kStatMaxServers    = MONITOR_MAX_SERVERS;
++static constexpr int  kBatchHttpSlots    = 6;
++static constexpr int  kBatchHttpMs       = 1200;
++static constexpr int  kBatchScanMs       = 850;
++static constexpr u64  kStatKeepOnFailMs  = 8000;
++static constexpr u64  kRoomExpireGraceMs = 3000;
 +
 +struct ServerStat {
 +    char name[32];
@@ -4327,6 +4368,7 @@ index 0000000..4bf681a
 +    s32  latencyMs;     /* 0 = 未知 */
 +    u64  stampMs;       /* 上次测量时刻;0 = 从未测过 */
 +    u64  lastScanMs;    /* 上次向该服发送 UDP kScanFrame 的时刻(用于扣除自身扫描器占用的 1 个在线名额) */
++    u64  roomMissingSinceMs; /* 房间首次未扫到的时刻;保留 3 秒过期缓存防闪烁 */
 +    u8   proto;         /* ServerProto: 缓存 graphql/rest 类型 */
 +    u8   failCount;     /* 连续失败次数 */
 +};
@@ -4335,6 +4377,8 @@ index 0000000..4bf681a
 +static u32 g_statCount = 0;
 +static char g_statCfgKey[64];        /* 服务器列表指纹,仅在条目增删改时更新表 */
 +static int g_scanUdpFd = -1;         /* 持久化复用同一个 UDP 扫描端口,避免每次扫描在服务端新增临时客户端 */
++static int g_selScanUdpFd = -1;      /* 选中服务器专用持久 connect() UDP 扫描端口 */
++static struct sockaddr_in g_selScanSa = {};
 +
 +static u64 MonNowMs() {
 +    return (u64)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -4367,6 +4411,7 @@ index 0000000..4bf681a
 +                fresh[k].latencyMs = g_stats[oldIdx].latencyMs;
 +                fresh[k].stampMs = g_stats[oldIdx].stampMs;
 +                fresh[k].lastScanMs = g_stats[oldIdx].lastScanMs;
++                fresh[k].roomMissingSinceMs = g_stats[oldIdx].roomMissingSinceMs;
 +                if (g_stats[oldIdx].proto != ProtoUnknown)
 +                    fresh[k].proto = g_stats[oldIdx].proto;
 +                fresh[k].failCount = g_stats[oldIdx].failCount;
@@ -4546,8 +4591,10 @@ index 0000000..4bf681a
 +    struct sockaddr_in sa;
 +    s32  latMs;
 +    s32  httpRttMs;
++    s32  rawOnline;
 +    s32  online;
 +    s32  rooms;
++    s32  prevRooms;
 +    bool httpOk;
 +    int  httpErr;
 +};
@@ -4722,22 +4769,68 @@ index 0000000..4bf681a
 +    return true;
 +}
 +
-+/* 并行 UDP 房间扫描:复用持久非阻塞 UDP 套接字对所有 online > 0 且 HTTP 未返回房间
-+ * 的服务器同时发送 kScanFrame,既避免每次新建临时端口在服务端叠加在线人数,又能在一个
-+ * 520ms 窗口内完成全部服务器的房间补齐。 */
++/* 并行 UDP 房间扫描:
++ *   - 选中服务器(selIdx)使用独立持久 connect() 的 UDP 套接字(g_selScanUdpFd,
++ *     send/recv),避免与其它服务器共用缓冲区或受 recvfrom 源地址过滤影响;
++ *   - 其余服务器复用持久非阻塞 UDP 套接字(g_scanUdpFd);
++ *   - 在 850ms 窗口内发 3 轮探测包(0ms / 280ms / 560ms),降低偶发丢包率。 */
 +static void BatchUdpRoomScan(BatchServerItem *items, const u32 *scanIdxs, u32 scanN,
 +                             s32 selIdx, QueryResult *selQr) {
 +    if (scanN == 0 || IoAbort())
 +        return;
-+    if (g_scanUdpFd < 0) {
-+        g_scanUdpFd = socket(AF_INET, SOCK_DGRAM, 0);
-+        if (g_scanUdpFd < 0)
-+            return;
-+        HttpSetNonBlock(g_scanUdpFd, true);
++
++    s32 selScanSlot = -1;
++    for (u32 s = 0; s < scanN; s++) {
++        if ((s32)scanIdxs[s] == selIdx) {
++            selScanSlot = (s32)s;
++            break;
++        }
 +    }
-+    int fd = g_scanUdpFd;
-+    u8 drain[1024];
-+    while (recvfrom(fd, drain, sizeof(drain), 0, nullptr, nullptr) > 0) {}
++
++    int selFd = -1;
++    if (selScanSlot >= 0 && selIdx >= 0) {
++        const struct sockaddr_in &targetSa = items[selIdx].sa;
++        if (g_selScanUdpFd >= 0 &&
++            (g_selScanSa.sin_addr.s_addr != targetSa.sin_addr.s_addr ||
++             g_selScanSa.sin_port != targetSa.sin_port)) {
++            close(g_selScanUdpFd);
++            g_selScanUdpFd = -1;
++        }
++        if (g_selScanUdpFd < 0) {
++            g_selScanUdpFd = socket(AF_INET, SOCK_DGRAM, 0);
++            if (g_selScanUdpFd >= 0) {
++                if (connect(g_selScanUdpFd, (const struct sockaddr *)&targetSa, sizeof(targetSa)) != 0) {
++                    close(g_selScanUdpFd);
++                    g_selScanUdpFd = -1;
++                } else {
++                    HttpSetNonBlock(g_selScanUdpFd, true);
++                    g_selScanSa = targetSa;
++                }
++            }
++        }
++        selFd = g_selScanUdpFd;
++        if (selFd >= 0) {
++            u8 drain[1024];
++            while (recv(selFd, drain, sizeof(drain), 0) > 0) {}
++        }
++    }
++
++    int batchFd = -1;
++    const bool hasOtherServers = (scanN > (selFd >= 0 ? 1u : 0u));
++    if (hasOtherServers) {
++        if (g_scanUdpFd < 0) {
++            g_scanUdpFd = socket(AF_INET, SOCK_DGRAM, 0);
++            if (g_scanUdpFd >= 0)
++                HttpSetNonBlock(g_scanUdpFd, true);
++        }
++        batchFd = g_scanUdpFd;
++        if (batchFd >= 0) {
++            u8 drain[1024];
++            while (recvfrom(batchFd, drain, sizeof(drain), 0, nullptr, nullptr) > 0) {}
++        }
++    }
++    if (selFd < 0 && batchFd < 0)
++        return;
 +
 +    static char s_seen[kStatMaxServers][kMaxScanRooms][36];
 +    u32 seenN[kStatMaxServers] = {};
@@ -4749,86 +4842,113 @@ index 0000000..4bf681a
 +    Deadline nextSend = start;
 +    u8 frame[2048];
 +
++    auto processRoomFrame = [&](u32 matchS, ssize_t n) {
++        u32 idx = scanIdxs[matchS];
++        if (items[idx].rooms < 0)
++            items[idx].rooms = 0;
++
++        const u8 *pkt = nullptr;
++        size_t pktLen = 0;
++        if (frame[0] == 1) {
++            pkt = frame + 1;
++            pktLen = (size_t)n - 1;
++        } else if (frame[0] == 3) {
++            if (n >= 5 && (s32)idx != selIdx) {
++                u32 origIp = 0;
++                memcpy(&origIp, frame + 1, 4);
++                u32 tagIp = origIp ^ ((idx + 1u) << 24);
++                memcpy(frame + 1, &tagIp, 4);
++            }
++            if (!FragAdd(frame + 1, (size_t)n - 1, &pkt, &pktLen))
++                return;
++        } else {
++            return;
++        }
++
++        MonitorRoom room;
++        memset(&room, 0, sizeof(room));
++        char tag[36] = {};
++        if (!ParseLdnResponse(pkt, pktLen, &room, tag, sizeof(tag)))
++            return;
++
++        for (u32 k = 0; k < seenN[matchS]; k++) {
++            if (strcmp(s_seen[matchS][k], tag) == 0)
++                return;
++        }
++        if (seenN[matchS] < kMaxScanRooms)
++            snprintf(s_seen[matchS][seenN[matchS]++], sizeof(s_seen[matchS][0]), "%s", tag);
++
++        items[idx].rooms++;
++        udpOnline[matchS] += (room.players > 0) ? (s32)room.players : 1;
++        if ((s32)idx == selIdx && selQr && selQr->roomN < MONITOR_MAX_ROOMS)
++            selQr->rooms[selQr->roomN++] = room;
++    };
++
 +    while (std::chrono::steady_clock::now() < deadline && !IoAbort()) {
 +        Deadline now = std::chrono::steady_clock::now();
 +        if (now >= nextSend) {
 +            for (u32 s = 0; s < scanN; s++) {
 +                u32 idx = scanIdxs[s];
-+                if (sendto(fd, kScanFrame, sizeof(kScanFrame), 0,
-+                           (struct sockaddr *)&items[idx].sa, sizeof(items[idx].sa)) >= 0) {
-+                    items[idx].didScan = true;
++                if ((s32)s == selScanSlot && selFd >= 0) {
++                    if (send(selFd, kScanFrame, sizeof(kScanFrame), 0) >= 0)
++                        items[idx].didScan = true;
++                } else if (batchFd >= 0) {
++                    if (sendto(batchFd, kScanFrame, sizeof(kScanFrame), 0,
++                               (struct sockaddr *)&items[idx].sa, sizeof(items[idx].sa)) >= 0) {
++                        items[idx].didScan = true;
++                    }
 +                }
 +            }
-+            nextSend = now + std::chrono::milliseconds(260);
++            nextSend = now + std::chrono::milliseconds(280);
 +        }
 +        fd_set rset;
 +        FD_ZERO(&rset);
-+        FD_SET(fd, &rset);
++        int maxFd = -1;
++        if (selFd >= 0) {
++            FD_SET(selFd, &rset);
++            if (selFd > maxFd) maxFd = selFd;
++        }
++        if (batchFd >= 0) {
++            FD_SET(batchFd, &rset);
++            if (batchFd > maxFd) maxFd = batchFd;
++        }
 +        struct timeval tv = { 0, 10 * 1000 };
-+        int sel = select(fd + 1, &rset, nullptr, nullptr, &tv);
++        int sel = select(maxFd + 1, &rset, nullptr, nullptr, &tv);
 +        if (sel <= 0)
 +            continue;
 +
-+        for (;;) {
-+            struct sockaddr_in fromSa;
-+            socklen_t fromLen = sizeof(fromSa);
-+            memset(&fromSa, 0, sizeof(fromSa));
-+            ssize_t n = recvfrom(fd, frame, sizeof(frame), 0,
-+                                 (struct sockaddr *)&fromSa, &fromLen);
-+            if (n <= 0)
-+                break;
-+
-+            s32 matchS = -1;
-+            for (u32 s = 0; s < scanN; s++) {
-+                u32 idx = scanIdxs[s];
-+                if (items[idx].sa.sin_addr.s_addr == fromSa.sin_addr.s_addr &&
-+                    items[idx].sa.sin_port == fromSa.sin_port) {
-+                    matchS = (s32)s;
++        if (selFd >= 0 && selScanSlot >= 0 && FD_ISSET(selFd, &rset)) {
++            for (;;) {
++                ssize_t n = recv(selFd, frame, sizeof(frame), 0);
++                if (n <= 0)
 +                    break;
-+                }
++                processRoomFrame((u32)selScanSlot, n);
 +            }
-+            if (matchS < 0)
-+                continue;
-+            u32 idx = scanIdxs[matchS];
-+
-+            const u8 *pkt = nullptr;
-+            size_t pktLen = 0;
-+            if (frame[0] == 1) {
-+                pkt = frame + 1;
-+                pktLen = (size_t)n - 1;
-+            } else if (frame[0] == 3) {
-+                if (n >= 5) {
-+                    u32 tagIp = 0x7F000000u | idx;
-+                    memcpy(frame + 1, &tagIp, 4);
-+                }
-+                if (!FragAdd(frame + 1, (size_t)n - 1, &pkt, &pktLen))
-+                    continue;
-+            } else {
-+                continue;
-+            }
-+
-+            MonitorRoom room;
-+            memset(&room, 0, sizeof(room));
-+            char tag[36] = {};
-+            if (!ParseLdnResponse(pkt, pktLen, &room, tag, sizeof(tag)))
-+                continue;
-+
-+            bool dup = false;
-+            for (u32 k = 0; k < seenN[matchS]; k++) {
-+                if (strcmp(s_seen[matchS][k], tag) == 0) {
-+                    dup = true;
++        }
++        if (batchFd >= 0 && FD_ISSET(batchFd, &rset)) {
++            for (;;) {
++                struct sockaddr_in fromSa;
++                socklen_t fromLen = sizeof(fromSa);
++                memset(&fromSa, 0, sizeof(fromSa));
++                ssize_t n = recvfrom(batchFd, frame, sizeof(frame), 0,
++                                     (struct sockaddr *)&fromSa, &fromLen);
++                if (n <= 0)
 +                    break;
-+                }
-+            }
-+            if (dup)
-+                continue;
-+            if (seenN[matchS] < kMaxScanRooms)
-+                snprintf(s_seen[matchS][seenN[matchS]++], sizeof(s_seen[matchS][0]), "%s", tag);
 +
-+            items[idx].rooms++;
-+            udpOnline[matchS] += (room.players > 0) ? (s32)room.players : 1;
-+            if ((s32)idx == selIdx && selQr && selQr->roomN < MONITOR_MAX_ROOMS)
-+                selQr->rooms[selQr->roomN++] = room;
++                s32 matchS = -1;
++                for (u32 s = 0; s < scanN; s++) {
++                    if ((s32)s == selScanSlot && selFd >= 0)
++                        continue;
++                    u32 idx = scanIdxs[s];
++                    if (items[idx].sa.sin_addr.s_addr == fromSa.sin_addr.s_addr &&
++                        items[idx].sa.sin_port == fromSa.sin_port) {
++                        matchS = (s32)s;
++                        break;
++                    }
++                }
++                if (matchS >= 0)
++                    processRoomFrame((u32)matchS, n);
++            }
 +        }
 +    }
 +
@@ -4836,8 +4956,12 @@ index 0000000..4bf681a
 +        u32 idx = scanIdxs[s];
 +        if (udpOnline[s] > items[idx].online)
 +            items[idx].online = udpOnline[s];
-+        if ((s32)idx == selIdx && selQr && items[idx].online > selQr->online)
-+            selQr->online = items[idx].online;
++        if ((s32)idx == selIdx && selQr) {
++            if (items[idx].online > selQr->online)
++                selQr->online = items[idx].online;
++            if (selQr->roomN > 0)
++                items[idx].httpOk = true;
++        }
 +    }
 +}
 +
@@ -4881,9 +5005,14 @@ index 0000000..4bf681a
 +
 +    u32 count = 0;
 +    s32 selIdx = -1;
++    s32 selCachedRooms = 0;
 +    const u64 nowMs = MonNowMs();
 +    {
 +        std::scoped_lock lk(g_mutex);
++        for (u32 i = 0; i < MONITOR_MAX_ROOMS; i++) {
++            if (g_roomCache[i].used)
++                selCachedRooms++;
++        }
 +        count = g_statCount;
 +        if (count > kStatMaxServers)
 +            count = kStatMaxServers;
@@ -4897,6 +5026,8 @@ index 0000000..4bf681a
 +            g_batch[i].hadRecentScan = (g_stats[i].lastScanMs != 0 &&
 +                                        nowMs >= g_stats[i].lastScanMs &&
 +                                        (nowMs - g_stats[i].lastScanMs) < 30000);
++            g_batch[i].prevRooms = g_stats[i].rooms > 0 ? g_stats[i].rooms : 0;
++            g_batch[i].rawOnline = -1;
 +            g_batch[i].online = -1;
 +            g_batch[i].rooms = -1;
 +            if (strcmp(g_batch[i].addr, selAddr) == 0)
@@ -4910,9 +5041,12 @@ index 0000000..4bf681a
 +        snprintf(g_batch[selIdx].host, sizeof(g_batch[selIdx].host), "%s", selHost);
 +        g_batch[selIdx].port = selPort;
 +        g_batch[selIdx].proto = DefaultProtoForHostPort(selHost, selPort);
++        g_batch[selIdx].rawOnline = -1;
 +        g_batch[selIdx].online = -1;
 +        g_batch[selIdx].rooms = -1;
 +    }
++    if (selIdx >= 0 && selCachedRooms > g_batch[selIdx].prevRooms)
++        g_batch[selIdx].prevRooms = selCachedRooms;
 +    g_batchCount = count;
 +    if (count == 0 || IoAbort())
 +        return;
@@ -5061,8 +5195,11 @@ index 0000000..4bf681a
 +            ok = ParseBatchHttpResponse(sl.raw, sl.restMode, targetQr, &retrySchema, &parseErr);
 +
 +        if (ok) {
-+            if (g_batch[idx].hadRecentScan && targetQr->online > 0)
++            g_batch[idx].rawOnline = targetQr->online;
++            if (g_batch[idx].hadRecentScan && targetQr->online > 0 &&
++                (targetQr->online >= 2 || (targetQr->roomN == 0 && g_batch[idx].prevRooms == 0))) {
 +                targetQr->online--;
++            }
 +            g_batch[idx].httpOk = true;
 +            g_batch[idx].httpErr = 0;
 +            g_batch[idx].online = targetQr->online;
@@ -5070,16 +5207,18 @@ index 0000000..4bf681a
 +            g_batch[idx].proto = sl.restMode ? ProtoRest : ProtoGraphql;
 +        } else {
 +            g_batch[idx].httpErr = parseErr;
-+            if (!sl.restMode && retrySchema && idx == selIdx && sl.gqlVariant + 1 < 4) {
-+                if (launchSlot(sl, idx, false, (u8)(sl.gqlVariant + 1)))
-+                    return;
-+            }
-+            if (!sl.triedRest) {
-+                if (launchSlot(sl, idx, true, 0))
-+                    return;
-+            } else if (!sl.triedGql) {
-+                if (launchSlot(sl, idx, false, 0))
-+                    return;
++            if (hasResponse) {
++                if (!sl.restMode && retrySchema && idx == selIdx && sl.gqlVariant + 1 < 4) {
++                    if (launchSlot(sl, idx, false, (u8)(sl.gqlVariant + 1)))
++                        return;
++                }
++                if (!sl.triedRest) {
++                    if (launchSlot(sl, idx, true, 0))
++                        return;
++                } else if (!sl.triedGql) {
++                    if (launchSlot(sl, idx, false, 0))
++                        return;
++                }
 +            }
 +        }
 +        assignNextServer(sl);
@@ -5247,16 +5386,19 @@ index 0000000..4bf681a
 +    if (IoAbort())
 +        return;
 +
-+    /* 收集所有 online > 0 且 HTTP 未给出房间的服务器,并发执行 UDP 房间扫描 */
++    /* 收集需要 UDP 房间扫描的服务器:
++     *   - 选中服务器:只要 HTTP 未给出房间且(rawOnline > 0 或已有缓存房间或 HTTP 偶发失败),一律做 UDP 扫描;
++     *   - 其余服务器:HTTP 成功且未返回房间,同时(online > 0 或上一轮存在房间 prevRooms > 0)时做 UDP 扫描。 */
 +    u32 scanIdxs[kStatMaxServers];
 +    u32 scanN = 0;
-+    if (selIdx >= 0 && g_batch[selIdx].httpOk &&
-+        g_batch[selIdx].online > 0 && g_batch[selIdx].rooms == 0) {
++    if (selIdx >= 0 && g_batch[selIdx].resolved && g_batch[selIdx].rooms <= 0 &&
++        (!g_batch[selIdx].httpOk || g_batch[selIdx].rawOnline > 0 ||
++         g_batch[selIdx].online > 0 || g_batch[selIdx].prevRooms > 0)) {
 +        scanIdxs[scanN++] = (u32)selIdx;
 +    }
 +    for (u32 i = 0; i < count; i++) {
-+        if ((s32)i != selIdx && g_batch[i].httpOk &&
-+            g_batch[i].online > 0 && g_batch[i].rooms == 0) {
++        if ((s32)i != selIdx && g_batch[i].httpOk && g_batch[i].rooms == 0 &&
++            (g_batch[i].online > 0 || g_batch[i].prevRooms > 0)) {
 +            scanIdxs[scanN++] = i;
 +        }
 +    }
@@ -5298,13 +5440,34 @@ index 0000000..4bf681a
 +                st.failCount = 0;
 +                st.online = selOnline;
 +                st.rooms = selRooms;
++                st.roomMissingSinceMs = 0;
 +                if (selLat > 0)
 +                    st.latencyMs = selLat;
 +                st.stampMs = nowMs;
 +            } else if (b.httpOk) {
 +                st.failCount = 0;
-+                st.online = b.online;
-+                st.rooms = b.rooms;
++                if (b.rooms > 0) {
++                    st.rooms = b.rooms;
++                    st.roomMissingSinceMs = 0;
++                    st.online = b.online >= b.rooms ? b.online : b.rooms;
++                } else if (st.rooms > 0 && b.rawOnline > 0) {
++                    /* 其它服务器房间同样享受 3 秒过期缓存,避免偶发 UDP 丢包让房间数闪烁 */
++                    if (st.roomMissingSinceMs == 0) {
++                        st.roomMissingSinceMs = nowMs;
++                    } else if (nowMs >= st.roomMissingSinceMs &&
++                               (nowMs - st.roomMissingSinceMs) >= kRoomExpireGraceMs) {
++                        st.rooms = 0;
++                        st.roomMissingSinceMs = 0;
++                    }
++                    if (st.rooms > 0)
++                        st.online = b.online >= st.rooms ? b.online : st.rooms;
++                    else
++                        st.online = b.online;
++                } else {
++                    st.rooms = b.rooms;
++                    st.roomMissingSinceMs = 0;
++                    st.online = b.online;
++                }
 +                if (b.latMs > 0)
 +                    st.latencyMs = b.latMs;
 +                st.stampMs = nowMs;
@@ -5500,6 +5663,10 @@ index 0000000..4bf681a
 +    if (g_scanUdpFd >= 0) {
 +        close(g_scanUdpFd);
 +        g_scanUdpFd = -1;
++    }
++    if (g_selScanUdpFd >= 0) {
++        close(g_selScanUdpFd);
++        g_selScanUdpFd = -1;
 +    }
 +    if (g_sockInited) {
 +        socketExit();
