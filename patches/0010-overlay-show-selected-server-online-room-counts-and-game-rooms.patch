@@ -1,4 +1,4 @@
-From d3a4b80b63708331e4cb46e818cc3a40bfd42ac5 Mon Sep 17 00:00:00 2001
+From a9cca357a890b238bf5e1b73e25a65b4400a8a59 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH] overlay: online counts/room list and relay management
@@ -91,7 +91,7 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
 - 合入分支服务器管理页 AddServerGui、添加/删除/恢复默认操作、列表重建与焦点恢复；服务器列表继续使用 patch 10 的自绘 ServerRow，保留名称/地址布局、右侧延迟和在线/房间数字间距。
 - 游戏房间行改为与服务器行同高的 70px 固定双排布局：上排游戏标题、下排玩家名常显、人数右对齐；长名单在下排窗口内滚动。MonitorFrame 下方同时显示版本，空版本显示“版本未知”。
 - 最大容量统一为 32；出厂及恢复默认列表为 12 条，0009 中移除 relay.cfg 的「中国·江苏(2) yordon.cn:11451」；17 条添加候选目录仍保留该服务器作为可选候选，另有 4 条备用节点。
-- 在既有补丁 0010 内增加 room advertiseData 标题识别、UDP NetworkInfo 广告数据解析、旧 GraphQL schema 回退及纯主机回归测试；未识别 all-F 房间安全显示「未知游戏」，不读取本机 ProgramId。
+- 在既有补丁 0010 内根源修复接口字段缺失：房间解析兼容 contentId/content_id/titleId 等标题 ID 别名、game 字符串与嵌套对象；缺 ID/all-F 时先尝试该房间自己的 advertiseData，再使用接口提供的游戏名；GraphQL 按 schema 回退标题/广告/节点字段，按需读取 game 标量或对象并缓存字段支持状态。未知仍安全回退；不读取本机前台 ProgramId。纯主机回归测试覆盖 ID 规范化、房间游戏名、广告识别、未知负例及 GraphQL 查询构造/字段协商。
 
 Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-TONYX9000
 
@@ -121,21 +121,25 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
  .github/workflows/release.yml                 |   44 +-
  Makefile                                      |    6 +
  overlay/Makefile                              |    9 +-
- overlay/source/main.cpp                       | 1029 ++++++-
- overlay/source/monitor.cpp                    | 2435 +++++++++++++++++
+ overlay/source/main.cpp                       | 1029 +++++-
+ overlay/source/monitor.cpp                    | 2777 +++++++++++++++++
  overlay/source/monitor.hpp                    |   71 +
+ overlay/source/monitor_graphql_compat.hpp     |  203 ++
  overlay/source/monitor_player_filter.hpp      |   32 +
  overlay/source/monitor_target_generation.hpp  |   22 +
- overlay/source/monitor_title_resolver.hpp     |  248 ++
+ overlay/source/monitor_title_resolver.hpp     |  414 +++
+ overlay/tests/monitor_graphql_compat_test.cpp |   85 +
  overlay/tests/monitor_player_filter_test.cpp  |   29 +
  .../tests/monitor_target_generation_test.cpp  |   22 +
- overlay/tests/monitor_title_resolver_test.cpp |  137 +
- 15 files changed, 4013 insertions(+), 158 deletions(-)
+ overlay/tests/monitor_title_resolver_test.cpp |  173 +
+ 17 files changed, 4845 insertions(+), 158 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
+ create mode 100644 overlay/source/monitor_graphql_compat.hpp
  create mode 100644 overlay/source/monitor_player_filter.hpp
  create mode 100644 overlay/source/monitor_target_generation.hpp
  create mode 100644 overlay/source/monitor_title_resolver.hpp
+ create mode 100644 overlay/tests/monitor_graphql_compat_test.cpp
  create mode 100644 overlay/tests/monitor_player_filter_test.cpp
  create mode 100644 overlay/tests/monitor_target_generation_test.cpp
  create mode 100644 overlay/tests/monitor_title_resolver_test.cpp
@@ -1529,10 +1533,10 @@ index 8e07c19..8eea790 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..c61cd6d
+index 0000000..5c0eb6f
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2435 @@
+@@ -0,0 +1,2777 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -1543,6 +1547,7 @@ index 0000000..c61cd6d
 + */
 +#include "monitor.hpp"
 +#include "monitor_title_resolver.hpp"
++#include "monitor_graphql_compat.hpp"
 +#include "monitor_player_filter.hpp"
 +#include "monitor_target_generation.hpp"
 +
@@ -1570,6 +1575,8 @@ index 0000000..c61cd6d
 +#include <string>
 +#include <curl/curl.h>
 +
++using namespace MonitorGraphqlCompat;
++
 +/* ------------------------------------------------------------------ */
 +/* 常量                                                                */
 +/* ------------------------------------------------------------------ */
@@ -1586,26 +1593,15 @@ index 0000000..c61cd6d
 +    "http://ghfast.top/https://raw.githubusercontent.com/",
 +};
 +
-+static const char *kGraphqlQuery =
-+    "query PublicRoomSnapshot { serverInfo { online idle } room {"
-+    " sessionId contentId advertiseData hostPlayerName nodeCount nodeCountMax"
-+    " nodes { playerName isConnected } } }";
-+
-+/* Query variants keep older custom GraphQL schemas working while preferring
-+ * both per-room title data and NodeInfo.isConnected. The latter is essential:
-+ * servers may retain names in disconnected node slots. */
-+static const char *kGraphqlQueryNoAdvert =
-+    "query PublicRoomSnapshot { serverInfo { online idle } room {"
-+    " sessionId contentId hostPlayerName nodeCount nodeCountMax"
-+    " nodes { playerName isConnected } } }";
-+static const char *kGraphqlQueryNoConnection =
-+    "query PublicRoomSnapshot { serverInfo { online idle } room {"
-+    " sessionId contentId advertiseData hostPlayerName nodeCount nodeCountMax"
-+    " nodes { playerName } } }";
-+static const char *kGraphqlQueryOldest =
-+    "query PublicRoomSnapshot { serverInfo { online idle } room {"
-+    " sessionId contentId hostPlayerName nodeCount nodeCountMax"
-+    " nodes { playerName } } }";
++struct GraphqlSchemaCacheEntry {
++    char host[96] = {};
++    u16 port = 0;
++    bool known = false;
++    GraphqlQueryFields fields = {};
++};
++static GraphqlSchemaCacheEntry g_graphqlSchemaCache[MONITOR_MAX_SERVERS] = {};
++static u32 g_graphqlSchemaCacheCursor = 0;
++static std::mutex g_graphqlSchemaCacheMutex;
 +
 +static const char *kSaveDir         = "sdmc:/config/ldn_mitm";
 +static const char *kSaveChinesePath = "sdmc:/config/ldn_mitm/chinese_db.json";
@@ -1981,9 +1977,24 @@ index 0000000..c61cd6d
 +/* 同义 key 依次尝试(如 contentId/content_id) */
 +static bool JsonGetStrAny(const char *obj, const char *k1, const char *k2,
 +                          char *out, size_t n) {
-+    if (JsonGetStr(obj, k1, out, n))
++    if (JsonGetStr(obj, k1, out, n) && out[0])
 +        return true;
-+    return k2 && JsonGetStr(obj, k2, out, n);
++    return k2 && JsonGetStr(obj, k2, out, n) && out[0];
++}
++
++static bool JsonGetStrAnyList(const char *obj, const char *const *keys,
++                              size_t keyN, char *out, size_t n) {
++    if (!out || n == 0)
++        return false;
++    out[0] = 0;
++    if (!obj || !keys)
++        return false;
++    for (size_t i = 0; i < keyN; ++i) {
++        if (keys[i] && JsonGetStr(obj, keys[i], out, n) && out[0])
++            return true;
++    }
++    out[0] = 0;
++    return false;
 +}
 +
 +/* ------------------------------------------------------------------ */
@@ -2976,52 +2987,139 @@ index 0000000..c61cd6d
 +    u32 roomN = 0;
 +    MonitorRoom rooms[MONITOR_MAX_ROOMS];
 +};
++static QueryResult g_graphqlCandidateResult; /* single worker; keep the room buffer off stack */
 +
-+/* Room-specific advertiseData resolves all-F communication-ID sentinels.
-+ * Never substitute the local foreground ProgramId for a remote room: a server
-+ * can list several games, and that fallback would mislabel every such room. */
-+static void FormatGameName(const char *contentId, const char *advertiseData,
++/* A valid nested room ID replaces only an invalid or all-F top-level value. */
++static void PreferRoomTitleId(char *current, size_t currentN,
++                              const char *candidate) {
++    char oldId[17] = {}, newId[17] = {};
++    const bool oldValid = MonitorTitleResolver::NormalizeTitleId(
++        current, oldId, sizeof(oldId));
++    const bool newValid = MonitorTitleResolver::NormalizeTitleId(
++        candidate, newId, sizeof(newId));
++    if (newValid && (!oldValid ||
++        (MonitorTitleResolver::IsUnknownTitleId(oldId) &&
++         !MonitorTitleResolver::IsUnknownTitleId(newId))))
++        snprintf(current, currentN, "%s", newId);
++}
++
++static bool IsUnknownGameLabel(const char *label) {
++    return !label || !label[0] ||
++           strcmp(label, "未知游戏") == 0 || strcmp(label, "未知遊戲") == 0 ||
++           strncmp(label, "未知", 6) == 0;
++}
++
++static int RoomGameLabelQuality(const char *label) {
++    if (IsUnknownGameLabel(label))
++        return 0;
++    char titleId[17] = {};
++    return MonitorTitleResolver::NormalizeTitleId(label, titleId, sizeof(titleId)) ? 1 : 2;
++}
++
++/* Resolve from this room's IDs/name/advertisement only. Never use the local
++ * foreground ProgramId: a remote server can list several unrelated games. */
++static void FormatGameName(const char *contentId, const char *gameValue,
++                           const char *gameName, const char *advertiseData,
 +                           const char *hostPlayerName, char *out, size_t n) {
-+    char up[20] = {};
-+    size_t len = 0;
-+    for (const char *p = contentId; p && *p && len < 16; p++) {
-+        char c = *p;
-+        if (c >= 'a' && c <= 'f') c = (char)(c - 'a' + 'A');
-+        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'))
-+            up[len++] = c;
-+    }
-+    up[len] = 0;
-+    if (len != 16) {
-+        snprintf(out, n, "%s", T_STR("未知游戏", "未知遊戲"));
++    char normalizedName[52] = {};
++    if (!MonitorTitleResolver::NormalizeRoomGameName(
++            gameName, normalizedName, sizeof(normalizedName)))
++        MonitorTitleResolver::NormalizeRoomGameName(
++            gameValue, normalizedName, sizeof(normalizedName));
++
++    char titleId[17] = {};
++    const bool hasTitleId = MonitorTitleResolver::ResolveRoomTitleId(
++        contentId, gameValue, advertiseData, hostPlayerName,
++        titleId, sizeof(titleId));
++    if (hasTitleId && strcmp(titleId, "0100A3D008C5C000") == 0) {
++        /* Violet also advertises Scarlet's communication ID; the room payload
++         * identifies the shared family, not a specific version. */
++        snprintf(out, n, "%s", T_STR("宝可梦 朱/紫", "寶可夢 朱/紫"));
 +        return;
 +    }
 +
-+    bool allOnes = true;
-+    for (size_t i = 0; i < 16; i++)
-+        allOnes &= (up[i] == 'F');
-+    if (allOnes) {
-+        char resolved[20] = {};
-+        if (!MonitorTitleResolver::ResolveAdvertisedTitleId(
-+                advertiseData, hostPlayerName, resolved, sizeof(resolved))) {
-+            snprintf(out, n, "%s", T_STR("未知游戏", "未知遊戲"));
++    if (hasTitleId) {
++        const u64 key = TitleKeyPack(titleId);
++        size_t nameLen = 0;
++        const char *mappedName = TitleLookup(key, &nameLen);
++        if (mappedName && mappedName[0]) {
++            snprintf(out, n, "%s", mappedName);
 +            return;
 +        }
-+        /* Violet also advertises Scarlet's communication ID, so the room
-+         * payload identifies the shared Scarlet/Violet family, not a version. */
-+        if (strcmp(resolved, "0100A3D008C5C000") == 0) {
-+            snprintf(out, n, "%s", T_STR("宝可梦 朱/紫", "寶可夢 朱/紫"));
++        if (normalizedName[0]) {
++            snprintf(out, n, "%s", normalizedName);
 +            return;
 +        }
-+        snprintf(up, sizeof(up), "%s", resolved);
++        snprintf(out, n, "%s", titleId); /* 未映射:显示房间提供的标题 ID */
++        return;
 +    }
 +
-+    u64 key = TitleKeyPack(up);
-+    size_t nameLen = 0;
-+    const char *name = TitleLookup(key, &nameLen);
-+    if (name && name[0])
-+        snprintf(out, n, "%s", name);
-+    else
-+        snprintf(out, n, "%s", up);      /* 未映射:直接显示标题 ID */
++    if (normalizedName[0]) {
++        snprintf(out, n, "%s", normalizedName);
++        return;
++    }
++    snprintf(out, n, "%s", T_STR("未知游戏", "未知遊戲"));
++}
++
++static void ReadRoomTitleFields(const char *room, char *contentId,
++                                size_t contentIdN, char *gameValue,
++                                size_t gameValueN, char *gameName,
++                                size_t gameNameN) {
++    static const char *const kTitleIdFields[] = {
++        "contentId", "content_id", "contentID", "titleId", "title_id", "titleID",
++        "programId", "program_id", "applicationId", "application_id",
++        "gameId", "game_id", "localCommunicationId", "local_communication_id",
++        "communicationId", "communication_id", "nacpId", "nacp_id",
++    };
++    static const char *const kGameNameFields[] = {
++        "gameName", "game_name", "titleName", "title_name",
++        "displayName", "display_name", "title",
++    };
++    static const char *const kGameContainers[] = {
++        "game", "title", "application", "gameInfo", "game_info",
++        "titleInfo", "title_info",
++    };
++    static const char *const kNestedTitleIdFields[] = {
++        "contentId", "content_id", "contentID", "titleId", "title_id", "titleID",
++        "programId", "program_id", "applicationId", "application_id",
++        "gameId", "game_id", "localCommunicationId", "local_communication_id",
++        "communicationId", "communication_id", "nacpId", "nacp_id", "id",
++    };
++    static const char *const kNestedGameNameFields[] = {
++        "name", "gameName", "game_name", "titleName", "title_name",
++        "displayName", "display_name", "label", "title",
++    };
++
++    JsonGetStrAnyList(room, kTitleIdFields,
++                      sizeof(kTitleIdFields) / sizeof(kTitleIdFields[0]),
++                      contentId, contentIdN);
++    JsonGetStrAnyList(room, kGameNameFields,
++                      sizeof(kGameNameFields) / sizeof(kGameNameFields[0]),
++                      gameName, gameNameN);
++    JsonGetStr(room, "game", gameValue, gameValueN);
++
++    for (size_t i = 0; i < sizeof(kGameContainers) / sizeof(kGameContainers[0]); ++i) {
++        const char *nested = JsonGet(room, kGameContainers[i]);
++        if (!nested || *nested != '{')
++            continue;
++        char nestedId[32] = {};
++        char nestedName[128] = {};
++        if (JsonGetStrAnyList(nested, kNestedTitleIdFields,
++                              sizeof(kNestedTitleIdFields) / sizeof(kNestedTitleIdFields[0]),
++                              nestedId, sizeof(nestedId)))
++            PreferRoomTitleId(contentId, contentIdN, nestedId);
++        char normalizedTopName[128] = {};
++        const bool hasUsableTopName = MonitorTitleResolver::NormalizeRoomGameName(
++            gameName, normalizedTopName, sizeof(normalizedTopName));
++        if (!hasUsableTopName)
++            JsonGetStrAnyList(nested, kNestedGameNameFields,
++                              sizeof(kNestedGameNameFields) / sizeof(kNestedGameNameFields[0]),
++                              nestedName, sizeof(nestedName));
++        char normalizedNestedName[128] = {};
++        if (!hasUsableTopName && MonitorTitleResolver::NormalizeRoomGameName(
++                nestedName, normalizedNestedName, sizeof(normalizedNestedName)))
++            snprintf(gameName, gameNameN, "%s", normalizedNestedName);
++    }
 +}
 +
 +/* room 对象数组 -> rooms[](graphql 与 rest 共用字段口径) */
@@ -3033,15 +3131,19 @@ index 0000000..c61cd6d
 +    while (qr->roomN < MONITOR_MAX_ROOMS && *p == '{') {
 +        MonitorRoom &r = qr->rooms[qr->roomN];
 +        memset(&r, 0, sizeof(r));
-+        char cid[24] = {};
++        char cid[32] = {};
++        char gameValue[128] = {};
++        char gameName[128] = {};
 +        char advertiseData[MonitorTitleResolver::kAdvertiseDataMaxHex + 1] = {};
 +        char hostName[MONITOR_PLAYER_LEN + 1] = {};
-+        JsonGetStrAny(p, "contentId", "content_id", cid, sizeof(cid));
++        ReadRoomTitleFields(p, cid, sizeof(cid), gameValue, sizeof(gameValue),
++                            gameName, sizeof(gameName));
 +        JsonGetStrAny(p, "advertiseData", "advertise_data",
 +                      advertiseData, sizeof(advertiseData));
 +        JsonGetStrAny(p, "hostPlayerName", "host_player_name",
 +                      hostName, sizeof(hostName));
-+        FormatGameName(cid, advertiseData, hostName, r.game, sizeof(r.game));
++        FormatGameName(cid, gameValue, gameName, advertiseData, hostName,
++                       r.game, sizeof(r.game));
 +        JsonGetStrAny(p, "sessionId", "session_id", r.sessionId, sizeof(r.sessionId));
 +
 +        u32 v = 0;
@@ -3132,34 +3234,114 @@ index 0000000..c61cd6d
 +    }
 +}
 +
-+static bool QueryGraphqlRequest(const char *host, u16 port, const char *query,
-+                                QueryResult *qr, bool *retryLegacy) {
++static GraphqlSchemaCacheEntry GraphqlSchemaFor(const char *host, u16 port) {
++    std::lock_guard<std::mutex> lock(g_graphqlSchemaCacheMutex);
++    for (const auto &entry : g_graphqlSchemaCache) {
++        if (entry.known && entry.port == port && strcmp(entry.host, host) == 0)
++            return entry;
++    }
++    return GraphqlSchemaCacheEntry{};
++}
++
++static void SaveGraphqlSchema(const char *host, u16 port,
++                              const GraphqlQueryFields &fields) {
++    std::lock_guard<std::mutex> lock(g_graphqlSchemaCacheMutex);
++    u32 slot = MONITOR_MAX_SERVERS;
++    for (u32 i = 0; i < MONITOR_MAX_SERVERS; ++i) {
++        if (g_graphqlSchemaCache[i].known && g_graphqlSchemaCache[i].port == port &&
++            strcmp(g_graphqlSchemaCache[i].host, host) == 0) {
++            slot = i;
++            break;
++        }
++        if (slot == MONITOR_MAX_SERVERS && !g_graphqlSchemaCache[i].known)
++            slot = i;
++    }
++    if (slot == MONITOR_MAX_SERVERS) {
++        slot = g_graphqlSchemaCacheCursor++ % MONITOR_MAX_SERVERS;
++    }
++    GraphqlSchemaCacheEntry entry{};
++    snprintf(entry.host, sizeof(entry.host), "%s", host);
++    entry.port = port;
++    entry.known = true;
++    entry.fields = fields;
++    g_graphqlSchemaCache[slot] = entry;
++}
++
++static GraphqlFieldFailure GraphqlResponseFailure(
++        const char *response, const GraphqlQueryFields &fields) {
++    const char *errors = JsonGet(response, "errors");
++    if (!errors)
++        return kGraphqlFailureNone;
++    if (*errors != '[')
++        return kGraphqlFailureOther;
++    const char *p = JsWs(errors + 1);
++    if (*p == ']')
++        return kGraphqlFailureNone;
++    while (*p && *p != ']') {
++        const char *next = JsonSkip(p, 0);
++        if (!next)
++            return kGraphqlFailureOther;
++        if (*p == '{') {
++            char message[512] = {};
++            if (JsonGetStr(p, "message", message, sizeof(message))) {
++                const GraphqlFieldFailure failure =
++                    GraphqlFailureForMessage(message, fields);
++                if (failure != kGraphqlFailureOther)
++                    return failure;
++            }
++        }
++        p = JsWs(next);
++        if (*p == ',')
++            p = JsWs(p + 1);
++        else
++            break;
++    }
++    return kGraphqlFailureOther;
++}
++
++static bool QueryGraphqlRequest(const char *host, u16 port,
++                                const GraphqlQueryFields &fields,
++                                QueryResult *qr, bool *retryLegacy,
++                                GraphqlFieldFailure *failureOut) {
 +    if (retryLegacy)
 +        *retryLegacy = false;
++    if (failureOut)
++        *failureOut = kGraphqlFailureNone;
++    if (!qr)
++        return false;
++    *qr = QueryResult{};
++
 +    char url[160];
 +    snprintf(url, sizeof(url), "http://%s:%u/", host, (unsigned)port);
++    const std::string query = BuildGraphqlQuery(fields);
 +    std::string payload = "{\"query\":\"";
 +    payload += query;                    /* 查询串无引号/反斜杠,可直接拼接 */
 +    payload += "\"}";
 +    std::string resp;
-+    if (!HttpPostJson(url, payload.c_str(), &resp, 6000, kMaxHttpBody)) {
-+        /* g_httpErr >= 500 && < 600 表示 HTTP 4xx (错误码 = 100 + status);
-+         * 这种响应可能是旧 schema 的字段校验错误,允许旧查询再试一次。 */
-+        if (retryLegacy && g_httpErr >= 500 && g_httpErr < 600)
++    const bool httpOk = HttpPostJson(url, payload.c_str(), &resp, 6000, kMaxHttpBody);
++    GraphqlFieldFailure failure = GraphqlResponseFailure(resp.c_str(), fields);
++    if (!httpOk) {
++        /* A JSON GraphQL validation body can identify missing schema fields.
++         * Plain 404/405 responses are REST endpoints, so do not fan out many
++         * schema probes against them. */
++        if (failureOut)
++            *failureOut = failure;
++        if (retryLegacy && failure != kGraphqlFailureNone)
 +            *retryLegacy = true;
 +        return false;
 +    }
-+
-+    /* GraphQL 通常以 HTTP 200 返回字段校验错误;网络超时/断连则直接
-+     * 交给 REST 回退,避免额外等待一个超时周期。 */
-+    const char *errors = JsonGet(resp.c_str(), "errors");
-+    if (errors && *errors == '[' && *JsWs(errors + 1) != ']') {
++    if (failure != kGraphqlFailureNone) {
++        if (failureOut)
++            *failureOut = failure;
 +        if (retryLegacy)
 +            *retryLegacy = true;
 +        return false;
 +    }
++
 +    const char *data = JsonGet(resp.c_str(), "data");
 +    if (!data) {
++        if (failureOut)
++            *failureOut = kGraphqlFailureOther;
 +        if (retryLegacy)
 +            *retryLegacy = true;
 +        return false;
@@ -3167,6 +3349,8 @@ index 0000000..c61cd6d
 +    u32 v = 0;
 +    const char *info = JsonGet(data, "serverInfo");
 +    if (!info || !JsonGetU32(info, "online", &v)) {
++        if (failureOut)
++            *failureOut = kGraphqlFailureOther;
 +        if (retryLegacy)
 +            *retryLegacy = true;
 +        return false;
@@ -3178,25 +3362,186 @@ index 0000000..c61cd6d
 +    return true;
 +}
 +
-+static bool QueryGraphql(const char *host, u16 port, QueryResult *qr) {
-+    /* Prefer title data + connected-node flags. On schema validation errors,
-+     * progressively drop optional fields; transport errors still go straight
-+     * to REST rather than paying for another timeout. */
-+    bool retry = false;
-+    if (QueryGraphqlRequest(host, port, kGraphqlQuery, qr, &retry))
-+        return true;
-+    if (!retry)
-+        return false;
++static void MergeGraphqlGameLabels(QueryResult *base, const QueryResult *enriched) {
++    if (!base || !enriched)
++        return;
++    for (u32 i = 0; i < enriched->roomN; ++i) {
++        const MonitorRoom &candidate = enriched->rooms[i];
++        s32 match = -1;
++        if (!candidate.sessionId[0])
++            continue;
++        for (u32 j = 0; j < base->roomN; ++j) {
++            if (base->rooms[j].sessionId[0] &&
++                strcmp(base->rooms[j].sessionId, candidate.sessionId) == 0) {
++                match = static_cast<s32>(j);
++                break;
++            }
++        }
++        if (match < 0)
++            continue;
++        MonitorRoom &room = base->rooms[match];
++        if (RoomGameLabelQuality(candidate.game) > RoomGameLabelQuality(room.game))
++            snprintf(room.game, sizeof(room.game), "%s", candidate.game);
++    }
++}
 +
-+    const char *fallback[] = { kGraphqlQueryNoAdvert,
-+                               kGraphqlQueryNoConnection,
-+                               kGraphqlQueryOldest };
-+    for (const char *query : fallback) {
-+        bool retryNext = false;
-+        if (QueryGraphqlRequest(host, port, query, qr, &retryNext))
++static bool RoomNeedsGraphqlGame(const QueryResult *qr) {
++    if (!qr)
++        return false;
++    for (u32 i = 0; i < qr->roomN; ++i) {
++        if (RoomGameLabelQuality(qr->rooms[i].game) < 2)
 +            return true;
-+        if (!retryNext)
++    }
++    return false;
++}
++
++static void QueryGraphqlGame(const char *host, u16 port,
++                             const GraphqlQueryFields &baseFields,
++                             QueryResult *base) {
++    if (!base || !RoomNeedsGraphqlGame(base) || baseFields.gameSubfieldsDone ||
++        baseFields.game == kGraphqlGameUnsupported ||
++        baseFields.game == kGraphqlGameScalar)
++        return;
++
++    u8 lastSupportedMode = baseFields.game;
++    u8 mode = baseFields.game == kGraphqlGameNone
++        ? static_cast<u8>(kGraphqlGameScalar)
++        : NextGraphqlGameObjectField(baseFields.game);
++    if (mode == kGraphqlGameUnsupported) {
++        GraphqlQueryFields finished = baseFields;
++        finished.gameSubfieldsDone = true;
++        SaveGraphqlSchema(host, port, finished);
++        return;
++    }
++
++    for (int attempt = 0; attempt < 5; ++attempt) {
++        GraphqlQueryFields fields = baseFields;
++        fields.game = mode;
++        bool retry = false;
++        GraphqlFieldFailure failure = kGraphqlFailureNone;
++        if (QueryGraphqlRequest(host, port, fields, &g_graphqlCandidateResult,
++                                &retry, &failure)) {
++            SaveGraphqlSchema(host, port, fields);
++            lastSupportedMode = mode;
++            MergeGraphqlGameLabels(base, &g_graphqlCandidateResult);
++            if (mode == kGraphqlGameScalar || !RoomNeedsGraphqlGame(base))
++                return;
++            mode = NextGraphqlGameObjectField(mode);
++            if (mode != kGraphqlGameUnsupported)
++                continue;
++            GraphqlQueryFields finished = fields;
++            finished.gameSubfieldsDone = true;
++            SaveGraphqlSchema(host, port, finished);
++            return;
++        }
++        if (!retry)
++            return;
++        if (mode == kGraphqlGameScalar &&
++            failure == kGraphqlFailureGameNeedsObject) {
++            mode = kGraphqlGameObjectName;
++            continue;
++        }
++        if (failure == kGraphqlFailureGameSubfield &&
++            mode != kGraphqlGameScalar) {
++            mode = NextGraphqlGameObjectField(mode);
++            if (mode != kGraphqlGameUnsupported)
++                continue;
++            if (lastSupportedMode == kGraphqlGameNone) {
++                GraphqlQueryFields unsupported = baseFields;
++                unsupported.game = kGraphqlGameUnsupported;
++                SaveGraphqlSchema(host, port, unsupported);
++            } else {
++                GraphqlQueryFields finished = baseFields;
++                finished.game = lastSupportedMode;
++                finished.gameSubfieldsDone = true;
++                SaveGraphqlSchema(host, port, finished);
++            }
++            return;
++        }
++        if (failure == kGraphqlFailureGame) {
++            GraphqlQueryFields unsupported = baseFields;
++            unsupported.game = kGraphqlGameUnsupported;
++            SaveGraphqlSchema(host, port, unsupported);
++        }
++        return;
++    }
++    if (lastSupportedMode == kGraphqlGameNone) {
++        GraphqlQueryFields unsupported = baseFields;
++        unsupported.game = kGraphqlGameUnsupported;
++        SaveGraphqlSchema(host, port, unsupported);
++    }
++}
++
++static bool QueryGraphql(const char *host, u16 port, QueryResult *qr) {
++    if (!qr)
++        return false;
++    const GraphqlSchemaCacheEntry cached = GraphqlSchemaFor(host, port);
++    GraphqlQueryFields fields = cached.known ? cached.fields : GraphqlQueryFields{};
++
++    /* Field errors are cheap schema-validation failures; transport errors are
++     * not retried. Negotiate common title aliases, ad-data aliases and old
++     * NodeInfo connection fields, then cache the working shape per endpoint. */
++    for (int attempt = 0; attempt < 24; ++attempt) {
++        bool retry = false;
++        GraphqlFieldFailure failure = kGraphqlFailureNone;
++        if (QueryGraphqlRequest(host, port, fields, qr, &retry, &failure)) {
++            SaveGraphqlSchema(host, port, fields);
++            QueryGraphqlGame(host, port, fields, qr);
++            return true;
++        }
++        if (!retry)
 +            return false;
++
++        switch (failure) {
++            case kGraphqlFailureTitle:
++                if (fields.title != kGraphqlTitleNone) {
++                    fields.title = NextGraphqlTitleField(fields.title);
++                    break;
++                }
++                return false;
++            case kGraphqlFailureAdvertise:
++                if (fields.advertise != kGraphqlAdvertiseNone) {
++                    fields.advertise = NextGraphqlAdvertiseField(fields.advertise);
++                    break;
++                }
++                return false;
++            case kGraphqlFailureConnection:
++                if (fields.connection != kGraphqlConnectionNone) {
++                    fields.connection = NextGraphqlConnectionField(fields.connection);
++                    break;
++                }
++                return false;
++            case kGraphqlFailureGameNeedsObject:
++                if (fields.game == kGraphqlGameScalar) {
++                    fields.game = kGraphqlGameObjectName;
++                    fields.gameSubfieldsDone = false;
++                    break;
++                }
++                fields.game = kGraphqlGameUnsupported;
++                break;
++            case kGraphqlFailureGame:
++                fields.game = kGraphqlGameUnsupported;
++                break;
++            case kGraphqlFailureGameSubfield:
++                if (fields.game >= kGraphqlGameObjectName &&
++                    fields.game <= kGraphqlGameObjectId) {
++                    fields.game = NextGraphqlGameObjectField(fields.game);
++                    fields.gameSubfieldsDone = false;
++                    break;
++                }
++                return false;
++            case kGraphqlFailureOther:
++            case kGraphqlFailureNone:
++            default:
++                if (fields.advertise != kGraphqlAdvertiseNone) {
++                    fields.advertise = NextGraphqlAdvertiseField(fields.advertise);
++                } else if (fields.connection != kGraphqlConnectionNone) {
++                    fields.connection = NextGraphqlConnectionField(fields.connection);
++                } else {
++                    return false;
++                }
++                break;
++        }
 +    }
 +    return false;
 +}
@@ -3281,7 +3626,8 @@ index 0000000..c61cd6d
 +    char hostName[MONITOR_PLAYER_LEN + 1] = {};
 +    memcpy(hostName, p + 0x74, MONITOR_PLAYER_LEN);
 +    hostName[MONITOR_PLAYER_LEN] = 0;
-+    FormatGameName(cid, advertiseHex, hostName, out->game, sizeof(out->game));
++    FormatGameName(cid, nullptr, nullptr, advertiseHex, hostName,
++                   out->game, sizeof(out->game));
 +
 +    u32 maxN = p[0x66];
 +    u32 cnt = p[0x67];
@@ -4045,6 +4391,215 @@ index 0000000..3e9ee8a
 +
 +/* 诊断日志:写 sdmc:/config/ldn_mitm/monitor.log(UI 侧打点用)。 */
 +void MonitorLog(const char *msg);
+diff --git a/overlay/source/monitor_graphql_compat.hpp b/overlay/source/monitor_graphql_compat.hpp
+new file mode 100644
+index 0000000..b356521
+--- /dev/null
++++ b/overlay/source/monitor_graphql_compat.hpp
+@@ -0,0 +1,203 @@
++#pragma once
++
++#include <string>
++#include <string.h>
++
++/* Pure GraphQL schema negotiation helpers. Kept independent of Switch APIs so
++ * host tests can exercise query construction and field-error fallbacks. */
++namespace MonitorGraphqlCompat {
++
++enum GraphqlTitleField : unsigned char {
++    kGraphqlTitleNone = 0,
++    kGraphqlTitleContentId,
++    kGraphqlTitleContentIdSnake,
++    kGraphqlTitleId,
++    kGraphqlTitleIdSnake,
++    kGraphqlTitleProgramId,
++    kGraphqlTitleProgramIdSnake,
++    kGraphqlTitleApplicationId,
++    kGraphqlTitleApplicationIdSnake,
++    kGraphqlTitleGameId,
++    kGraphqlTitleGameIdSnake,
++    kGraphqlTitleLocalCommunicationId,
++    kGraphqlTitleLocalCommunicationIdSnake,
++    kGraphqlTitleCommunicationId,
++    kGraphqlTitleCommunicationIdSnake,
++};
++enum GraphqlAdvertiseField : unsigned char {
++    kGraphqlAdvertiseNone = 0,
++    kGraphqlAdvertiseData,
++    kGraphqlAdvertiseDataSnake,
++};
++enum GraphqlConnectionField : unsigned char {
++    kGraphqlConnectionNone = 0,
++    kGraphqlConnectionIsConnected,
++    kGraphqlConnectionIsConnectedSnake,
++};
++enum GraphqlGameField : unsigned char {
++    kGraphqlGameNone = 0,
++    kGraphqlGameScalar,
++    kGraphqlGameObjectName,
++    kGraphqlGameObjectContentId,
++    kGraphqlGameObjectTitleId,
++    kGraphqlGameObjectId,
++    kGraphqlGameUnsupported,
++};
++enum GraphqlFieldFailure : unsigned char {
++    kGraphqlFailureNone = 0,
++    kGraphqlFailureTitle,
++    kGraphqlFailureAdvertise,
++    kGraphqlFailureConnection,
++    kGraphqlFailureGameNeedsObject,
++    kGraphqlFailureGame,
++    kGraphqlFailureGameSubfield,
++    kGraphqlFailureOther,
++};
++struct GraphqlQueryFields {
++    unsigned char title = kGraphqlTitleContentId;
++    unsigned char advertise = kGraphqlAdvertiseData;
++    unsigned char connection = kGraphqlConnectionIsConnected;
++    unsigned char game = kGraphqlGameNone;
++    bool gameSubfieldsDone = false;
++};
++
++inline const char *GraphqlTitleFieldName(unsigned char field) {
++    switch (field) {
++        case kGraphqlTitleContentId: return "contentId";
++        case kGraphqlTitleContentIdSnake: return "content_id";
++        case kGraphqlTitleId: return "titleId";
++        case kGraphqlTitleIdSnake: return "title_id";
++        case kGraphqlTitleProgramId: return "programId";
++        case kGraphqlTitleProgramIdSnake: return "program_id";
++        case kGraphqlTitleApplicationId: return "applicationId";
++        case kGraphqlTitleApplicationIdSnake: return "application_id";
++        case kGraphqlTitleGameId: return "gameId";
++        case kGraphqlTitleGameIdSnake: return "game_id";
++        case kGraphqlTitleLocalCommunicationId: return "localCommunicationId";
++        case kGraphqlTitleLocalCommunicationIdSnake: return "local_communication_id";
++        case kGraphqlTitleCommunicationId: return "communicationId";
++        case kGraphqlTitleCommunicationIdSnake: return "communication_id";
++        default: return nullptr;
++    }
++}
++
++inline const char *GraphqlAdvertiseFieldName(unsigned char field) {
++    switch (field) {
++        case kGraphqlAdvertiseData: return "advertiseData";
++        case kGraphqlAdvertiseDataSnake: return "advertise_data";
++        default: return nullptr;
++    }
++}
++
++inline const char *GraphqlConnectionFieldName(unsigned char field) {
++    switch (field) {
++        case kGraphqlConnectionIsConnected: return "isConnected";
++        case kGraphqlConnectionIsConnectedSnake: return "is_connected";
++        default: return nullptr;
++    }
++}
++
++inline const char *GraphqlGameSubfieldName(unsigned char gameField) {
++    switch (gameField) {
++        case kGraphqlGameObjectName: return "name";
++        case kGraphqlGameObjectContentId: return "contentId";
++        case kGraphqlGameObjectTitleId: return "titleId";
++        case kGraphqlGameObjectId: return "id";
++        default: return nullptr;
++    }
++}
++
++inline std::string BuildGraphqlQuery(const GraphqlQueryFields &fields) {
++    std::string query = "query PublicRoomSnapshot { serverInfo { online idle } room { sessionId";
++    if (const char *field = GraphqlTitleFieldName(fields.title)) {
++        query += ' ';
++        query += field;
++    }
++    if (const char *field = GraphqlAdvertiseFieldName(fields.advertise)) {
++        query += ' ';
++        query += field;
++    }
++    query += " hostPlayerName nodeCount nodeCountMax";
++    if (fields.game == kGraphqlGameScalar)
++        query += " game";
++    else if (const char *subfield = GraphqlGameSubfieldName(fields.game)) {
++        query += " game { ";
++        query += subfield;
++        query += " }";
++    }
++    query += " nodes { playerName";
++    if (const char *field = GraphqlConnectionFieldName(fields.connection)) {
++        query += ' ';
++        query += field;
++    }
++    query += " } } }";
++    return query;
++}
++
++inline bool GraphqlUnknownFieldMessage(const char *message, const char *field) {
++    if (!message || !field)
++        return false;
++    const char *p = strstr(message, "Cannot query field");
++    if (!p)
++        p = strstr(message, "cannot query field");
++    if (!p)
++        return false;
++    p += strlen("Cannot query field");
++    while (*p == ' ')
++        ++p;
++    const char quote = *p;
++    if (quote != '"' && quote != '\'' && quote != '`')
++        return false;
++    ++p;
++    const size_t fieldLen = strlen(field);
++    return strncmp(p, field, fieldLen) == 0 && p[fieldLen] == quote;
++}
++
++inline GraphqlFieldFailure GraphqlFailureForMessage(
++        const char *message, const GraphqlQueryFields &fields) {
++    if (!message)
++        return kGraphqlFailureOther;
++    if (fields.game == kGraphqlGameScalar &&
++        strstr(message, "must have a selection of subfields") &&
++        strstr(message, "game"))
++        return kGraphqlFailureGameNeedsObject;
++    const char *gameSubfield = GraphqlGameSubfieldName(fields.game);
++    if (gameSubfield && GraphqlUnknownFieldMessage(message, gameSubfield))
++        return kGraphqlFailureGameSubfield;
++    if (fields.game != kGraphqlGameNone && fields.game != kGraphqlGameUnsupported &&
++        GraphqlUnknownFieldMessage(message, "game"))
++        return kGraphqlFailureGame;
++    const char *titleField = GraphqlTitleFieldName(fields.title);
++    if (titleField && GraphqlUnknownFieldMessage(message, titleField))
++        return kGraphqlFailureTitle;
++    const char *advertiseField = GraphqlAdvertiseFieldName(fields.advertise);
++    if (advertiseField && GraphqlUnknownFieldMessage(message, advertiseField))
++        return kGraphqlFailureAdvertise;
++    const char *connectionField = GraphqlConnectionFieldName(fields.connection);
++    if (connectionField && GraphqlUnknownFieldMessage(message, connectionField))
++        return kGraphqlFailureConnection;
++    return kGraphqlFailureOther;
++}
++
++inline unsigned char NextGraphqlTitleField(unsigned char field) {
++    return field < kGraphqlTitleCommunicationIdSnake
++        ? static_cast<unsigned char>(field + 1)
++        : static_cast<unsigned char>(kGraphqlTitleNone);
++}
++inline unsigned char NextGraphqlAdvertiseField(unsigned char field) {
++    return field < kGraphqlAdvertiseDataSnake
++        ? static_cast<unsigned char>(field + 1)
++        : static_cast<unsigned char>(kGraphqlAdvertiseNone);
++}
++inline unsigned char NextGraphqlConnectionField(unsigned char field) {
++    return field < kGraphqlConnectionIsConnectedSnake
++        ? static_cast<unsigned char>(field + 1)
++        : static_cast<unsigned char>(kGraphqlConnectionNone);
++}
++inline unsigned char NextGraphqlGameObjectField(unsigned char field) {
++    return field < kGraphqlGameObjectId
++        ? static_cast<unsigned char>(field + 1)
++        : static_cast<unsigned char>(kGraphqlGameUnsupported);
++}
++
++} // namespace MonitorGraphqlCompat
 diff --git a/overlay/source/monitor_player_filter.hpp b/overlay/source/monitor_player_filter.hpp
 new file mode 100644
 index 0000000..a96f729
@@ -4113,10 +4668,10 @@ index 0000000..a0a3d78
 +} // namespace MonitorTargetGeneration
 diff --git a/overlay/source/monitor_title_resolver.hpp b/overlay/source/monitor_title_resolver.hpp
 new file mode 100644
-index 0000000..c13f657
+index 0000000..f754b5c
 --- /dev/null
 +++ b/overlay/source/monitor_title_resolver.hpp
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,414 @@
 +#pragma once
 +
 +#include <stddef.h>
@@ -4192,6 +4747,147 @@ index 0000000..c13f657
 +    if (!titleId || !out || outN < 17)
 +        return false;
 +    memcpy(out, titleId, 17);
++    return true;
++}
++
++/* Accept common API spellings and harmless separators, but never infer a title
++ * from local process state. A valid ID is exactly sixteen hexadecimal digits. */
++inline bool NormalizeTitleId(const char *src, char *out, size_t outN) {
++    if (out && outN > 0)
++        out[0] = 0;
++    if (!src || !out || outN < 17)
++        return false;
++
++    const char *p = src;
++    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
++        ++p;
++    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
++        p += 2;
++
++    size_t len = 0;
++    for (; *p; ++p) {
++        const int digit = HexDigit(*p);
++        if (digit >= 0) {
++            if (len >= 16) {
++                out[0] = 0;
++                return false;
++            }
++            out[len++] = "0123456789ABCDEF"[digit];
++        } else if (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' ||
++                   *p == ':' || *p == '-' || *p == '_') {
++            continue;
++        } else {
++            out[0] = 0;
++            return false;
++        }
++    }
++    if (len != 16) {
++        out[0] = 0;
++        return false;
++    }
++    out[16] = 0;
++    return true;
++}
++
++inline bool IsUnknownTitleId(const char *titleId) {
++    if (!titleId || strlen(titleId) != 16)
++        return false;
++    for (size_t i = 0; i < 16; ++i) {
++        if (titleId[i] != 'F' && titleId[i] != 'f')
++            return false;
++    }
++    return true;
++}
++
++inline bool AsciiCaseEqual(const char *left, const char *right) {
++    if (!left || !right)
++        return false;
++    while (*left && *right) {
++        char a = *left++;
++        char b = *right++;
++        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
++        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
++        if (a != b)
++            return false;
++    }
++    return *left == 0 && *right == 0;
++}
++
++inline bool AsciiCaseStartsWith(const char *value, const char *prefix) {
++    if (!value || !prefix)
++        return false;
++    while (*prefix) {
++        char a = *value++;
++        char b = *prefix++;
++        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
++        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
++        if (a != b)
++            return false;
++    }
++    return true;
++}
++
++inline bool NormalizeRoomGameName(const char *src, char *out, size_t outN) {
++    if (out && outN > 0)
++        out[0] = 0;
++    if (!src || !out || outN < 2)
++        return false;
++
++    const char *begin = src;
++    while (*begin == ' ' || *begin == '\t' || *begin == '\r' || *begin == '\n')
++        ++begin;
++    size_t inputLen = strlen(begin);
++    while (inputLen > 0 && (begin[inputLen - 1] == ' ' || begin[inputLen - 1] == '\t' ||
++                            begin[inputLen - 1] == '\r' || begin[inputLen - 1] == '\n'))
++        --inputLen;
++    if (inputLen == 0)
++        return false;
++
++    size_t copyLen = inputLen < outN - 1 ? inputLen : outN - 1;
++    /* Do not cut a UTF-8 code point when a long remote label fills the UI field. */
++    if (copyLen < inputLen) {
++        while (copyLen > 0 && ((unsigned char)begin[copyLen] & 0xc0) == 0x80)
++            --copyLen;
++        if (copyLen > 0) {
++            const unsigned char last = (unsigned char)begin[copyLen - 1];
++            const size_t need = (last & 0x80) == 0 ? 1 :
++                ((last & 0xe0) == 0xc0 ? 2 : ((last & 0xf0) == 0xe0 ? 3 :
++                 ((last & 0xf8) == 0xf0 ? 4 : 1)));
++            size_t have = 1;
++            for (size_t i = copyLen; i > 0 &&
++                 ((unsigned char)begin[i - 1] & 0xc0) == 0x80; --i)
++                ++have;
++            if (have < need)
++                copyLen -= have;
++        }
++    }
++
++    size_t outLen = 0;
++    bool pendingSpace = false;
++    for (size_t i = 0; i < copyLen; ++i) {
++        unsigned char c = (unsigned char)begin[i];
++        if (c < 0x20 || c == 0x7f || c == ' ' || c == '\t') {
++            pendingSpace = outLen > 0;
++            continue;
++        }
++        if (pendingSpace && outLen + 1 < outN)
++            out[outLen++] = ' ';
++        pendingSpace = false;
++        if (outLen + 1 >= outN)
++            break;
++        out[outLen++] = (char)c;
++    }
++    while (outLen > 0 && out[outLen - 1] == ' ')
++        --outLen;
++    out[outLen] = 0;
++    char maybeTitleId[17] = {};
++    if (outLen == 0 || NormalizeTitleId(out, maybeTitleId, sizeof(maybeTitleId)))
++        return false;
++    if (strncmp(out, "未知", 6) == 0)
++        return false;
++    if (AsciiCaseStartsWith(out, "unknown") || AsciiCaseEqual(out, "n/a") ||
++        AsciiCaseEqual(out, "null") || AsciiCaseEqual(out, "none"))
++        return false;
 +    return true;
 +}
 +
@@ -4364,7 +5060,123 @@ index 0000000..c13f657
 +    return false;
 +}
 +
++/* Resolve IDs from the room's explicit title field or game value, then use only
++ * that room's own advertisement when the ID is absent/all-F. */
++inline bool ResolveRoomTitleId(const char *contentId, const char *gameValue,
++                               const char *advertiseData,
++                               const char *hostPlayerName,
++                               char *outTitleId, size_t outN) {
++    if (outTitleId && outN > 0)
++        outTitleId[0] = 0;
++    if (!outTitleId || outN < 17)
++        return false;
++
++    char candidate[17] = {};
++    if (NormalizeTitleId(contentId, candidate, sizeof(candidate)) &&
++        !IsUnknownTitleId(candidate))
++        return CopyTitleId(candidate, outTitleId, outN);
++    if (NormalizeTitleId(gameValue, candidate, sizeof(candidate)) &&
++        !IsUnknownTitleId(candidate))
++        return CopyTitleId(candidate, outTitleId, outN);
++
++    if (ResolveAdvertisedTitleId(advertiseData, hostPlayerName,
++                                 candidate, sizeof(candidate)))
++        return CopyTitleId(candidate, outTitleId, outN);
++    return false;
++}
++
 +} // namespace MonitorTitleResolver
+diff --git a/overlay/tests/monitor_graphql_compat_test.cpp b/overlay/tests/monitor_graphql_compat_test.cpp
+new file mode 100644
+index 0000000..ee02595
+--- /dev/null
++++ b/overlay/tests/monitor_graphql_compat_test.cpp
+@@ -0,0 +1,85 @@
++#include "../source/monitor_graphql_compat.hpp"
++
++#include <cassert>
++#include <string>
++
++using namespace MonitorGraphqlCompat;
++
++int main() {
++    GraphqlQueryFields fields{};
++    std::string query = BuildGraphqlQuery(fields);
++    assert(query.find("contentId") != std::string::npos);
++    assert(query.find("advertiseData") != std::string::npos);
++    assert(query.find("isConnected") != std::string::npos);
++    assert(query.find(" game") == std::string::npos);
++    fields.title = kGraphqlTitleLocalCommunicationId;
++    assert(BuildGraphqlQuery(fields).find("localCommunicationId") != std::string::npos);
++    fields.title = kGraphqlTitleCommunicationIdSnake;
++    assert(BuildGraphqlQuery(fields).find("communication_id") != std::string::npos);
++    fields.title = kGraphqlTitleContentIdSnake;
++    fields.advertise = kGraphqlAdvertiseDataSnake;
++    fields.connection = kGraphqlConnectionIsConnectedSnake;
++    fields.game = kGraphqlGameScalar;
++    query = BuildGraphqlQuery(fields);
++    assert(query.find("content_id") != std::string::npos);
++    assert(query.find("advertise_data") != std::string::npos);
++    assert(query.find("is_connected") != std::string::npos);
++    assert(query.find(" game ") != std::string::npos);
++
++    fields.game = kGraphqlGameObjectName;
++    assert(BuildGraphqlQuery(fields).find("game { name }") != std::string::npos);
++    fields.game = kGraphqlGameObjectContentId;
++    assert(BuildGraphqlQuery(fields).find("game { contentId }") != std::string::npos);
++    fields.game = kGraphqlGameObjectTitleId;
++    assert(BuildGraphqlQuery(fields).find("game { titleId }") != std::string::npos);
++    fields.game = kGraphqlGameObjectId;
++    assert(BuildGraphqlQuery(fields).find("game { id }") != std::string::npos);
++
++    fields.game = kGraphqlGameNone;
++    fields.title = kGraphqlTitleContentId;
++    assert(GraphqlFailureForMessage(
++        "Cannot query field \"contentId\" on type \"Room\".", fields) ==
++        kGraphqlFailureTitle);
++    fields.advertise = kGraphqlAdvertiseData;
++    assert(GraphqlFailureForMessage(
++        "Cannot query field \"advertiseData\" on type \"Room\".", fields) ==
++        kGraphqlFailureAdvertise);
++    fields.connection = kGraphqlConnectionIsConnected;
++    assert(GraphqlFailureForMessage(
++        "Cannot query field \"isConnected\" on type \"NodeInfo\".", fields) ==
++        kGraphqlFailureConnection);
++
++    fields.game = kGraphqlGameScalar;
++    assert(GraphqlFailureForMessage(
++        "Field \"game\" of type \"Game\" must have a selection of subfields.",
++        fields) == kGraphqlFailureGameNeedsObject);
++    assert(GraphqlFailureForMessage(
++        "Cannot query field \"game\" on type \"Room\".", fields) ==
++        kGraphqlFailureGame);
++    fields.game = kGraphqlGameObjectContentId;
++    assert(GraphqlFailureForMessage(
++        "Cannot query field \"contentId\" on type \"Game\".", fields) ==
++        kGraphqlFailureGameSubfield);
++
++    assert(NextGraphqlTitleField(kGraphqlTitleContentId) ==
++           kGraphqlTitleContentIdSnake);
++    assert(NextGraphqlTitleField(kGraphqlTitleGameIdSnake) ==
++           kGraphqlTitleLocalCommunicationId);
++    assert(NextGraphqlTitleField(kGraphqlTitleLocalCommunicationId) ==
++           kGraphqlTitleLocalCommunicationIdSnake);
++    assert(NextGraphqlTitleField(kGraphqlTitleCommunicationIdSnake) ==
++           kGraphqlTitleNone);
++    assert(NextGraphqlAdvertiseField(kGraphqlAdvertiseData) ==
++           kGraphqlAdvertiseDataSnake);
++    assert(NextGraphqlConnectionField(kGraphqlConnectionIsConnected) ==
++           kGraphqlConnectionIsConnectedSnake);
++    assert(NextGraphqlGameObjectField(kGraphqlGameObjectName) ==
++           kGraphqlGameObjectContentId);
++    assert(NextGraphqlGameObjectField(kGraphqlGameObjectContentId) ==
++           kGraphqlGameObjectTitleId);
++    assert(NextGraphqlGameObjectField(kGraphqlGameObjectTitleId) ==
++           kGraphqlGameObjectId);
++    assert(NextGraphqlGameObjectField(kGraphqlGameObjectId) ==
++           kGraphqlGameUnsupported);
++    return 0;
++}
 diff --git a/overlay/tests/monitor_player_filter_test.cpp b/overlay/tests/monitor_player_filter_test.cpp
 new file mode 100644
 index 0000000..bd1fe8d
@@ -4430,17 +5242,20 @@ index 0000000..a0e003f
 +}
 diff --git a/overlay/tests/monitor_title_resolver_test.cpp b/overlay/tests/monitor_title_resolver_test.cpp
 new file mode 100644
-index 0000000..60df97f
+index 0000000..a450656
 --- /dev/null
 +++ b/overlay/tests/monitor_title_resolver_test.cpp
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,173 @@
 +#include "../source/monitor_title_resolver.hpp"
 +
 +#include <assert.h>
 +#include <string.h>
 +
 +using MonitorTitleResolver::kAdvertiseDataMaxHex;
++using MonitorTitleResolver::NormalizeRoomGameName;
++using MonitorTitleResolver::NormalizeTitleId;
 +using MonitorTitleResolver::ResolveAdvertisedTitleId;
++using MonitorTitleResolver::ResolveRoomTitleId;
 +
 +static void ExpectResolved(const char *advertiseData, const char *hostName,
 +                          const char *expectedTitleId) {
@@ -4569,8 +5384,38 @@ index 0000000..60df97f
 +    BuildScarletVioletAdvertiseData(sv, sizeof(sv), 0);
 +    strcat(sv, "00"); // app-data size is not 132 bytes
 +    ExpectUnresolved(sv, nullptr);
++
++    /* API title IDs may arrive under aliases and with a 0x prefix/separators. */
++    char normalizedId[17] = {};
++    assert(NormalizeTitleId(" 0x0100-abcd-ef01-2000 ",
++                            normalizedId, sizeof(normalizedId)));
++    assert(strcmp(normalizedId, "0100ABCDEF012000") == 0);
++    assert(!NormalizeTitleId("not-a-title-id", normalizedId, sizeof(normalizedId)));
++    assert(normalizedId[0] == 0);
++
++    /* A room-provided game name is usable without contentId; placeholders and
++     * ID-shaped labels must not masquerade as human-readable names. */
++    char roomGameName[52] = {};
++    assert(NormalizeRoomGameName("  Room API Game\n", roomGameName,
++                                 sizeof(roomGameName)));
++    assert(strcmp(roomGameName, "Room API Game") == 0);
++    assert(!NormalizeRoomGameName("FFFFFFFFFFFFFFFF", roomGameName,
++                                  sizeof(roomGameName)));
++    assert(!NormalizeRoomGameName("未知游戏", roomGameName,
++                                  sizeof(roomGameName)));
++    assert(!NormalizeRoomGameName("Unknown game (unknown)", roomGameName,
++                                  sizeof(roomGameName)));
++
++    /* Missing and all-F IDs both try the advertisement belonging to this room. */
++    BuildScarletVioletAdvertiseData(sv, sizeof(sv), 6);
++    assert(ResolveRoomTitleId("", "", sv, nullptr,
++                              normalizedId, sizeof(normalizedId)));
++    assert(strcmp(normalizedId, "0100A3D008C5C000") == 0);
++    assert(ResolveRoomTitleId("0100ABCDEF012000", "", "ffff0000",
++                              nullptr, normalizedId, sizeof(normalizedId)));
++    assert(strcmp(normalizedId, "0100ABCDEF012000") == 0);
++    assert(ResolveRoomTitleId("FFFFFFFFFFFFFFFF", "Room API Game", "11223344",
++                              nullptr, normalizedId, sizeof(normalizedId)) == false);
++    assert(normalizedId[0] == 0);
 +    return 0;
 +}
--- 
-2.47.3
-
