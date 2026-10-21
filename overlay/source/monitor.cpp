@@ -108,6 +108,26 @@ static void MonLog(const char *msg) {
         }
         return;
     }
+    /* 单次会话日志上限 512 KB:超过就截断重来,免得长时间挂着把 SD 卡写满。
+     * 每 128 行才取一次文件大小,避免每行都多做一次 fopen。 */
+    static u32 s_logLines = 0;
+    if (++s_logLines >= 128) {
+        s_logLines = 0;
+        long size = -1;
+        FILE *sz = fopen(kLogPath, "rb");
+        if (sz) {
+            fseek(sz, 0, SEEK_END);
+            size = ftell(sz);
+            fclose(sz);
+        }
+        if (size > 512 * 1024) {
+            FILE *clr = fopen(kLogPath, "w");
+            if (clr) {
+                fputs("-- log rotated --\n", clr);
+                fclose(clr);
+            }
+        }
+    }
     FILE *f = fopen(kLogPath, "a");
     if (!f)
         return;
@@ -3675,8 +3695,10 @@ static void RefreshAllServersBatch(const char *selHost, u16 selPort,
         scanIdxs[scanN++] = (u32)selIdx;
     }
     for (u32 i = 0; i < count; i++) {
-        if ((s32)i != selIdx && g_batch[i].httpOk && g_batch[i].rooms == 0 &&
-            (g_batch[i].online > 0 || g_batch[i].prevRooms > 0)) {
+        /* HTTP 接口不通(不少中继只开 UDP 转发,connect 直接被拒)时也照样扫一遍:
+         * LDN 房间信息本来就走 UDP,这是纯增量兜底。 */
+        if ((s32)i != selIdx && g_batch[i].resolved && g_batch[i].rooms <= 0 &&
+            (!g_batch[i].httpOk || g_batch[i].online > 0 || g_batch[i].prevRooms > 0)) {
             scanIdxs[scanN++] = i;
         }
     }
@@ -3722,7 +3744,7 @@ static void StatsCommitBatchLocked(const char *selHost, u16 selPort,
                 if (selLat > 0)
                     st.latencyMs = selLat;
                 st.stampMs = nowMs;
-            } else if (b.httpOk) {
+            } else if (b.httpOk || (b.didScan && b.rooms > 0)) {
                 st.failCount = 0;
                 if (b.rooms > 0) {
                     st.rooms = b.rooms;

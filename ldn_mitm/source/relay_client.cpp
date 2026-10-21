@@ -91,41 +91,46 @@ namespace ams::mitm::ldn::relay {
            names unique (especially the Dutch entries). */
         struct BuiltinServer { const char *name; const char *host; u16 port; };
         constexpr BuiltinServer g_builtin[] = {
-            { "中国·广东",       "gugu.mulaosi.cn",      11451 },  /*   9ms */
-            { "中国·广东(2)",    "ns.mulaosi.cn",        11451 },  /*  15ms; backup */
-            { "中国·江苏",       "wuaiyi.top",           11451 },  /*  30ms */
-            { "中国·上海",       "47.102.121.212",       11451 },  /*  32ms */
-            { "中国·北京",       "olunira.fun",          11451 },  /*  44ms */
-            { "中国·河南(2)",    "122.114.8.38",         11451 },  /*  53ms */
-            { "中国·河南",       "srv.jaxlewis.top",     11451 },  /*  63ms */
-            { "美国",            "tekn0.net",            11451 },  /* 158ms */
-            { "德国·萨克森",     "erdbeerbaerlp.de",     11451 },  /* 193ms */
-            { "丹麦",            "switch.servegame.com", 11451 },  /* 195ms; backup */
-            { "荷兰(3)",         "switch.r3ps4j.nl",     11453 },  /* 205ms; backup */
-            { "荷兰",            "switch.jayseateam.nl", 11451 },  /* 210ms */
-            { "荷兰(2)",         "switch.jayseateam.nl", 11453 },  /* 217ms */
-            { "荷兰(4)",         "switch.r3ps4j.nl",     11451 },  /* 217ms; backup */
-            { "中国·丹麦",       "switch.r3ps4j.nl",     11452 },  /* 233ms */
-            { "美国(2)",         "muitxobem-lanplay.ddns.net", 11451 }, /* 334ms */
-            { "中国·江苏(2)",    "yordon.cn",            11451 },  /* no PING echo */
+            { "中国·广东",       "gugu.mulaosi.cn",              11451 },  /*   9ms */
+            { "中国·广东(2)",    "ns.mulaosi.cn",                11451 },  /*  15ms; backup */
+            { "中国·江苏",       "wuaiyi.top",                   11451 },  /*  30ms */
+            { "中国·上海",       "47.102.121.212",               11451 },  /*  32ms */
+            { "中国·北京",       "olunira.fun",                  11451 },  /*  44ms */
+            { "中国·河南(2)",    "122.114.8.38",                 11451 },  /*  53ms */
+            { "中国·河南",       "srv.jaxlewis.top",             11451 },  /*  63ms */
+            { "美国",            "tekn0.net",                    11451 },  /* 158ms */
+            { "德国·萨克森",     "erdbeerbaerlp.de",             11451 },  /* 193ms */
+            { "丹麦",            "switch.servegame.com",         11451 },  /* 195ms; backup */
+            { "荷兰(3)",         "switch.r3ps4j.nl",             11453 },  /* 205ms; backup */
+            { "荷兰",            "switch.jayseateam.nl",         11451 },  /* 210ms */
+            { "荷兰(2)",         "switch.jayseateam.nl",         11453 },  /* 217ms */
+            { "荷兰(4)",         "switch.r3ps4j.nl",             11451 },  /* 217ms; backup */
+            { "荷兰(5)",         "switch.r3ps4j.nl",             11452 },  /* 233ms; backup */
+            { "美国(2)",         "muitxobem-lanplay.ddns.net",   11451 },  /* 334ms */
+            { "中国·江苏(2)",    "yordon.cn",                    11451 },  /* no PING echo */
         };
         constexpr int BuiltinCount = static_cast<int>(sizeof(g_builtin) / sizeof(g_builtin[0]));
 
         /* Exact factory relay.cfg shipped by patch 0009. Keep order, names,
            and selected=中国·河南 (index zero) stable across "restore". */
         constexpr BuiltinServer g_defaultServers[] = {
-            { "中国·河南",       "srv.jaxlewis.top",               11451 },
-            { "中国·河南(2)",    "122.114.8.38",                   11451 },
-            { "中国·广东",       "gugu.mulaosi.cn",                11451 },
-            { "中国·江苏",       "wuaiyi.top",                     11451 },
-            { "中国·北京",       "olunira.fun",                    11451 },
-            { "中国·上海",       "47.102.121.212",                 11451 },
-            { "中国·丹麦",       "switch.r3ps4j.nl",               11452 },
-            { "美国",            "tekn0.net",                      11451 },
-            { "美国(2)",         "muitxobem-lanplay.ddns.net",     11451 },
-            { "荷兰",            "switch.jayseateam.nl",           11451 },
-            { "荷兰(2)",         "switch.jayseateam.nl",           11453 },
-            { "德国·萨克森",     "erdbeerbaerlp.de",               11451 },
+            { "中国·广东",       "gugu.mulaosi.cn",              11451 },
+            { "中国·广东(2)",    "ns.mulaosi.cn",                11451 },
+            { "中国·江苏",       "wuaiyi.top",                   11451 },
+            { "中国·上海",       "47.102.121.212",               11451 },
+            { "中国·北京",       "olunira.fun",                  11451 },
+            { "中国·河南(2)",    "122.114.8.38",                 11451 },
+            { "中国·河南",       "srv.jaxlewis.top",             11451 },
+            { "美国",            "tekn0.net",                    11451 },
+            { "德国·萨克森",     "erdbeerbaerlp.de",             11451 },
+            { "丹麦",            "switch.servegame.com",         11451 },
+            { "荷兰(3)",         "switch.r3ps4j.nl",             11453 },
+            { "荷兰",            "switch.jayseateam.nl",         11451 },
+            { "荷兰(2)",         "switch.jayseateam.nl",         11453 },
+            { "荷兰(4)",         "switch.r3ps4j.nl",             11451 },
+            { "荷兰(5)",         "switch.r3ps4j.nl",             11452 },
+            { "美国(2)",         "muitxobem-lanplay.ddns.net",   11451 },
+            { "中国·江苏(2)",    "yordon.cn",                    11451 },
         };
         constexpr int DefaultServerCount = static_cast<int>(sizeof(g_defaultServers) / sizeof(g_defaultServers[0]));
         std::atomic_int  g_selected{0};

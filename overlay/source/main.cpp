@@ -74,6 +74,7 @@ static int g_focus_retries = 0;
    open, so it rebuilds on the first frame it becomes visible again. */
 static bool g_main_list_dirty = false;
 static tsl::elm::ListItem *g_addServerItem = nullptr;
+static tsl::elm::ListItem *g_allServersItem = nullptr;
 
 static void buildList(tsl::elm::List *list);
 static void rebuildUi();
@@ -873,6 +874,95 @@ public:
 };
 
 
+/* 「全部服务器」页:一屏看完全部中继的在线/房间/延迟,按 A 切到那一台
+ * 再回主界面看它的房间。行直接复用主界面的 ServerRow,数值取 sysmodule
+ * 已经维护好的统计表(MonitorListServerStats),不额外开扫描线程。 */
+class AllServersGui : public tsl::Gui {
+public:
+    virtual tsl::elm::Element* createUI() override {
+        auto frame = new MonitorFrame(T("全部服务器", "全部伺服器"));
+        auto *list = new RebuildList();
+
+        list->addItem(new tsl::elm::CategoryHeader(
+            T("按 A 切换到该服务器 · B 返回", "按 A 切換到該伺服器 · B 返回")));
+
+        u32 count = 0;
+        if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count)))
+            count = 0;
+        if (count == 0) {
+            list->addItem(new tsl::elm::ListItem(T("没有服务器", "沒有伺服器")));
+            frame->setContent(list);
+            return frame;
+        }
+
+        u32 selected = 0;
+        if (R_FAILED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &selected)))
+            selected = count;
+
+        for (u32 i = 0; i < count && i < MONITOR_MAX_SERVERS; i++) {
+            LdnRelayServerInfo info = {};
+            char name[32] = {};
+            char addr[80] = {};
+            if (R_SUCCEEDED(ldnMitmGetRelayServerInfo(&g_ldnConfig, i, &info))) {
+                snprintf(name, sizeof(name), "%s", info.name);
+                snprintf(addr, sizeof(addr), "%s:%u", info.host,
+                         static_cast<unsigned>(info.port));
+            } else {
+                ldnMitmGetRelayServerName(&g_ldnConfig, i, name);
+            }
+
+            auto *row = new ServerRow();
+            row->setServer(i, name, addr);
+            row->setSelected(i == selected);
+            row->setActivateListener([i, name = std::string(name)]() {
+                if (R_SUCCEEDED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
+                    g_main_list_dirty = true;
+                    MonitorRequestSwitch(name.c_str());
+                }
+                tsl::goBack();
+            });
+            m_rows.push_back(row);
+            list->addItem(row);
+        }
+
+        frame->setContent(list);
+        return frame;
+    }
+
+    virtual void update() override {
+        if (m_rows.empty())
+            return;
+        static MonitorServerStat stats[MONITOR_MAX_SERVERS];
+        const u32 n = MonitorListServerStats(stats, MONITOR_MAX_SERVERS);
+        for (auto *row : m_rows) {
+            const MonitorServerStat *hit = nullptr;
+            for (u32 i = 0; i < n; i++) {
+                if (strcmp(stats[i].addr, row->addr()) == 0) {
+                    hit = &stats[i];
+                    break;
+                }
+            }
+            if (hit == nullptr) {
+                row->setStats("", "", "");
+                continue;
+            }
+            char online[12] = {};
+            char rooms[12] = {};
+            char latency[16] = {};
+            if (hit->online >= 0)
+                snprintf(online, sizeof(online), "%d", static_cast<int>(hit->online));
+            if (hit->rooms >= 0)
+                snprintf(rooms, sizeof(rooms), "%d", static_cast<int>(hit->rooms));
+            if (hit->latencyMs > 0)
+                snprintf(latency, sizeof(latency), "%dms", static_cast<int>(hit->latencyMs));
+            row->setStats(online, rooms, latency);
+        }
+    }
+
+private:
+    std::vector<ServerRow *> m_rows;
+};
+
 /* Keep the monitor target aligned with the sysmodule's selected relay after
    deleting the selected row or restoring the factory list. */
 static void syncMonitorTargetFromRelaySelection() {
@@ -1006,6 +1096,17 @@ static void buildList(tsl::elm::List *list) {
         // purpose: this rewrites the whole relay list.
         list->addItem(new tsl::elm::CategoryHeader(T("管理", "管理")));
 
+        g_allServersItem = new tsl::elm::ListItem(T("全部服务器", "全部伺服器"));
+        g_allServersItem->setValue(T("在线 · 房间 · 延迟", "線上 · 房間 · 延遲"), true);
+        g_allServersItem->setClickListener([](u64 keys) {
+            if (keys & HidNpadButton_A) {
+                tsl::changeTo<AllServersGui>();
+                return true;
+            }
+            return false;
+        });
+        list->addItem(g_allServersItem);
+
         g_addServerItem = new tsl::elm::ListItem(T("添加服务器", "新增伺服器"));
         g_addServerItem->setClickListener([](u64 keys) {
             if (keys & HidNpadButton_A) {
@@ -1103,6 +1204,8 @@ static void buildList(tsl::elm::List *list) {
         list->addItem(new tsl::elm::CategoryHeader(T("关于", "關於")));
         list->addItem(new tsl::elm::ListItem(T("制作", "製作"), T("阿东 & 大肥鱼", "阿東 & 大肥魚")));
         list->addItem(new tsl::elm::ListItem(T("版本", "版本"), g_version));
+        list->addItem(new tsl::elm::ListItem(T("房间监控", "房間監控"),
+                                             T("Zero（jieluojun）", "Zero（jieluojun）")));
         list->addItem(new tsl::elm::ListItem(T("声明", "聲明"), T("免费分享 禁止倒卖", "免費分享 禁止轉賣")));
     }
 
