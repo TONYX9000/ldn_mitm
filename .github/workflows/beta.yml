@@ -6,7 +6,7 @@ name: beta
 # patches/0010-*.patch(bsd-broadcast-relay-TONYX9000 移植补丁 +
 # 联机监视器 0010)且尚未应用,构建前先自动应用,
 # 再产出可直接拷到 SD 卡的产物。
-# 分支本身已打好补丁时会自动跳过(检查多个补丁应用标记)。
+# 分支本身已打好补丁时会自动跳过(以 relay_client.cpp 为标记)。
 #
 # 用法一:把 .github/workflows/beta.yml 与 patches/ 一起放进仓库,
 #        保持 master 干净,构建时打补丁;
@@ -82,23 +82,13 @@ jobs:
             exit 0
           fi
 
-          # 检查多个补丁应用标记: 0001(relay_client.cpp) + 0008(ServerRow) + 0010(Makefile INCLUDES)
-          PATCHES_APPLIED=0
-          [ -f ldn_mitm/source/relay_client.cpp ] && PATCHES_APPLIED=$((PATCHES_APPLIED + 1))
-          [ -f overlay/source/monitor.cpp ] && grep -q 'ServerRow' overlay/source/monitor.cpp && PATCHES_APPLIED=$((PATCHES_APPLIED + 1))
-          [ -f overlay/Makefile ] && grep -q 'INCLUDES.*source' overlay/Makefile && PATCHES_APPLIED=$((PATCHES_APPLIED + 1))
-
-          if [ "$DECISION" = "yes" ]; then
-            if [ $PATCHES_APPLIED -ge 3 ]; then
-              echo "::error::补丁似乎已应用,但输入要求强制应用。"
+          if [ -f ldn_mitm/source/relay_client.cpp ]; then
+            if [ "$DECISION" = "yes" ]; then
+              echo "::error::补丁似乎已应用(relay_client.cpp 已存在),但输入要求强制应用。"
               exit 1
             fi
-          else
-            # auto 模式: 3 个标记都存在才认为已应用
-            if [ $PATCHES_APPLIED -ge 3 ]; then
-              echo "检测到所有补丁已应用,跳过。"
-              exit 0
-            fi
+            echo "检测到 ldn_mitm/source/relay_client.cpp,补丁已应用,跳过。"
+            exit 0
           fi
 
           git config user.name "github-actions[bot]"
