@@ -1,4 +1,4 @@
-From f50c94b426e181b6124c36e96c514af550be191d Mon Sep 17 00:00:00 2001
+From 67ac83e28a49e6eea4f266ed7887ebf6650fba30 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH] overlay: online counts/room list and relay management
@@ -396,7 +396,7 @@ index da2bd21..a08980f 100644
  #---------------------------------------------------------------------------------
  # list of directories containing libraries, this must be the top level containing
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..c126008 100644
+index 8e07c19..41ce869 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,8 @@
@@ -705,10 +705,10 @@ index 8e07c19..c126008 100644
 +public:
 +    static constexpr u16 kHeight = kMonitorListRowHeight;
 +
-+    /* 右侧三列的宽度(像素)。各行的列位置固定不变。 */
++    /* 右侧三列的宽度(像素):三列等宽等距,使「延迟与房间」的间距同「在线与房间」完全一致。 */
 +    static constexpr s32 kOnlineCol = 36;
 +    static constexpr s32 kRoomCol = 36;
-+    static constexpr s32 kLatencyCol = 56;
++    static constexpr s32 kLatencyCol = 36;
 +    static constexpr s32 kColGap = 6;
 +    static constexpr s32 kRightMargin = 20;
 +
