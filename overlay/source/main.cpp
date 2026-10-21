@@ -470,9 +470,11 @@ public:
     static constexpr u16 kContentY = 96;
     static constexpr u16 kTitleBaseline = 50;
     static constexpr float kTitleFont = 30;
+    std::string m_subtitle;
 
-    explicit MonitorFrame(const std::string &title)
-        : tsl::elm::OverlayFrame(title, std::string()) {}
+    explicit MonitorFrame(const std::string &title,
+                          const std::string &subtitle = std::string())
+        : tsl::elm::OverlayFrame(title, std::string()), m_subtitle(subtitle) {}
 
     virtual void draw(tsl::gfx::Renderer *renderer) override {
         using R = tsl::gfx::Renderer;
@@ -505,6 +507,11 @@ public:
         renderer->drawRect(0, kTitleBaseline + 6, tsl::cfg::FramebufferWidth,
                            kContentY - kTitleBaseline - 8,
                            R::a(tsl::style::color::ColorFrameBackground));
+
+        /* 只有我们自己给的副标题才会被画出来,不会再出现 libtesla 那行莫名其妙的字 */
+        if (!this->m_subtitle.empty())
+            renderer->drawString(this->m_subtitle.c_str(), false, 20, 84, 17,
+                                 R::a(0x9999));
     }
 
     /* 内容区上移:标题下面那一行不再留给副标题。 */
@@ -683,7 +690,7 @@ public:
         snprintf(m_value, sizeof(m_value), "%s", value);
         m_faint = faint;
     }
-    void setClickListener(std::function<void()> fn) { m_click = std::move(fn); }
+    void setActivateListener(std::function<void()> fn) { m_click = std::move(fn); }
 
     virtual void layout(u16, u16, u16, u16) override {
         this->setBoundaries(this->getX(), this->getY(), this->getWidth(), kHeight);
@@ -944,7 +951,7 @@ public:
             row->setName(name);
             row->setAddr(addr);
             row->setValue(T("等待", "等待"), true);
-            row->setClickListener([i, label = std::string(name)]() {
+            row->setActivateListener([i, label = std::string(name)]() {
                 tsl::changeTo<AllRoomsGui>(label, i);
             });
             m_rows.push_back(row);

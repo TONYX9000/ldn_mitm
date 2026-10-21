@@ -106,8 +106,7 @@ static void MonLog(const char *msg) {
         if (g_logLen + n + 1 < sizeof(g_logBuf)) {
             memcpy(g_logBuf + g_logLen, msg, n);
             g_logLen += n;
-            g_logBuf[g_logLen++] = '
-';
+            g_logBuf[g_logLen++] = '\n';
         }
         return;
     }
@@ -124,8 +123,7 @@ static void MonLog(const char *msg) {
             if (size > kLogMaxBytes) {
                 FILE *clr = fopen(kLogPath, "wb");
                 if (clr) {
-                    fputs("-- log rotated --
-", clr);
+                    fputs("-- log rotated --\n", clr);
                     fclose(clr);
                 }
             }
@@ -135,8 +133,7 @@ static void MonLog(const char *msg) {
     if (!f)
         return;
     fputs(msg, f);
-    fputc('
-', f);
+    fputc('\n', f);
     fclose(f);
 }
 
