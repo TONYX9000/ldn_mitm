@@ -20,24 +20,6 @@ beta/bsd-broadcast-relay-TONYX9000 分支后续服务器管理改动合并进现
   git am 000[1-9]-*.patch 0010-*.patch
 
 0006 中 .github/workflows/release.yml 的原文件为 CRLF；该补丁已按可供 git am 正常应用的 LF 形式维护。
-
-0010 不再包含 .github/workflows/beta.yml 的改动：该工作流不在上游基线 9a2639e 里（0001–0009 也没有创建它），
-而本 fork 的 master 已经带着同样的 switch-curl 缓存回退改动；留着这条 hunk 会让 git am / git apply 在
-“文件不存在”或“已经改过”两种基线上都失败。删掉后 0001–0009 + 0010 可在 9a2639e 上一次性干净应用。
-
-本轮（2026-10-21，界面反馈）对 0010 的改动：
-- 标题下方那一行彻底清空：MonitorFrame 整帧自己画（不再调用 libtesla 的
-  OverlayFrame::draw），并在最后把标题下方 56~94 刷成底色；内容区 125 → 96。
-- 修掉那行乱码的来源：LdnMitmVersion::raw 只有 32 字节，sysmodule 的 GetVersion 却用
-  std::strcpy 拷贝 GITDESCVER，无 tag 的浅克隆会得到 40 位 SHA，直接写穿 SF 输出结构。
-  现在 Makefile 截到 31 字符、sysmodule 用 snprintf、两个客户端定长 memcpy 补 NUL。
-- 服务器行三列：数值与列名同字号（15px）且列内居中；每台服务器都有自己的数值
-  （后台线程空闲时轮转探测：TCP connect 测延迟，轻量 GraphQL / /info 测在线与房间），
-  不再需要先选中才显示。
-- 返回特斯拉菜单不再等查询跑完：HTTP 收包 15ms 短轮询 + 全程中止标志（DNS / UDP 扫描 /
-  curl 同样可中止），onHide 立即中止且不写快照；首帧前不碰 SD；worker 优先级 0x2C → 0x3B；
-  选中服务器的周期刷新 1s → 3s，给逐台探测留空闲。
-
 构建需使用兼容的 devkitA64 工具链；overlay 版本串在无 tag 时显示 commit 短哈希，不再为空。
 ---
  base-commit: 9a2639eff5b2e60065be3dfae69c46de6c3d7648

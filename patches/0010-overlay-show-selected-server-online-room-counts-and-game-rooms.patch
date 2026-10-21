@@ -1,38 +1,1513 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: ldn_mitm patch set <patch@ldn_mitm>
-Date: Wed, 21 Oct 2026 14:00:00 +0800
-Subject: [PATCH 10/10] overlay: show selected server, online/room counts and game rooms
+From 604a7c141164296b15c6a0a47cbbf2e2158aaafd Mon Sep 17 00:00:00 2001
+From: Patch Port <port@local>
+Date: Mon, 19 Oct 2026 13:36:38 +0000
+Subject: [PATCH] overlay: online counts/room list and relay management
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
-overlay: show selected server, online/room counts and game rooms
+联机监视器(0010):
+- 底部按键提示按系统语言显示「返回/确定」(覆盖 libtesla 的英文 Back/OK)
+- 部分游戏将 LDN LocalCommunicationId 写为 FFFFFFFFFFFFFFFF(auto sentinel);按每个房间自己的 advertiseData 识别 Dragon Ball FighterZ、Rocket League、MONSTER HUNTER RISE、Monster Hunter Stories 2 与 Minecraft 的标题 ID;未知模式安全显示「未知游戏」,不再用本机前台 ProgramId 误标远端房间
+- 标题下方两列统计:标签「在线/房间」在上、数字在下;刷新 1s 一次,
+  与延迟 ping(sysmodule RelayPingIntervalMs)同节奏,仅可见时轮询,
+  周期刷新不重拉订阅、不改目标
+- 「游戏房间」列表:chinese_db.json 标题ID→中文名映射 + N/M 人数;
+  玩家名单(hostPlayerName 置顶 + nodes 玩家名)随查询解析入库
+- 房间行与服务器行一致采用 70px 固定双排布局:上排显示游戏标题、下排常显玩家名单,房主高亮;名单过长时在下排 scissor 窗口内滚动(停 90 帧后 1px/帧滑动);人数在右侧显示;房间区与「中继服务器(按 A 切换)」用分隔标题隔开;行对象持久复用,焦点安全
+- 服务器列表以 sysmodule 加载的 relay.cfg 为真值源,overlay 通过 IPC
+  读取名称/地址/端口;servers.json 下载/解析/类型表/名字兜底全部移除。
+  服务器行双排布局(上=名称、下=地址 host:port,行高 70 不变,
+  右侧保留「* 延迟」)
+- 订阅(chinese_db.json)每次打开 overlay 经 https://v6.gh-proxy.org/
+  加速镜像(GitHub 链接前加镜像前缀)重新下载,失败退回
+  /config/ldn_mitm/ 缓存;overlay 内置 switch-curl(libnx SSL 后端)
+  提供 TLS(GitHub 全站强制 HTTPS,纯 HTTP 轻客户端拉不动),DNS 以
+  原始解析预钉 IP(curl 的 getaddrinfo 在 overlay 里同样不可用);
+  graphql/rest 分型查询(rest 1.0 用 UDP LDN 主动扫描补房间);切换
+  服务器即时刷新
+- 订阅缓存随构建包预置(仅 chinese_db.json;CI 构建时新鲜抓取铺进
+  sdcard 并自检),运行时下载成功则更新缓存
 
+内存与稳定性(真机 23.0.1 排障并入):
+- EnsureSd():tesla 覆盖 __appInit 后 sdmc 未挂载,曾致 fclose(NULL)
+  崩溃与全部文件 I/O 静默失效;现幂等挂载 + 日志截断判空
+- 标题表懒加载 + 流式解析 + Content-Length 预留,消除 0x559 OutOfMemory
+- socket 在 initServices(帧缓冲前)初始化:自带 sm 会话包裹,失败
+  缩容重试、bsd:s 兜底,AlreadyInitialized 视为成功;soc-probe 实测
+- 帧缓冲降级兜底(--wrap=framebufferCreate):双缓冲失败自动单缓冲
+- 堆探针 + 全链路日志(worker-init/probe-*/fb:/ui-*/first-frame/
+  sockets-init rc/soc-probe/resolve ok|fallback|FAIL|noname…[条目名]/
+  query e=/scan/download ok|try fail e=/chinese: use cache|no cache):
+  日志截断移到最早,避免吃掉 sockets-init;查询失败状态文本带错误码,
+  游戏房间区直接显示
+- getaddrinfo 在桌面 23.x 系统 overlay 进程里直接不可用(rc 262-0-1201,
+  不是 DNS 配置问题):overlay 与 sysmodule 一样改为 raw UDP/53 + nifm
+  获取 DNS(srv records 不可用,自动退回 223.5.5.5/114/8/1 台);
+  网络层增加 5 秒超时 + 「查询超时」诊断,日志加 dns 标签(dns nifm=/
+  dns srv…/dns ok|fail|timeout host rc=)与名字解析标签(resolve name|
+  noname|nohost/entry|nohost)
+- 测试(主机侧,monitor.cpp 直编):DnsBuildQuery/DnsParseA/MatchRelayLine/
+  RelayParseLine(\v \f 空白)/MonitorListRelayServers/ResolveSelectedServer
+  (\v 行 noname 复现修复)/HttpsGet(curl stub)/LdnDecompress/
+  ParseNetworkInfo/ParseRoomArray(玩家名/房主置顶/sessionId)/Http 解析/
+  DnsInitServers;chinese_db 流式解析 + 标题映射冒烟;FormatGameName(all-F sentinel -> room advertiseData);独立 monitor_title_resolver_test 覆盖已知/未知广告模式
+
+CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
+安装 switch-curl(订阅 HTTPS 下载)
+
+崩溃修复与构建修复(2026-10-19 真机 2168-0002 排障并入):
+- 死因定位:2168-0002 (0x4a8) 死于首次刷新的下载窗口(resolve ok 之后、
+  curl perform 前后),寄存器 X10=5000(下载超时参数)指向 HttpGet 深度
+- CURLOPT_RESOLVE 收的是 struct curl_slist *,此前误传 char*——字符串
+  地址被当链表头解引用,首次 perform 即崩;现 curl_slist_append 组包、
+  perform 后 curl_slist_free_all
+- 栈上巨结构全部改 static:DoRefresh 的 QueryResult(约 8.7KB)、
+  MonitorFrame::draw/update 的 MonitorSnapshot(约 8.6KB);服务器管理行
+  改为 IPC 逐项读取,不再在 createUI 栈上放 MonitorServer[32](3KB)。
+  ovlloader 小栈被挤爆是另一根因;工作线程栈 32KB→64KB;日志新增
+  stack-free 便于复测验证
+- overlay/Makefile 补齐 $(PORTLIBS)/include(CI 编译找不到 curl/curl.h
+  即「构建报错」根因)与 -lcurl -lz(链接缺库);诊断日志加
+  subs-start/curl-try/curl-done,再有崩溃日志即可钉死窗口
+- 删掉 main.cpp 的 #include <arm/counter.h>(错误路径:libnx 里是
+  switch/arm/counter.h,且 <switch.h> 本就传递包含;真实 CI 硬错误
+  fatal error: arm/counter.h: No such file or directory)
+
+反馈修复(均在补丁 10 内完成,不新增补丁):
+- 房间 5 秒 TTL 缓存:以 sessionId 为键,命中刷新时间戳、当次未出现
+  再保留 5 秒;查询瞬间失败时 5 秒内沿用最近一次成功的在线/房间数;
+  轮询查询窗口内不再清空统计与列表,消除扫描丢包导致的每秒闪烁;
+  服务器身份(host:port)变化时缓存整体清空防串台
+- 游戏名/游戏标题完整显示、不加省略号(宽度不够时整体缩字号);
+  服务器名/地址仅当会伸进右侧「* 延迟」区域时才截断加省略号
+  (libtesla limitStringLength 会无条件补「…」,原无条件调用把刚好
+  放得下的文本末字符也切掉了)
+- 扫描响应的 NetworkInfo 解析 nodes[] 用户名(0x68 起、步长 0x40,
+  isConnected @+11、userName[33] @+12),主机 nodes[0] 置顶;
+  扫描补出的房间不再永远显示「该服务器未提供玩家名单」
+
+本轮合并（仍在既有补丁 0010 内，不新增编号）：
+- 合入分支服务器管理页 AddServerGui、添加/删除/恢复默认操作、列表重建与焦点恢复；服务器列表继续使用 patch 10 的自绘 ServerRow，保留名称/地址布局、右侧延迟和在线/房间数字间距。
+- 游戏房间行改为与服务器行同高的 70px 固定双排布局：上排游戏标题、下排玩家名常显、人数右对齐；长名单在下排窗口内滚动。MonitorFrame 下方同时显示版本，空版本显示“版本未知”。
+- 最大容量统一为 32；出厂及恢复默认列表为 12 条，0009 中移除 relay.cfg 的「中国·江苏(2) yordon.cn:11451」；17 条添加候选目录仍保留该服务器作为可选候选，另有 4 条备用节点。
+- 在既有补丁 0010 内增加 room advertiseData 标题识别、UDP NetworkInfo 广告数据解析、旧 GraphQL schema 回退及纯主机回归测试；未识别 all-F 房间安全显示「未知游戏」，不读取本机 ProgramId。
+
+Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-TONYX9000
+
+旧系统兼容性（2026-10-19，HOS 19.0.1 / Atmosphère 1.9.5-pre 日志；根因待实机确认）：
+- 附件记录 2168-0001 Instruction Abort；查询和 UDP 扫描曾成功，崩溃线程 SP 靠近 User Exception Address。该信息值得排查线程栈/内存边界，但不能单独证实栈溢出。
+- 为降低旧运行环境下的线程栈压力，monitor worker 栈从 64 KiB 增至 256 KiB；LDN 解压 8 KiB 临时缓冲移为单 worker 专用静态缓冲。
+- 修正 stack-free 的无符号地址相减；仅在 probe 位于传入栈区时显示 used/free，否则记录 probe 和栈区范围，供复测诊断。
+
+CI 构建修复（DevkitPro 包数据库 HTTP 403）：
+- build/nightly/release 的依赖安装步骤已加入缓存回退；本次用户提供的 beta 构建日志显示 beta.yml 仍直接运行 dkp-pacman -Sy --noconfirm switch-curl，依赖步骤失败，Build 被跳过。
+- beta.yml 现复用同一策略：先检查 switch-curl 是否已安装；索引刷新失败时继续尝试用缓存数据库安装；最后用 dkp-pacman -Q 校验依赖，否则明确报缺失并停止，不吞掉真实依赖错误。
+- 四个 workflow 的 YAML 解析与 shell 分支均以 mock 测过：已安装、403 后缓存安装成功、正常刷新安装成功、依赖缺失时清楚失败。
+
+玩家名单切服串台修复（截图反馈）：
+- 对照 slp-server-rust 的 GraphQL NodeInfo，nodes 同时含 player_name 与 is_connected；旧 overlay 只查询 playerName，并把所有非空节点名都加入房间名单，可能把节点槽里已断开的旧昵称显示出来，造成 1/6 却出现多个名字。
+- 主查询增加 isConnected 字段；解析按 connected=true 过滤，去重，并在服务端给出 nodeCount 时以该计数限制名字数。为兼容旧 schema 增加逐级字段回退；旧 schema 没有连接标记时维持原行为。
+- UDP NetworkInfo 的 nodes 是固定 8 槽数组；扫描解析原先遍历全部槽位，nodeCount=1 时也可能读到尾部残留昵称。现只读 nodeCount 范围内的槽并去重，避免切换房间/服务器后偶发串名。
+- 切换服务器时立即清掉 worker 房间缓存与已发布快照，避免新查询完成前显示上一服务器的名单；纯主机测试覆盖连接状态、旧 schema 与 nodeCount 边界。
+
+服务器切换后的房间快照错位修复（反馈）：
+- 每次打开刷新或切换目标时更新请求代次，并立即把已发布的房间列表与新选择解绑、清空；
+- 单 worker 的旧服务器查询返回后，若请求代次已过期，则不写入房间缓存、在线/房间数或快照，避免把旧结果显示到新服务器下；新增纯主机 generation gate 回归测试。
+
+diff --git a/.github/workflows/beta.yml b/.github/workflows/beta.yml
+index e61dc52..9c225b0 100644
+--- a/.github/workflows/beta.yml
++++ b/.github/workflows/beta.yml
+@@ -120,9 +120,23 @@ jobs:
+ 
+       - name: Install switch-curl (订阅 HTTPS 下载)
+         run: |
++          set -euo pipefail
+           # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
+           # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
+-          dkp-pacman -Sy --noconfirm switch-curl
++          if dkp-pacman -Q switch-curl >/dev/null 2>&1; then
++            echo "switch-curl already installed"
++          else
++            # DevkitPro package DB refresh can fail with HTTP 403. Do not
++            # make a mirror refresh failure fatal if cached DBs can install it.
++            if ! dkp-pacman -Sy --noconfirm; then
++              echo "::warning::DevkitPro package DB refresh failed; trying cached metadata."
++            fi
++            dkp-pacman -S --noconfirm --needed switch-curl || true
++          fi
++          if ! dkp-pacman -Q switch-curl >/dev/null 2>&1; then
++            echo "::error::Required package switch-curl is not installed."
++            exit 1
++          fi
+ 
+       - name: Build
+         id: build
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index 3d7bc8b..b37dab7 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -38,8 +38,20 @@ jobs:
+       - name: Setup ccache
+         uses: hendrikmuhs/ccache-action@v1.2
+ 
+-      - name: Install latest libnx (before building)
++      - name: update Atmosphere-libs (适配最新系统)
+         run: |
++          # 与上游 nightly.yml 相同:构建前把 Atmosphere-libs 顶到 master,
++          # 跟踪最新系统固件适配(23.0.1+);不顶的话插件会在新系统上启动报错。
++          pushd Atmosphere-libs
++          git fetch --all
++          git reset --hard origin/master
++          popd
++
++      - name: Install libnx master (before building)
++        run: |
++          # 最新 Atmosphere-libs 使用 pgl 新命名(pglEventObserverGetShellEvent 系,
++          # libnx 2026-09-15 a13cd192 起),安装 libnx master 与其配套,
++          # 保证无论镜像自带 libnx 版本如何都能编译。
+           pushd /tmp
+           git clone https://github.com/switchbrew/libnx
+           cd libnx
+@@ -48,6 +60,26 @@ jobs:
+           make install
+           popd
+ 
++      - name: Install switch-curl (订阅 HTTPS 下载)
++        run: |
++          set -euo pipefail
++          # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
++          # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
++          if dkp-pacman -Q switch-curl >/dev/null 2>&1; then
++            echo "switch-curl already installed"
++          else
++            # DevkitPro package DB refresh can fail with HTTP 403. Do not
++            # make a mirror refresh failure fatal if cached DBs can install it.
++            if ! dkp-pacman -Sy --noconfirm; then
++              echo "::warning::DevkitPro package DB refresh failed; trying cached metadata."
++            fi
++            dkp-pacman -S --noconfirm --needed switch-curl || true
++          fi
++          if ! dkp-pacman -Q switch-curl >/dev/null 2>&1; then
++            echo "::error::Required package switch-curl is not installed."
++            exit 1
++          fi
++
+       - name: Clear invalid ccache after libnx update 
+         run: ccache -C
+ 
+diff --git a/.github/workflows/nightly.yml b/.github/workflows/nightly.yml
+index c53077f..d78034c 100644
+--- a/.github/workflows/nightly.yml
++++ b/.github/workflows/nightly.yml
+@@ -37,22 +37,41 @@ jobs:
+           git reset --hard origin/master
+           popd
+ 
+-      - name: Build
+-        id: build
+-        run: make -j8 PREFIX="ccache aarch64-none-elf-"
+-        continue-on-error: true
+-
+-      - name: Install libnx master & Retry build
+-        id: retry
+-        if: ${{ steps.build.outcome == 'failure' }}
++      - name: Install libnx master (before building)
+         run: |
++          # 最新 Atmosphere-libs(上一步已顶到 master)使用 pgl 新命名
++          # (pglEventObserverGetShellEvent 系,libnx 2026-09-15 a13cd192 起),
++          # 安装 libnx master 与其配套,保证无论镜像自带 libnx 版本如何都能编译。
+           pushd /tmp
+           git clone https://github.com/switchbrew/libnx
+           cd libnx
+           make -j8 PREFIX="ccache aarch64-none-elf-"
+           make install
+           popd
+-          make -j8 PREFIX="ccache aarch64-none-elf-"
++
++      - name: Install switch-curl (订阅 HTTPS 下载)
++        run: |
++          set -euo pipefail
++          # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
++          # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
++          if dkp-pacman -Q switch-curl >/dev/null 2>&1; then
++            echo "switch-curl already installed"
++          else
++            # DevkitPro package DB refresh can fail with HTTP 403. Do not
++            # make a mirror refresh failure fatal if cached DBs can install it.
++            if ! dkp-pacman -Sy --noconfirm; then
++              echo "::warning::DevkitPro package DB refresh failed; trying cached metadata."
++            fi
++            dkp-pacman -S --noconfirm --needed switch-curl || true
++          fi
++          if ! dkp-pacman -Q switch-curl >/dev/null 2>&1; then
++            echo "::error::Required package switch-curl is not installed."
++            exit 1
++          fi
++
++      - name: Build
++        id: build
++        run: make -j8 PREFIX="ccache aarch64-none-elf-"
+ 
+       - name: Upload built files
+         uses: actions/upload-artifact@v7
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 7f34343..6a0c0f0 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -35,22 +35,50 @@ jobs:
+     - name: Setup ccache
+       uses: hendrikmuhs/ccache-action@v1.2
+ 
+-    - name: Build
+-      id: build
+-      run: make -j8 PREFIX="ccache aarch64-none-elf-"
+-      continue-on-error: true
++    - name: update Atmosphere-libs (适配最新系统)
++      run: |
++        # 与上游 nightly.yml 相同:构建前把 Atmosphere-libs 顶到 master,
++        # 跟踪最新系统固件适配(23.0.1+);不顶的话插件会在新系统上启动报错。
++        pushd Atmosphere-libs
++        git fetch --all
++        git reset --hard origin/master
++        popd
+ 
+-    - name: Install libnx master & Retry build
+-      id: retry
+-      if: ${{ steps.build.outcome == 'failure' }}
++    - name: Install libnx master (before building)
+       run: |
++        # 最新 Atmosphere-libs 使用 pgl 新命名(pglEventObserverGetShellEvent 系,
++        # libnx 2026-09-15 a13cd192 起),安装 libnx master 与其配套,
++        # 保证无论镜像自带 libnx 版本如何都能编译。
+         pushd /tmp
+         git clone https://github.com/switchbrew/libnx
+         cd libnx
+         make -j8 PREFIX="ccache aarch64-none-elf-"
+         make install
+         popd
+-        make -j8 PREFIX="ccache aarch64-none-elf-"
++
++    - name: Install switch-curl (订阅 HTTPS 下载)
++      run: |
++        set -euo pipefail
++        # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
++        # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
++        if dkp-pacman -Q switch-curl >/dev/null 2>&1; then
++          echo "switch-curl already installed"
++        else
++          # DevkitPro package DB refresh can fail with HTTP 403. Do not
++          # make a mirror refresh failure fatal if cached DBs can install it.
++          if ! dkp-pacman -Sy --noconfirm; then
++            echo "::warning::DevkitPro package DB refresh failed; trying cached metadata."
++          fi
++          dkp-pacman -S --noconfirm --needed switch-curl || true
++        fi
++        if ! dkp-pacman -Q switch-curl >/dev/null 2>&1; then
++          echo "::error::Required package switch-curl is not installed."
++          exit 1
++        fi
++
++    - name: Build
++      id: build
++      run: make -j8 PREFIX="ccache aarch64-none-elf-"
+ 
+     - name: Pack
+       run: |
+diff --git a/Makefile b/Makefile
+index efcb5e7..cd62b35 100644
+--- a/Makefile
++++ b/Makefile
+@@ -57,6 +57,12 @@ PACK: $(SUBFOLDERS)
+ 	@ cp ldn_mitm/res/toolbox.json $(TITLE_DIR)/toolbox.json
+ 	@ touch $(TITLE_DIR)/flags/boot2.flag
+ 	@ cp config/ldn_mitm/relay.cfg $(SD_ROOT)/config/ldn_mitm/relay.cfg
++	@ mkdir -p $(SD_ROOT)/config/nx-ovlloader
++	@ printf '\000\000\200\000\000\000\000\000' > $(SD_ROOT)/config/nx-ovlloader/heap_size.bin
++	@ echo "预置订阅缓存(chinese_db.json;运行时经 https://v6.gh-proxy.org/ 加速镜像刷新;服务器列表只读 relay.cfg,不预置 servers.json)"
++	@ (curl -fsSL --max-time 60 https://raw.githubusercontent.com/jieluojun/LanPlayMonitor/refs/heads/main/chinese_db.json -o $(SD_ROOT)/config/ldn_mitm/chinese_db.json.tmp && mv $(SD_ROOT)/config/ldn_mitm/chinese_db.json.tmp $(SD_ROOT)/config/ldn_mitm/chinese_db.json) || (rm -f $(SD_ROOT)/config/ldn_mitm/chinese_db.json.tmp; echo "warn: chinese_db.json 预置失败")
++	@ ls -la $(SD_ROOT)/config/ldn_mitm/
++	@ (test -s $(SD_ROOT)/config/ldn_mitm/chinese_db.json) || echo "::warning::chinese_db.json 预置失败——请检查构建日志 curl 输出;即使缺失,在线/房间数字仍可工作(标题将显示标题ID)"
+ #---------------------------------------------------------------------------------
+ 
+ .PHONY: all clean PACK atmosphere-patch $(SUBFOLDERS)
 diff --git a/overlay/Makefile b/overlay/Makefile
-index e75d4f1..a69dae2 100644
+index da2bd21..788dac7 100644
 --- a/overlay/Makefile
 +++ b/overlay/Makefile
-@@ -47,7 +47,7 @@ TARGET		:=	$(notdir $(CURDIR))
+@@ -48,7 +48,7 @@ TARGET		:=	$(notdir $(CURDIR))
  BUILD		:=	build
  SOURCES		:=	source
  DATA		:=	data
 -INCLUDES	:=	include ../libtesla/include
-+INCLUDES	:=	source include ../libtesla/include $(PORTLIBS)/include
++INCLUDES	:=	include ../libtesla/include $(PORTLIBS)/include
  
  NO_ICON		:=  1
  
-@@ -66,7 +66,7 @@ CXXFLAGS	:= $(CFLAGS) -fno-exceptions -std=c++20
+@@ -57,7 +57,8 @@ NO_ICON		:=  1
+ #---------------------------------------------------------------------------------
+ ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
+ 
+-CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
++CFLAGS	:=	-g -Wall -Os -ffunction-sections -fdata-sections \
++			-fno-unwind-tables -fno-asynchronous-unwind-tables \
+ 			$(ARCH) $(DEFINES) $(VERSION_DEFINES)
+ 
+ CFLAGS	+=	$(INCLUDE) -D__SWITCH__
+@@ -65,9 +66,9 @@ CFLAGS	+=	$(INCLUDE) -D__SWITCH__
+ CXXFLAGS	:= $(CFLAGS) -fno-exceptions -std=c++20
+ 
  ASFLAGS	:=	-g $(ARCH)
- LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+-LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
++LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sections -Wl,--wrap=framebufferCreate
  
 -LIBS	:= -lnx
-+LIBS	:= -lnx -lcurl
++LIBS	:=	-lcurl -lz -lnx
  
  #---------------------------------------------------------------------------------
  # list of directories containing libraries, this must be the top level containing
+diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
+index 8e07c19..8eea790 100644
+--- a/overlay/source/main.cpp
++++ b/overlay/source/main.cpp
+@@ -1,6 +1,8 @@
+ #define TESLA_INIT_IMPL // If you have more than one file using the tesla header, only define this in the main one
+ #include <tesla.hpp>    // The Tesla Header
+ #include "ldn.h"
++#include "monitor.hpp"
++#include <functional>
+ #include <vector>
+ 
+ enum class State {
+@@ -18,7 +20,8 @@ char g_version[32];
+    OverlayFrame keeps the pointer instead of copying it. */
+ char g_brand[64] = "阿东版";   // overwritten by detectLanguage() at startup
+ 
+-std::vector<tsl::elm::ListItem*> g_serverItems;
++class ServerRow;
++std::vector<ServerRow*> g_serverRows;
+ 
+ /* Latency value currently painted on the server rows. Lives at file scope
+    rather than as a function-local static so createUI() can invalidate it:
+@@ -26,6 +29,12 @@ std::vector<tsl::elm::ListItem*> g_serverItems;
+    painting them entirely. */
+ u32 g_shown_latency = 0xFFFFFFFFu;
+ 
++/* 在线/房间周期刷新计时(与延迟 ping 的 1s 节奏对齐);0 = 尚未起表。 */
++static u64 g_lastPollNs = 0;
++
++/* overlay 是否可见(onShow/onHide 维护);隐藏时不发周期刷新,不扰网。 */
++static bool g_visible = false;
++
+ /* Traditional / Simplified Chinese switch. The overlay used to hardcode
+    Simplified strings, which left Traditional Chinese consoles with the
+    wrong glyphs. libtesla already loads both CJK shared fonts, so all we
+@@ -34,6 +43,416 @@ static bool g_isTraditional = false;
+ 
+ #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
+ 
++/* The list currently on screen, plus the "restore defaults" row. Both are
++   needed after a server is added/removed: libtesla has no per-item refresh,
++   so the whole list is rebuilt in place (see rebuildUi()). */
++class RebuildList : public tsl::elm::List {
++public:
++    /* List::clear() resets the scroll position to the top on the frame it
++       rebuilds, which made the menu visibly bounce back to the first entry
++       before re-focusing the deleted row. Snap straight to the row that is
++       about to be focused instead, so the rebuilt list appears in place. */
++    void snapToFocus() {
++        this->m_offset = this->m_nextOffset;
++        this->invalidate();
++    }
++};
++
++static RebuildList *g_list = nullptr;
++static tsl::elm::ListItem *g_restoreItem = nullptr;
++static bool g_restoreArmed = false;
++
++/* Rows only enter the List on the next draw, so a rebuilt list cannot take
++   focus immediately. update() re-applies this once the target is really in
++   the list, which keeps the cursor on the row the user was working on
++   instead of snapping back to the first entry. */
++static tsl::elm::Element *g_focus_after_rebuild = nullptr;
++static int g_focus_retries = 0;
++
++/* Set by the add page. The main list is not the top Gui while that page is
++   open, so it rebuilds on the first frame it becomes visible again. */
++static bool g_main_list_dirty = false;
++static tsl::elm::ListItem *g_addServerItem = nullptr;
++
++static void buildList(tsl::elm::List *list);
++static void rebuildUi();
++
++static void focusAfterRebuild(tsl::elm::Element *element) {
++    g_focus_after_rebuild = element;
++    g_focus_retries = 10;
++}
++
++
++/* ---- 联机监视器(在线/房间/游戏房间)UI 状态 ---- */
++
++/* 当前选中的服务器名,监视器按它查询(切换时立即刷新)。 */
++static char g_selectedName[48] = {};
++
++/* 游戏房间区块:标题 + 自绘房间行(持久池,只增不删,焦点安全)。 */
++static tsl::elm::CategoryHeader *g_roomHeader = nullptr;
++static u32 g_monitorVersion = 0xFFFFFFFFu;   /* 强制首次重建 */
++/* 游戏房间标题在列表中的下标;房间行用 addItem 的 index 参数插到它正下方
++   (直接 addItem 会被追加到列表末尾,跑到「关于」后面)。 */
++static int g_roomHeaderIndex = -1;
++
++class RoomRow;
++static std::vector<RoomRow *> g_roomRows;
++
++/* 房间行:与中继服务器列表相同的双排布局(上=游戏标题,下=玩家名),
++   始终显示玩家名;固定行高与 ServerRow 一致。 */
++static constexpr u16 kMonitorListRowHeight = 70;
++
++class RoomRow : public tsl::elm::Element {
++public:
++    static constexpr u16 kHeight = kMonitorListRowHeight;
++    static constexpr float kTitleFont = 22;
++    static constexpr float kPlayerFont = 16;
++
++    RoomRow() { memset(&m_room, 0, sizeof(m_room)); }
++
++    void setRoom(const MonitorRoom &room) {
++        m_room = room;
++        m_used = true;
++        m_hint = false;
++        m_measured = false;
++    }
++    void setHint(const char *text) {
++        memset(&m_room, 0, sizeof(m_room));
++        snprintf(m_hintText, sizeof(m_hintText), "%s", text);
++        m_used = true;
++        m_hint = true;
++    }
++    void clearRow() {
++        m_used = false;
++        m_hint = false;
++    }
++
++    u16 rowHeight() const {
++        if (!m_used)
++            return 0;
++        return m_hint ? 44 : kHeight;
++    }
++
++    virtual void layout(u16, u16, u16, u16) override {
++        this->setBoundaries(this->getX(), this->getY(), this->getWidth(), rowHeight());
++    }
++
++    virtual void draw(tsl::gfx::Renderer *renderer) override {
++        using R = tsl::gfx::Renderer;
++        if (!m_used)
++            return;
++        if (m_hint) {
++            renderer->drawString(m_hintText, false, this->getX() + 20, this->getY() + 32, 18,
++                                 R::a(tsl::style::color::ColorDescription));
++            return;
++        }
++
++        renderer->drawRect(this->getX(), this->getY(), this->getWidth(), 1,
++                           R::a(tsl::style::color::ColorFrame));
++
++        char val[24];
++        if (m_room.playersMax > 0)
++            snprintf(val, sizeof(val), "%u/%u", m_room.players, m_room.playersMax);
++        else
++            snprintf(val, sizeof(val), "%u", m_room.players);
++        auto [vw, vh] = renderer->drawString(val, false, 0, 0, 20,
++                                             R::a(tsl::style::color::ColorTransparent));
++        renderer->drawString(val, false,
++                             this->getX() + this->getWidth() - 20 - (s32)vw,
++                             this->getY() + 45, 20,
++                             R::a(tsl::style::color::ColorHighlight));
++
++        const s32 rightReserve = 20 + (s32)vw + 10;
++        const s32 avail = this->getWidth() - 20 - rightReserve;
++        const s32 textX = this->getX() + 20;
++
++        /* 上排标题完整显示:宽度不足时整体缩字号,不截标题。 */
++        float titleFont = kTitleFont;
++        auto [titleW, titleH] = renderer->drawString(m_room.game, false, 0, 0,
++                                                      titleFont,
++                                                      R::a(tsl::style::color::ColorTransparent));
++        if ((s32)titleW > avail && titleW > 0) {
++            titleFont *= (float)avail / (float)titleW;
++            if (titleFont < 12)
++                titleFont = 12;
++        }
++        renderer->enableScissoring(textX, this->getY() + 6, avail, 30);
++        renderer->drawString(m_room.game, false, textX, this->getY() + 32, titleFont,
++                             R::a(tsl::style::color::ColorText));
++        renderer->disableScissoring();
++
++        /* 下排玩家名:房主高亮,其余名字正常;过长时只在本行窗口内滚动。 */
++        const s32 playerY = this->getY() + 58;
++        if (m_room.playerN == 0) {
++            const char *empty = T("该服务器未提供玩家名单", "該伺服器未提供玩家名單");
++            auto [emptyW, emptyH] = renderer->drawString(empty, false, 0, 0,
++                                                          kPlayerFont,
++                                                          R::a(tsl::style::color::ColorTransparent));
++            std::string fit = empty;
++            if ((s32)emptyW > avail)
++                fit = renderer->limitStringLength(empty, false, kPlayerFont, avail);
++            renderer->drawString(fit.c_str(), false, textX, playerY, kPlayerFont,
++                                 R::a(tsl::style::color::ColorDescription));
++            return;
++        }
++
++        if (!m_measured)
++            measure(renderer, avail);
++        if (m_playerOverflow)
++            drawPlayerMarquee(renderer, textX, playerY, avail);
++        else
++            drawPlayerLine(renderer, textX, playerY, avail);
++    }
++
++    virtual tsl::elm::Element *requestFocus(tsl::elm::Element *,
++                                            tsl::FocusDirection) override {
++        return m_used ? this : nullptr;
++    }
++
++    virtual void setFocused(bool state) override {
++        m_scrollOff = 0;
++        m_scrollCnt = 0;
++        tsl::elm::Element::setFocused(state);
++    }
++
++private:
++    void measure(tsl::gfx::Renderer *renderer, s32 avail) {
++        using R = tsl::gfx::Renderer;
++        m_measured = true;
++        m_hostName = m_room.player[0];
++        m_playerSuffix.clear();
++        for (u8 i = 1; i < m_room.playerN; i++) {
++            m_playerSuffix += "、";
++            m_playerSuffix += m_room.player[i];
++        }
++        m_playerStrip = m_hostName + m_playerSuffix;
++        auto [hostW, hostH] = renderer->drawString(m_hostName.c_str(), false, 0, 0,
++                                                    kPlayerFont,
++                                                    R::a(tsl::style::color::ColorTransparent));
++        auto [stripW, stripH] = renderer->drawString(m_playerStrip.c_str(), false, 0, 0,
++                                                      kPlayerFont,
++                                                      R::a(tsl::style::color::ColorTransparent));
++        auto [gapW, gapH] = renderer->drawString("    ", false, 0, 0, kPlayerFont,
++                                                 R::a(tsl::style::color::ColorTransparent));
++        m_hostWidth = hostW;
++        m_stripWidth = stripW;
++        m_loopWidth = stripW + gapW;
++        m_playerOverflow = (s32)stripW > avail;
++        if (m_loopWidth == 0)
++            m_loopWidth = 1;
++        m_scrollOff %= m_loopWidth;
++    }
++
++    void drawPlayerLine(tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 avail) {
++        using R = tsl::gfx::Renderer;
++        renderer->enableScissoring(x, y - 21, avail, 27);
++        renderer->drawString(m_hostName.c_str(), false, x, y, kPlayerFont,
++                             R::a(tsl::style::color::ColorHighlight));
++        if (!m_playerSuffix.empty())
++            renderer->drawString(m_playerSuffix.c_str(), false, x + (s32)m_hostWidth, y,
++                                 kPlayerFont, R::a(tsl::style::color::ColorText));
++        renderer->disableScissoring();
++    }
++
++    void drawPlayerMarquee(tsl::gfx::Renderer *renderer, s32 x, s32 y, s32 avail) {
++        using R = tsl::gfx::Renderer;
++        if (m_scrollCnt < 90) {
++            m_scrollCnt++;
++        } else {
++            m_scrollCnt = 0;
++            m_scrollOff = (m_scrollOff + 1) % m_loopWidth;
++        }
++        renderer->enableScissoring(x, y - 21, avail, 27);
++        for (int copy = 0; copy < 2; copy++) {
++            const s32 left = x - (s32)m_scrollOff + copy * (s32)m_loopWidth;
++            if (left > x + avail || left + (s32)m_stripWidth < x)
++                continue;
++            renderer->drawString(m_hostName.c_str(), false, left, y, kPlayerFont,
++                                 R::a(tsl::style::color::ColorHighlight));
++            if (!m_playerSuffix.empty())
++                renderer->drawString(m_playerSuffix.c_str(), false,
++                                     left + (s32)m_hostWidth, y, kPlayerFont,
++                                     R::a(tsl::style::color::ColorText));
++        }
++        renderer->disableScissoring();
++    }
++
++    MonitorRoom m_room;
++    char m_hintText[96] = {};
++    bool m_used = false;
++    bool m_hint = false;
++    bool m_measured = false;
++    bool m_playerOverflow = false;
++    std::string m_hostName, m_playerSuffix, m_playerStrip;
++    u32 m_hostWidth = 0, m_stripWidth = 0, m_loopWidth = 1;
++    u32 m_scrollOff = 0, m_scrollCnt = 0;
++};
++
++/* 中继服务器行:双排布局(上=服务器名,下=服务器地址),行高与原
++ * ListItem 等高(70)。右侧沿用「* 延迟 Nms」文本;按 A/触摸 = 切换服务器。 */
++class ServerRow : public tsl::elm::Element {
++public:
++    static constexpr u16 kHeight = kMonitorListRowHeight;
++
++    void setServer(u32 index, const char *name, const char *addr) {
++        m_index = index;
++        snprintf(m_name, sizeof(m_name), "%s", name);
++        snprintf(m_addr, sizeof(m_addr), "%s", addr);
++    }
++    void setSelected(bool sel) {
++        m_selected = sel;
++        snprintf(m_right, sizeof(m_right), "%s", sel ? "*" : "");
++        m_rightFaint = true;
++    }
++    void setRight(const char *text, bool faint) {
++        snprintf(m_right, sizeof(m_right), "%s", text);
++        m_rightFaint = faint;
++    }
++    bool selected() const { return m_selected; }
++    void setClickListener(std::function<void()> fn) { m_click = std::move(fn); }
++    void setDeleteListener(std::function<void()> fn) { m_delete = std::move(fn); }
++
++    virtual void layout(u16, u16, u16, u16) override {
++        this->setBoundaries(this->getX(), this->getY(), this->getWidth(), kHeight);
++    }
++
++    virtual void draw(tsl::gfx::Renderer *renderer) override {
++        using R = tsl::gfx::Renderer;
++        renderer->drawRect(this->getX(), this->getY(), this->getWidth(), 1,
++                           R::a(tsl::style::color::ColorFrame));
++        /* 上排:服务器名(选中用高亮色);下排:服务器地址 */
++        /* 服务器名/地址:默认完整显示;只有会伸进右侧「* 延迟」区域
++         * (右 margin 20 + 延迟文本宽 + 间隔 10)时才截到该边界加省略号,
++         * 没超过就一个字符都不截。 */
++        s32 rightReserve = 20;
++        if (m_right[0]) {
++            auto [rw, rh] = renderer->drawString(m_right, false, 0, 0, 20,
++                                                 R::a(tsl::style::color::ColorTransparent));
++            rightReserve += (s32)rw + 10;
++        }
++        const s32 avail = this->getWidth() - 20 - rightReserve;
++        auto fit = [&](const char *s, float fs) -> std::string {
++            auto [w, h] = renderer->drawString(s, false, 0, 0, fs,
++                                               R::a(tsl::style::color::ColorTransparent));
++            if ((s32)w <= avail)
++                return s;
++            return renderer->limitStringLength(s, false, fs, avail);
++        };
++        std::string name = fit(m_name, 22);
++        renderer->drawString(name.c_str(), false, this->getX() + 20,
++                             this->getY() + 32, 22,
++                             R::a(m_selected ? tsl::style::color::ColorHighlight
++                                             : tsl::style::color::ColorText));
++        std::string addr = fit(m_addr, 16);
++        renderer->drawString(addr.c_str(), false, this->getX() + 20,
++                             this->getY() + 58, 16,
++                             R::a(tsl::style::color::ColorDescription));
++        if (m_right[0]) {
++            auto [vw, vh] = renderer->drawString(m_right, false, 0, 0, 20,
++                                                 R::a(tsl::style::color::ColorTransparent));
++            renderer->drawString(m_right, false,
++                                 this->getX() + this->getWidth() - 20 - (s32)vw,
++                                 this->getY() + 45, 20,
++                                 R::a(m_rightFaint ? tsl::style::color::ColorDescription
++                                                   : tsl::style::color::ColorHighlight));
++        }
++    }
++
++    virtual tsl::elm::Element *requestFocus(tsl::elm::Element *oldFocus,
++                                            tsl::FocusDirection direction) override {
++        return this;
++    }
++
++    virtual bool onClick(u64 keys) override {
++        if (keys & HidNpadButton_A) {
++            if (m_click)
++                m_click();
++            this->triggerClickAnimation();
++            return true;
++        }
++        if (keys & HidNpadButton_X) {
++            if (m_delete)
++                m_delete();
++            this->triggerClickAnimation();
++            return true;
++        }
++        return false;
++    }
++
++    virtual bool onTouch(tsl::elm::TouchEvent event, s32 currX, s32 currY,
++                         s32 prevX, s32 prevY, s32 initialX, s32 initialY) override {
++        if (event == tsl::elm::TouchEvent::Touch)
++            m_touched = this->inBounds(currX, currY);
++        if (event == tsl::elm::TouchEvent::Release && m_touched) {
++            m_touched = false;
++            if (tsl::elm::Element::getInputMode() == tsl::InputMode::Touch)
++                return this->onClick(HidNpadButton_A);
++        }
++        return false;
++    }
++
++private:
++    u32 m_index = 0;
++    char m_name[32] = {};
++    char m_addr[80] = {};  // up to 63-byte host + colon + 5-digit port
++    char m_right[48] = {};
++    bool m_rightFaint = true;
++    bool m_selected = false;
++    bool m_touched = false;
++    std::function<void()> m_click;
++    std::function<void()> m_delete;
++};
++
++/* 帧:在标题下方常驻显示当前服务器的在线人数与房间数量。
++   标签“在线/房间”在上,对应数量在下。 */
++class MonitorFrame : public tsl::elm::OverlayFrame {
++public:
++    MonitorFrame(const std::string &title, const std::string &subtitle)
++        : tsl::elm::OverlayFrame(title, subtitle) {}
++
++    virtual void draw(tsl::gfx::Renderer *renderer) override {
++        { static bool once = false; if (!once) { once = true; MonitorLog("first-frame"); } }
++        tsl::elm::OverlayFrame::draw(renderer);
++
++        /* OverlayFrame 的底部提示固定为英文;覆盖后按系统语言重绘。 */
++        renderer->drawRect(20, 670, 400, 45,
++                           tsl::gfx::Renderer::a(tsl::style::color::ColorFrameBackground));
++        renderer->drawString(T("\uE0E1  返回     \uE0E0  确定",
++                               "\uE0E1  返回     \uE0E0  確定"),
++                             false, 30, 693, 23,
++                             tsl::gfx::Renderer::a(tsl::style::color::ColorText));
++
++        /* static: MonitorSnapshot 约 8.6KB,放栈上会把 ovlloader 给的
++         * 小栈(配合 libtesla 绘制深度)挤爆——10-19 崩溃根因之一。 */
++        static MonitorSnapshot snap;
++        MonitorCopySnapshot(&snap);
++
++        char online[16], rooms[16];
++        if (snap.online >= 0)
++            snprintf(online, sizeof(online), "%d", snap.online);
++        else
++            snprintf(online, sizeof(online), "--");
++        if (snap.roomCount >= 0)
++            snprintf(rooms, sizeof(rooms), "%d", snap.roomCount);
++        else
++            snprintf(rooms, sizeof(rooms), "--");
++
++        renderer->enableScissoring(0, 0, tsl::cfg::FramebufferWidth, 125);
++
++        /* 联机插件标题正下方:两列统计,标签(在线 / 房间)在上,数字在下 */
++        constexpr s32 colX[2] = { 20, 115 };
++        renderer->drawString(T("在线", "線上"), false, colX[0], 88, 15,
++                             tsl::gfx::Renderer::a(tsl::style::color::ColorDescription));
++        renderer->drawString(T("房间", "房間"), false, colX[1], 88, 15,
++                             tsl::gfx::Renderer::a(tsl::style::color::ColorDescription));
++        renderer->drawString(online, false, colX[0], 109, 20,
++                             tsl::gfx::Renderer::a(tsl::style::color::ColorText));
++        renderer->drawString(rooms, false, colX[1], 109, 20,
++                             tsl::gfx::Renderer::a(tsl::style::color::ColorText));
++
++        renderer->disableScissoring();
++    }
++};
+ class ConfigToggleListItem : public tsl::elm::ToggleListItem {
+ public:
+     ConfigToggleListItem(const char *label,
+@@ -70,140 +489,67 @@ static void detectLanguage()
+     strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
+ }
+ 
+-class MainGui : public tsl::Gui {
+-public:
+-    MainGui() { }
++/* (重)建“游戏房间”区块的行。快照 version 变化时由 update() 调用。
++   行是持久池(只增不删):不用的行 height=0,焦点永远不会挂在已删除
++   元素上;有效房间行固定为 70px,快照变化时更新标题与玩家名。 */
++static void rebuildRoomSection(const MonitorSnapshot &snap)
++{
++    if (!g_list || !g_roomHeader || g_roomHeaderIndex < 0)
++        return;
+ 
+-    virtual tsl::elm::Element* createUI() override {
+-        // This overlay ships inside a Chinese integration package and the
+-        // bundled font has CJK glyphs, so the UI is localised in place.
+-        // The header subtitle carries the release brand; the full version
+-        // string is repeated in the T("关于", "關於") block at the bottom.
+-        auto frame = new tsl::elm::OverlayFrame(T("联机插件", "連線插件"), g_brand);
++    char header[80];
++    if (snap.server[0])
++        snprintf(header, sizeof(header), "%s · %s", T("游戏房间", "遊戲房間"), snap.server);
++    else
++        snprintf(header, sizeof(header), "%s", T("游戏房间", "遊戲房間"));
++    g_roomHeader->setText(header);
+ 
+-        auto list = new tsl::elm::List();
++    u32 need = snap.roomN > 0 ? snap.roomN : 1;   /* 0 房间时用 1 行提示 */
++    while (g_roomRows.size() < need) {
++        auto *row = new RoomRow();
++        g_roomRows.push_back(row);
++        g_list->addItem(row, 0, g_roomHeaderIndex + 1 + (int)g_roomRows.size() - 1);
++    }
+ 
+-        if (g_state == State::Error) {
+-            list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
+-        } else if (g_state == State::Uninit) {
+-            list->addItem(new tsl::elm::ListItem(T("错误的状态", "錯誤的狀態")));
+-        } else {
+-            list->addItem(new ConfigToggleListItem(T("启用", "啟用"), ldnMitmGetEnabled, ldnMitmSetEnabled));
+-            list->addItem(new ConfigToggleListItem(T("广播转发", "廣播轉發"), ldnMitmGetBroadcastRelay, ldnMitmSetBroadcastRelay));
+-            list->addItem(new ConfigToggleListItem(T("日志", "日誌"), ldnMitmGetLogging, ldnMitmSetLogging));
+-
+-            list->addItem(new tsl::elm::CategoryHeader(T("互联网中继（跨网联机）", "網際網路中繼（跨網連線）")));
+-            list->addItem(new ConfigToggleListItem(T("互联网中继", "網際網路中繼"), ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
+-
+-            g_serverItems.clear();
+-            u32 count = 0;
+-            if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count))) {
+-                list->addItem(new tsl::elm::ListItem(T("读取服务器列表失败", "讀取伺服器清單失敗")));
+-            } else if (count == 0) {
+-                list->addItem(new tsl::elm::ListItem(T("没有服务器，请编辑 relay.cfg", "沒有伺服器，請編輯 relay.cfg")));
++    for (u32 i = 0; i < g_roomRows.size(); i++) {
++        if (snap.roomN == 0) {
++            if (i == 0) {
++                const char *msg;
++                if (snap.busy)
++                    msg = T("正在查询…", "正在查詢…");
++                else if (snap.status[0])
++                    msg = snap.status;
++                else
++                    msg = T("暂无房间", "暫無房間");
++                g_roomRows[i]->setHint(msg);
+             } else {
+-                u32 selected = 0;
+-                if (R_FAILED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &selected))) {
+-                    selected = count;
+-                }
+-                for (u32 i = 0; i < count; i++) {
+-                    char name[32] = {};
+-                    ldnMitmGetRelayServerName(&g_ldnConfig, i, name);
+-                    auto *item = new tsl::elm::ListItem(name);
+-                    item->setValue(i == selected ? "*" : "");
+-                    item->setClickListener([i](u64 keys) {
+-                        if (keys & HidNpadButton_A) {
+-                            if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
+-                                g_serverItems[i]->setValue(T("错误", "錯誤"));
+-                                return true;
+-                            }
+-                            for (size_t k = 0; k < g_serverItems.size(); k++) {
+-                                g_serverItems[k]->setValue(k == i ? "*" : "");
+-                            }
+-                            // The loop above just wiped every latency label back
+-                            // to a bare "*". Invalidate the cache so the next
+-                            // update() repaints, otherwise the rows would sit
+-                            // there with only a star until the overlay is
+-                            // reopened.
+-                            g_shown_latency = 0xFFFFFFFFu;
+-                            return true;
+-                        }
+-                        return false;
+-                    });
+-                    g_serverItems.push_back(item);
+-                    list->addItem(item);
+-                }
++                g_roomRows[i]->clearRow();
+             }
++        } else if (i < snap.roomN) {
++            g_roomRows[i]->setRoom(snap.rooms[i]);
++        } else {
++            g_roomRows[i]->clearRow();
++        }
++    }
++    g_list->invalidate();
++}
+ 
+-            // Show this console's relay identity. relay.cfg only stores the
+-            // low 16 bits (`id=`), and the plugin assigns one on first use if
+-            // the line is absent, so this is the only place to read it back.
+-            list->addItem(new tsl::elm::CategoryHeader(T("本机身份", "本機身分")));
+-
+-            // The relay address is derived from this LAN address, so showing
+-            // it makes it obvious why the two consoles get different ids.
+-            // nifm only hands out an address once the LAN session exists, so
+-            // before the game creates or joins a room there is nothing to
+-            // read -- that is expected, not a failure.
+-            u32 local_ip = 0;
+-            if (R_SUCCEEDED(ldnMitmGetRelayLocalIp(&g_ldnConfig, &local_ip)) && local_ip != 0) {
+-                char ipbuf[32];
+-                snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u",
+-                         (local_ip >> 24) & 0xff, (local_ip >> 16) & 0xff,
+-                         (local_ip >> 8) & 0xff, local_ip & 0xff);
+-                list->addItem(new tsl::elm::ListItem(T("本机 IP", "本機 IP"), ipbuf));
+-            } else {
+-                list->addItem(new tsl::elm::ListItem(T("本机 IP", "本機 IP"), T("建立房间后显示", "建立房間後顯示")));
+-            }
++class MainGui : public tsl::Gui {
++public:
++    MainGui() { }
+ 
+-            u32 vaddr = 0;
+-            const bool addr_ok = R_SUCCEEDED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr));
+-            if (!addr_ok) {
+-                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), T("读取失败", "讀取失敗")));
+-            } else if (vaddr == 0) {
+-                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), T("建立房间后分配", "建立房間後分配")));
+-            } else {
+-                char buf[48];
+-                snprintf(buf, sizeof(buf), "%u.%u.%u.%u  (id=%u)",
+-                         (vaddr >> 24) & 0xff, (vaddr >> 16) & 0xff,
+-                         (vaddr >> 8) & 0xff, vaddr & 0xff, vaddr & 0xffff);
+-                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), buf));
+-            }
++    virtual tsl::elm::Element* createUI() override {
++        MonitorLog("ui-begin");
++        // This overlay ships inside a Chinese integration package and the
++        // bundled font has CJK glyphs, so the UI is localised in place.
++        // The header subtitle carries the release brand and resolved build
++        // version; the full version is also repeated in the About block.
++        auto frame = new MonitorFrame(T("联机插件", "連線插件"), g_brand);
+ 
+-            // Tell the user whether the address is stable. T("硬件派生", "硬體衍生") is
+-            // derived from this console's LAN address, so it is the same on
+-            // every boot even when the SD card is write-protected. T("启动随机", "啟動隨機")
+-            // still gets written to relay.cfg, so check it again after a
+-            // reboot -- if the number changes, the write is failing.
+-            if (addr_ok && vaddr != 0) {
+-                u32 src = 0;
+-                if (R_FAILED(ldnMitmGetRelayIdSource(&g_ldnConfig, &src))) {
+-                    src = 0;
+-                }
+-                if (src == 1) {
+-                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("硬件派生", "硬體衍生")));
+-                } else if (src == 2) {
+-                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("启动随机", "啟動隨機")));
+-                } else if (src == 3) {
+-                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("已自动更换", "已自動更換")));
+-                } else {
+-                    // The id either predates hardware derivation or was cached
+-                    // before this console's LAN address changed.
+-                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("未知来源", "未知來源")));
+-                }
+-            }
+-            list->addItem(new tsl::elm::ListItem(T("两台机器的地址必须不同", "兩台機器的位址必須不同")));
+-            list->addItem(new tsl::elm::ListItem(T("重启后地址不变即正常", "重新啟動後位址不變即正常")));
+-
+-            // Release signature. Kept at the very bottom so it never gets in
+-            // the way of the settings, but every user scrolling down sees it.
+-            list->addItem(new tsl::elm::CategoryHeader(T("关于", "關於")));
+-            list->addItem(new tsl::elm::ListItem(T("制作", "製作"), T("阿东 & 大肥鱼", "阿東 & 大肥魚")));
+-            list->addItem(new tsl::elm::ListItem(T("版本", "版本"), g_version));
+-            list->addItem(new tsl::elm::ListItem(T("声明", "聲明"), T("免费分享 禁止倒卖", "免費分享 禁止轉賣")));
+-        }
++        g_list = new RebuildList();
++        buildList(g_list);
+ 
+-        frame->setContent(list);
++        frame->setContent(g_list);
+ 
+         // Every item was just created with a bare "*". Force the first
+         // update() to paint the latency text even if the reading has not
+@@ -211,16 +557,75 @@ public:
+         // cached value made update() return early and the label stayed at
+         // just "*" with no "--" and no number.
+         g_shown_latency = 0xFFFFFFFFu;
++        // 同理:强制首次重建游戏房间区块。
++        g_monitorVersion = 0xFFFFFFFFu;
+ 
++        MonitorLog("ui-ready");
+         return frame;
+     }
+ 
+     // Called once every frame to update values
+     virtual void update() override {
++        // Coming back from the add page: the relay list changed while this
++        // Gui sat underneath it, so rebuild now that it is on top again.
++        if (g_main_list_dirty) {
++            g_main_list_dirty = false;
++            rebuildUi();
++            focusAfterRebuild(g_addServerItem);
++        }
++
++        // Put the cursor back on the row the user was on before the list was
++        // rebuilt (delete / restore). Runs before draw, so the target is only
++        // found once List::draw() has inserted the freshly built rows.
++        if (g_focus_after_rebuild != nullptr) {
++            if (g_list != nullptr) {
++                const s32 idx = g_list->getIndexInList(g_focus_after_rebuild);
++                if (idx >= 0) {
++                    g_list->setFocusedIndex(static_cast<u32>(idx));
++                    g_list->snapToFocus();
++                    this->requestFocus(g_focus_after_rebuild, tsl::FocusDirection::None);
++                    g_focus_after_rebuild = nullptr;
++                } else if (--g_focus_retries <= 0) {
++                    g_focus_after_rebuild = nullptr;
++                }
++            } else {
++                g_focus_after_rebuild = nullptr;
++            }
++        }
++
++        // Cancel an armed "restore defaults" if the user moved the cursor
++        // away, so the row never stays in a half-confirmed state.
++        if (g_restoreArmed && g_restoreItem != nullptr &&
++            this->getFocusedElement() != g_restoreItem) {
++            g_restoreArmed = false;
++            g_restoreItem->setValue("");
++        }
++
++
++        // 游戏房间区块:监视器快照 version 变化时重建行。
++        static MonitorSnapshot snap;   /* 8.6KB:static,别放栈上(见 draw 注释) */
++        MonitorCopySnapshot(&snap);
++        if (snap.version != g_monitorVersion) {
++            g_monitorVersion = snap.version;
++            rebuildRoomSection(snap);
++        }
++
++        // 在线/房间周期刷新:与延迟 ping(sysmodule 每 1s 发一次)同节奏。
++        // 仅可见时刷新;MonitorRequestPoll 不动目标、不重拉订阅,查询由
++        // 后台线程合并执行,不会堆积。
++        if (g_visible && g_state == State::Loaded) {
++            u64 nowNs = armTicksToNs(armGetSystemTick());
++            if (g_lastPollNs == 0)
++                g_lastPollNs = nowNs;
++            if (nowNs - g_lastPollNs >= 1000000000ull) {
++                g_lastPollNs = nowNs;
++                MonitorRequestPoll();
++            }
++        }
+         // Show the live relay latency next to the selected server.
+         // Only the selected server is connected, so it is the only one
+         // whose round-trip time we can actually know.
+-        if (g_state != State::Loaded || g_serverItems.empty()) {
++        if (g_state != State::Loaded || g_serverRows.empty()) {
+             return;
+         }
+         u32 ms = 0;
+@@ -233,9 +638,8 @@ public:
+         }
+         g_shown_latency = ms;
+ 
+-        // ListItem::setValue(value, faint): faint=false renders in the
+-        // highlight colour, faint=true in the dim description colour. That
+-        // gives a green / grey traffic light without a custom element.
++        // faint=false renders in the highlight colour, faint=true in the dim
++        // description colour: green / grey traffic light without extra widgets.
+         char buf[48];
+         bool faint = false;
+         if (ms == 0) {
+@@ -247,9 +651,9 @@ public:
+         } else {
+             snprintf(buf, sizeof(buf), T("* 延迟 %ums", "* 延遲 %ums"), ms);
+         }
+-        for (size_t k = 0; k < g_serverItems.size(); k++) {
+-            if (!g_serverItems[k]->getValue().empty()) {
+-                g_serverItems[k]->setValue(buf, faint);
++        for (size_t k = 0; k < g_serverRows.size(); k++) {
++            if (g_serverRows[k]->selected()) {
++                g_serverRows[k]->setRight(buf, faint);
+             }
+         }
+     }
+@@ -260,14 +664,349 @@ public:
+     }
+ };
+ 
++/* Preset picker. libtesla has no text input (Tesla cannot open swkbd from a
++   LibraryApplet), so "add" means putting one of the factory relays back.
++   Entries that are already configured say 已添加 and do nothing. */
++class AddServerGui : public tsl::Gui {
++public:
++    virtual tsl::elm::Element* createUI() override {
++        u32 builtin = 0;
++        if (R_FAILED(ldnMitmGetBuiltinRelayServerCount(&g_ldnConfig, &builtin))) {
++            builtin = 0;
++        }
++        u32 current = 0;
++        ldnMitmGetRelayServerCount(&g_ldnConfig, &current);
++
++        // The subtitle carries the capacity state: the list is capped at
++        // LDN_MAX_SERVERS, so backups can only be added after freeing a slot.
++        char subtitle[96];
++        if (current >= LDN_MAX_SERVERS) {
++            snprintf(subtitle, sizeof(subtitle),
++                     T("已满 %u/%u · 先删一台再用备选", "已滿 %u/%u · 先刪一台再用備選"),
++                     static_cast<unsigned>(current), static_cast<unsigned>(LDN_MAX_SERVERS));
++        } else {
++            snprintf(subtitle, sizeof(subtitle),
++                     T("内置 %u 台 · 当前 %u/%u", "內建 %u 台 · 目前 %u/%u"),
++                     static_cast<unsigned>(builtin), static_cast<unsigned>(current),
++                     static_cast<unsigned>(LDN_MAX_SERVERS));
++        }
++        auto frame = new tsl::elm::OverlayFrame(T("添加服务器", "新增伺服器"), subtitle);
++        auto *list = new tsl::elm::List();
++
++        list->addItem(new tsl::elm::CategoryHeader(T("内置服务器（按 A 添加）", "內建伺服器（按 A 新增）")));
++
++        for (u32 i = 0; i < builtin; i++) {
++            LdnRelayServerInfo info = {};
++            if (R_FAILED(ldnMitmGetBuiltinRelayServerInfo(&g_ldnConfig, i, &info))) {
++                continue;
++            }
++            bool present = false;
++            for (u32 k = 0; k < current; k++) {
++                LdnRelayServerInfo cur = {};
++                if (R_SUCCEEDED(ldnMitmGetRelayServerInfo(&g_ldnConfig, k, &cur)) &&
++                    strcmp(cur.host, info.host) == 0 && cur.port == info.port) {
++                    present = true;
++                    break;
++                }
++            }
++
++            /* Do not paint host:port here. libtesla's ListItem does not
++               truncate the value, and a long address (e.g.
++               muitxobem-lanplay.ddns.net:11451) is wider than the row, so it
++               was drawn on top of the left-hand name. A short status word
++               keeps the name readable; the addresses live in the README. */
++            auto *item = new tsl::elm::ListItem(info.name);
++            item->setValue(present ? T("已添加", "已新增") : T("可添加", "可新增"), present);
++
++            auto added = std::make_shared<bool>(present);
++            auto count = std::make_shared<u32>(current);
++            item->setClickListener([item, info, added, count](u64 keys) {
++                if (!(keys & HidNpadButton_A)) {
++                    return false;
++                }
++                if (*added) {
++                    return true;
++                }
++                if (*count >= LDN_MAX_SERVERS) {
++                    item->setValue(T("先删一台", "先刪一台"), true);
++                    return true;
++                }
++                if (R_SUCCEEDED(ldnMitmAddRelayServer(&g_ldnConfig, &info))) {
++                    *added = true;
++                    (*count)++;
++                    item->setValue(T("已添加", "已新增"), true);
++                    g_main_list_dirty = true;
++                } else {
++                    item->setValue(T("添加失败", "新增失敗"), true);
++                }
++                return true;
++            });
++            list->addItem(item);
++        }
++
++        frame->setContent(list);
++        return frame;
++    }
++};
++
++
++/* Keep the monitor target aligned with the sysmodule's selected relay after
++   deleting the selected row or restoring the factory list. */
++static void syncMonitorTargetFromRelaySelection() {
++    u32 count = 0;
++    u32 selected = 0;
++    if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count)) || count == 0 ||
++        R_FAILED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &selected)) || selected >= count) {
++        g_selectedName[0] = 0;
++        MonitorRequestSwitch(nullptr);
++        return;
++    }
++    char name[32] = {};
++    if (R_FAILED(ldnMitmGetRelayServerName(&g_ldnConfig, selected, name))) {
++        g_selectedName[0] = 0;
++        MonitorRequestSwitch(nullptr);
++        return;
++    }
++    snprintf(g_selectedName, sizeof(g_selectedName), "%s", name);
++    MonitorRequestSwitch(g_selectedName);
++}
++
++/* Everything below the frame header. Kept out of createUI() so it can be
++   called again after the relay list changes: libtesla cannot refresh a
++   single row, but it can delete and re-add the whole list on the next
++   frame (List::clear() + addItem() are both deferred). */
++static void buildList(tsl::elm::List *list) {
++    g_serverRows.clear();
++    g_roomRows.clear();
++    g_roomHeader = nullptr;
++    g_roomHeaderIndex = -1;
++    g_monitorVersion = 0xFFFFFFFFu;
++    g_selectedName[0] = 0;
++    g_restoreItem = nullptr;
++    g_addServerItem = nullptr;
++    g_restoreArmed = false;
++
++    if (g_state == State::Error) {
++        list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
++    } else if (g_state == State::Uninit) {
++        list->addItem(new tsl::elm::ListItem(T("错误的状态", "錯誤的狀態")));
++    } else {
++        list->addItem(new ConfigToggleListItem(T("启用", "啟用"), ldnMitmGetEnabled, ldnMitmSetEnabled));
++        list->addItem(new ConfigToggleListItem(T("广播转发", "廣播轉發"), ldnMitmGetBroadcastRelay, ldnMitmSetBroadcastRelay));
++        list->addItem(new ConfigToggleListItem(T("日志", "日誌"), ldnMitmGetLogging, ldnMitmSetLogging));
++
++        list->addItem(new tsl::elm::CategoryHeader(T("互联网中继（跨网联机）", "網際網路中繼（跨網連線）")));
++        list->addItem(new ConfigToggleListItem(T("互联网中继", "網際網路中繼"), ldnMitmGetInternetRelay, ldnMitmSetInternetRelay));
++
++        /* Patch 10's monitor header stays above the relay selector. Rows are
++           inserted directly after it by rebuildRoomSection(). */
++        g_roomHeaderIndex = 5;  // 3 toggles + 2 internet-relay entries
++        g_roomHeader = new tsl::elm::CategoryHeader(T("游戏房间", "遊戲房間"));
++        list->addItem(g_roomHeader);
++        list->addItem(new tsl::elm::CategoryHeader(
++            T("中继服务器（按 A 切换，按 X 删除）", "中繼伺服器（按 A 切換，按 X 刪除）")));
++
++        u32 count = 0;
++        if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count))) {
++            list->addItem(new tsl::elm::ListItem(T("读取服务器列表失败", "讀取伺服器清單失敗")));
++        } else if (count == 0) {
++            list->addItem(new tsl::elm::ListItem(T("没有服务器，请恢复默认", "沒有伺服器，請恢復預設")));
++        } else {
++            u32 selected = 0;
++            if (R_FAILED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &selected))) {
++                selected = count;
++            }
++            for (u32 i = 0; i < count; i++) {
++                LdnRelayServerInfo info = {};
++                char name[32] = {};
++                char addr[80] = {};
++                if (R_SUCCEEDED(ldnMitmGetRelayServerInfo(&g_ldnConfig, i, &info))) {
++                    snprintf(name, sizeof(name), "%s", info.name);
++                    if (info.host[0]) {
++                        snprintf(addr, sizeof(addr), "%s:%u", info.host,
++                                 static_cast<unsigned>(info.port));
++                    }
++                } else {
++                    ldnMitmGetRelayServerName(&g_ldnConfig, i, name);
++                }
++
++                auto *row = new ServerRow();
++                row->setServer(i, name, addr);
++                row->setSelected(i == selected);
++                if (i == selected)
++                    snprintf(g_selectedName, sizeof(g_selectedName), "%s", name);
++
++                row->setClickListener([i, name = std::string(name), row]() {
++                    if (R_FAILED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
++                        row->setRight(T("切换失败", "切換失敗"), true);
++                        return;
++                    }
++                    for (size_t k = 0; k < g_serverRows.size(); k++)
++                        g_serverRows[k]->setSelected(k == i);
++                    g_shown_latency = 0xFFFFFFFFu;
++                    snprintf(g_selectedName, sizeof(g_selectedName), "%s", name.c_str());
++                    MonitorRequestSwitch(g_selectedName);
++                });
++
++                row->setDeleteListener([i, row]() {
++                    if (R_SUCCEEDED(ldnMitmDeleteRelayServer(&g_ldnConfig, i))) {
++                        syncMonitorTargetFromRelaySelection();
++                        rebuildUi();
++                        if (!g_serverRows.empty()) {
++                            const size_t next = (i < g_serverRows.size()) ? i : (g_serverRows.size() - 1);
++                            focusAfterRebuild(g_serverRows[next]);
++                        } else {
++                            focusAfterRebuild(g_restoreItem);
++                        }
++                    } else {
++                        row->setRight(T("删除失败", "刪除失敗"), true);
++                    }
++                });
++
++                g_serverRows.push_back(row);
++                list->addItem(row);
++            }
++        }
++
++        // Undo a mistake without editing relay.cfg on a PC. Two presses on
++        // purpose: this rewrites the whole relay list.
++        list->addItem(new tsl::elm::CategoryHeader(T("管理", "管理")));
++
++        g_addServerItem = new tsl::elm::ListItem(T("添加服务器", "新增伺服器"));
++        g_addServerItem->setClickListener([](u64 keys) {
++            if (keys & HidNpadButton_A) {
++                tsl::changeTo<AddServerGui>();
++                return true;
++            }
++            return false;
++        });
++        list->addItem(g_addServerItem);
++
++        g_restoreItem = new tsl::elm::ListItem(T("恢复默认服务器", "恢復預設伺服器"));
++        g_restoreItem->setClickListener([](u64 keys) {
++            if (!(keys & HidNpadButton_A)) {
++                return false;
++            }
++            if (!g_restoreArmed) {
++                g_restoreArmed = true;
++                g_restoreItem->setValue(T("再按 A 确认", "再按 A 確認"), true);
++                return true;
++            }
++            g_restoreArmed = false;
++            if (R_SUCCEEDED(ldnMitmRestoreDefaultRelayServers(&g_ldnConfig))) {
++                syncMonitorTargetFromRelaySelection();
++                rebuildUi();
++                focusAfterRebuild(g_restoreItem);
++            } else if (g_restoreItem != nullptr) {
++                g_restoreItem->setValue(T("恢复失败", "恢復失敗"), true);
++            }
++            return true;
++        });
++        list->addItem(g_restoreItem);
++
++        // Show this console's relay identity. relay.cfg only stores the
++        // low 16 bits (`id=`), and the plugin assigns one on first use if
++        // the line is absent, so this is the only place to read it back.
++        list->addItem(new tsl::elm::CategoryHeader(T("本机身份", "本機身分")));
++
++        // The relay address is derived from this LAN address, so showing
++        // it makes it obvious why the two consoles get different ids.
++        // nifm only hands out an address once the LAN session exists, so
++        // before the game creates or joins a room there is nothing to
++        // read -- that is expected, not a failure.
++        u32 local_ip = 0;
++        if (R_SUCCEEDED(ldnMitmGetRelayLocalIp(&g_ldnConfig, &local_ip)) && local_ip != 0) {
++            char ipbuf[32];
++            snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u",
++                     (local_ip >> 24) & 0xff, (local_ip >> 16) & 0xff,
++                     (local_ip >> 8) & 0xff, local_ip & 0xff);
++            list->addItem(new tsl::elm::ListItem(T("本机 IP", "本機 IP"), ipbuf));
++        } else {
++            list->addItem(new tsl::elm::ListItem(T("本机 IP", "本機 IP"), T("建立房间后显示", "建立房間後顯示")));
++        }
++
++        u32 vaddr = 0;
++        const bool addr_ok = R_SUCCEEDED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr));
++        if (!addr_ok) {
++            list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), T("读取失败", "讀取失敗")));
++        } else if (vaddr == 0) {
++            list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), T("建立房间后分配", "建立房間後分配")));
++        } else {
++            char buf[48];
++            snprintf(buf, sizeof(buf), "%u.%u.%u.%u  (id=%u)",
++                     (vaddr >> 24) & 0xff, (vaddr >> 16) & 0xff,
++                     (vaddr >> 8) & 0xff, vaddr & 0xff, vaddr & 0xffff);
++            list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), buf));
++        }
++
++        // Tell the user whether the address is stable. T("硬件派生", "硬體衍生") is
++        // derived from this console's LAN address, so it is the same on
++        // every boot even when the SD card is write-protected. T("启动随机", "啟動隨機")
++        // still gets written to relay.cfg, so check it again after a
++        // reboot -- if the number changes, the write is failing.
++        if (addr_ok && vaddr != 0) {
++            u32 src = 0;
++            if (R_FAILED(ldnMitmGetRelayIdSource(&g_ldnConfig, &src))) {
++                src = 0;
++            }
++            if (src == 1) {
++                list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("硬件派生", "硬體衍生")));
++            } else if (src == 2) {
++                list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("启动随机", "啟動隨機")));
++            } else if (src == 3) {
++                list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("已自动更换", "已自動更換")));
++            } else {
++                // The id either predates hardware derivation or was cached
++                // before this console's LAN address changed.
++                list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("未知来源", "未知來源")));
++            }
++        }
++        list->addItem(new tsl::elm::ListItem(T("两台机器的地址必须不同", "兩台機器的位址必須不同")));
++        list->addItem(new tsl::elm::ListItem(T("重启后地址不变即正常", "重新啟動後位址不變即正常")));
++
++        // Release signature. Kept at the very bottom so it never gets in
++        // the way of the settings, but every user scrolling down sees it.
++        list->addItem(new tsl::elm::CategoryHeader(T("关于", "關於")));
++        list->addItem(new tsl::elm::ListItem(T("制作", "製作"), T("阿东 & 大肥鱼", "阿東 & 大肥魚")));
++        list->addItem(new tsl::elm::ListItem(T("版本", "版本"), g_version));
++        list->addItem(new tsl::elm::ListItem(T("声明", "聲明"), T("免费分享 禁止倒卖", "免費分享 禁止轉賣")));
++    }
++
++    // Rebuilt rows start with a bare "*"; force update() to paint them.
++    g_shown_latency = 0xFFFFFFFFu;
++}
++
++/* Rebuild the visible list after the relay list changed. The old rows are
++   deleted by List::draw() on the next frame, so focus is dropped first:
++   leaving the Gui pointing at a deleted element would crash on the next
++   input. restoreFocus() makes the following frame pick a fresh row. */
++static void rebuildUi() {
++    if (g_list == nullptr) {
++        return;
++    }
++    auto &gui = tsl::Overlay::get()->getCurrentGui();
++    if (gui == nullptr) {
++        return;
++    }
++    gui->removeFocus();
++    g_list->clear();
++    buildList(g_list);
++    gui->restoreFocus();
++}
++
+ class Overlay : public tsl::Overlay {
+ public:
+     virtual void initServices() override {
+         g_state = State::Uninit;
+         detectLanguage();
++        MonitorSetTraditional(g_isTraditional);
+         tsl::hlp::doWithSmSession([&] {
+             Result rc;
+ 
++            /* bsd socket 由监视器在首次网络查询时按需初始化(见 monitor.cpp
++               EnsureSockets):把缓冲分配挪出 initScreen 的帧缓冲关键窗口,
++               避免 ovlloader 小堆上 0x559;失败(无网络)只影响查询不影响设置。 */
++
+             rc = smGetService(&g_ldnSrv, "ldn:u");
+             if (R_FAILED(rc)) {
+                 g_state = State::Error;
+@@ -288,14 +1027,34 @@ public:
+             g_state = State::Loaded;
+         });
+ 
++        /* Keep the build identity under the title even if the service call
++           failed or returned an empty string. Normally the Makefiles stamp
++           git describe --tags --always, so tagless CI builds still show the
++           commit hash instead of a blank subtitle. */
++        if (g_version[0] == '\0')
++            snprintf(g_version, sizeof(g_version), "%s", T("版本未知", "版本未知"));
++        snprintf(g_brand, sizeof(g_brand), "%s · %s",
++                 g_isTraditional ? "阿東版" : "阿东版", g_version);
++
++        MonitorInitSockets();   /* 自带 sm 包裹;放在 initScreen 帧缓冲之前,堆最宽裕 */
++        MonitorInit();
++        MonitorLog("initServices-done");
+     }
+     virtual void exitServices() override {
++        MonitorExit();          /* 内部负责 socketExit(延迟初始化的 socket) */
+         serviceClose(&g_ldnConfig.s);
+         serviceClose(&g_ldnSrv);
+     }
+ 
+-    virtual void onShow() override {}    // Called before overlay wants to change from invisible to visible state
+-    virtual void onHide() override {}    // Called before overlay wants to change from visible to invisible state
++    virtual void onShow() override {
++        // 每次点开 Tesla 插件就从远程重新下载订阅并刷新在线/房间。
++        g_visible = true;
++        g_lastPollNs = 0;
++        MonitorRequestRefresh(g_selectedName[0] ? g_selectedName : nullptr);
++    }
++    virtual void onHide() override {
++        g_visible = false;
++    }    // Called before overlay wants to change from visible to invisible state
+ 
+     virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
+         return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..51f1ae7
+index 0000000..4e82f4c
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2839 @@
+@@ -0,0 +1,2429 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -124,56 +1599,14 @@ index 0000000..51f1ae7
 +    }
 +}
 +
-+/* 日志改成「先缓冲、后落盘」:
-+ * 打开插件的首帧之前不能碰 SD 卡(fsdevMountSdmc + fopen 在冷机/大卡上
-+ * 是秒级阻塞,这正是「点开插件要过一会才弹出来」的主要来源)。所以启动
-+ * 路径上只把日志攒进内存缓冲,由后台线程在 UI 出来后一次性打开文件并
-+ * 把缓冲刷进去(MonitorOpenLog)。 */
-+/* 注:缓冲/落盘之间没有加锁。启动阶段只有 UI 线程在写,后台线程刷盘时
-+   最多丢一行日志,不值得为此在每行日志上加锁。 */
-+static char g_logBuf[4096];
-+static size_t g_logLen = 0;
-+static bool g_logReady = false;
-+
 +static void MonLog(const char *msg) {
-+    if (!g_logReady) {
-+        const size_t n = strlen(msg);
-+        if (g_logLen + n + 1 < sizeof(g_logBuf)) {
-+            memcpy(g_logBuf + g_logLen, msg, n);
-+            g_logLen += n;
-+            g_logBuf[g_logLen++] = '\n';
-+        }
-+        return;
-+    }
++    EnsureSd();
 +    FILE *f = fopen(kLogPath, "a");
 +    if (!f)
 +        return;
 +    fputs(msg, f);
 +    fputc('\n', f);
 +    fclose(f);
-+}
-+
-+/* 后台线程(UI 已经能画之后)才做的重活:挂载 SD、建目录、截断日志、
-+ * 把启动阶段缓存的日志补写进去。失败也不影响插件本身。 */
-+static void MonitorOpenLog() {
-+    if (g_logReady)
-+        return;
-+    EnsureSd();
-+    mkdir("sdmc:/config", 0777);
-+    mkdir(kSaveDir, 0777);
-+    FILE *lf = fopen(kLogPath, "w");
-+    if (lf) {
-+        fclose(lf);
-+        g_logReady = true;
-+    }
-+    if (!g_logReady)
-+        return;
-+    FILE *f = fopen(kLogPath, "a");
-+    if (f) {
-+        fwrite(g_logBuf, 1, g_logLen, f);
-+        fclose(f);
-+    }
-+    g_logLen = 0;
 +}
 +
 +/* bsd socket 初始化:必须在 sm 会话内拿到 bsd:u,且尽量安排在帧缓冲
@@ -223,17 +1656,25 @@ index 0000000..51f1ae7
 +}
 +
 +void MonitorInitSockets() {
-+    /* 只做真正必须抢在帧缓冲之前的活:bsd 的缓冲是 tmem 堆分配,帧缓冲
-+     * (双缓冲约 1.34MB)先占走堆就会 0x559,所以 socket 初始化必须留在
-+     * createUI 之前。SD 挂载、日志截断、socket 探针这些都不急,全部丢到
-+     * 后台线程(MonitorOpenLog / ProbeHeap),启动路径上不再碰 SD 卡。 */
++    /* 日志截断放在这里(最早的监视器调用):MonitorInit 里截断会把
++     * sockets-init 这行吃掉,曾导致无法判断网络栈死活。 */
++    EnsureSd();
++    FILE *lf = fopen(kLogPath, "w");
++    if (lf)
++        fclose(lf);
 +    EnsureSockets();
++    if (g_sockInited) {
++        int fd = socket(AF_INET, SOCK_STREAM, 0);
++        char m[24];
++        snprintf(m, sizeof(m), "soc-probe fd=%d", fd);
++        MonLog(m);
++        if (fd >= 0)
++            close(fd);
++    }
 +}
 +
 +/* 堆余量探针:试分配与帧缓冲同量级的块并立即释放。
-+ * 崩溃时日志里的 probe 结果直接告诉我们堆还剩多少余量。
-+ * 现在由工作线程在 UI 起来之后调用(不再占首帧时间),含义也随之变成
-+ * 「帧缓冲分配之后还剩多少」——对小堆崩溃仍然是最有用的那个数。 */
++ * 崩溃时日志里的 probe 结果直接告诉我们堆还剩多少余量。 */
 +static void ProbeHeap() {
 +    static const size_t kProbes[] = { 256u * 1024, 700u * 1024, 1400u * 1024 };
 +    char msg[48];
@@ -291,28 +1732,11 @@ index 0000000..51f1ae7
 +static MonitorTargetGeneration::Gate g_targetGen;
 +static std::atomic<bool> g_exit{false};
 +static std::atomic<bool> g_traditional{false};
-+/* 插件隐藏(=用户按了返回)/退出时置位:在跑的订阅下载、HTTP 查询、DNS、
-+ * UDP 扫描立刻放弃,worker 回去睡觉 —— 返回特斯拉菜单不再等查询跑完。 */
-+static std::atomic<bool> g_paused{false};
-+/* 辅助阶段(逐台刷新其它服务器的统计)标志:此阶段遇到新的刷新请求就放弃,
-+ * 不去拖慢选中服务器的查询。 */
-+static std::atomic<bool> g_auxPhase{false};
-+
-+/* 统一的中止判据:暂停/退出 → 立刻放弃;辅助阶段遇到新请求 → 也放弃。 */
-+static bool IoAbort();
-+static std::atomic<u32> g_doneGen{0};
++static u32   g_doneGen = 0;
 +static Thread g_thread;
 +static bool  g_inited = false;
 +static char  g_pendingName[48];      /* 切换服务器时指定;空 = 读 relay.cfg */
 +static bool  g_pendingSubs = false;  /* 下一次刷新是否重新拉订阅缓存 */
-+
-+static bool IoAbort() {
-+    if (g_paused.load() || g_exit.load())
-+        return true;
-+    if (g_auxPhase.load() && g_reqGen.load() != g_doneGen.load())
-+        return true;
-+    return false;
-+}
 +
 +#define T_STR(hans, hant) (g_traditional.load() ? (hant) : (hans))
 +
@@ -697,27 +2121,14 @@ index 0000000..51f1ae7
 +    sa.sin_family = AF_INET;
 +    sa.sin_port = htons(53);
 +    sa.sin_addr.s_addr = htonl(srvHost);
-+    /* devkitA64 的 newlib 没有 MSG_DONTWAIT,非阻塞只能走 O_NONBLOCK
-+     * (fcntl)。设成非阻塞后 recvfrom 无数据返回 -1 + EAGAIN,再配合下面
-+     * 10ms 一轮的等待循环,就能随时被中止标志打断。 */
-+    {
-+        int fl = fcntl(fd, F_GETFL, 0);
-+        if (fl >= 0)
-+            fcntl(fd, F_SETFL, fl | O_NONBLOCK);
-+    }
++    struct timeval tv;
++    tv.tv_sec = 2;
++    tv.tv_usec = 0;
++    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 +    u32 ip = 0;
 +    if (sendto(fd, q, (int)qlen, 0, (struct sockaddr *)&sa, sizeof(sa)) >= 0) {
 +        u8 r[512];
-+        /* 分片等待:一旦用户返回/退出就立刻跳出,不等满 2 秒超时 */
-+        ssize_t n = -1;
-+        for (int wait = 0; wait < 20 * 100; wait++) {
-+            if (IoAbort())
-+                break;
-+            n = recvfrom(fd, r, sizeof(r), 0, nullptr, nullptr);
-+            if (n > 0)
-+                break;
-+            svcSleepThread(10'000'000);          /* 10ms */
-+        }
++        ssize_t n = recvfrom(fd, r, sizeof(r), 0, nullptr, nullptr);
 +        if (n > 0) {
 +            u32 net = 0;
 +            if (DnsParseA(r, n, txid0, txid1, &net))
@@ -768,7 +2179,7 @@ index 0000000..51f1ae7
 +    char host[48];
 +    u32 ip;                                   /* 主机字序 */
 +};
-+static DnsEnt g_dnsCache[16];   /* 逐台探测多台服务器时缓存别太小 */
++static DnsEnt g_dnsCache[8];
 +static int g_dnsCacheN = 0;
 +
 +static bool DnsResolve(const char *host, u32 *ipNet) {
@@ -780,8 +2191,6 @@ index 0000000..51f1ae7
 +        }
 +    }
 +    for (int s = 0; s < g_dnsSrvN; s++) {
-+        if (IoAbort())
-+            return false;
 +        u32 ip = DnsQueryServer(g_dnsSrv[s], host, 0x13, 0x37);
 +        if (ip != 0) {
 +            if (g_dnsCacheN < (int)(sizeof(g_dnsCache) / sizeof(g_dnsCache[0]))) {
@@ -840,7 +2249,7 @@ index 0000000..51f1ae7
 +static bool HttpSendAll(int fd, const char *buf, size_t len, const Deadline &deadline) {
 +    size_t off = 0;
 +    while (off < len) {
-+        if (std::chrono::steady_clock::now() >= deadline || IoAbort())
++        if (std::chrono::steady_clock::now() >= deadline)
 +            return false;
 +        ssize_t n = send(fd, buf + off, len - off, 0);
 +        if (n < 0)
@@ -861,7 +2270,7 @@ index 0000000..51f1ae7
 +
 +/* 发起请求,响应(头+体)收进 raw。 */
 +/* HTTP 传输错误码(诊断用):0=ok 1=resolve 2=socket 3=connect 4=timeout
-+ * 5=io 6=aborted(返回/退出时主动中止);≥100 表示 HTTP 状态码。 */
++ * 5=io;≥100 表示 HTTP 状态码(如 131=301 跳转)。 */
 +static int g_httpErr = 0;
 +
 +static bool HttpExchange(const char *host, u16 port, const char *req, size_t reqLen,
@@ -910,6 +2319,7 @@ index 0000000..51f1ae7
 +    struct timeval rtv;
 +    rtv.tv_sec = timeoutMs / 1000;
 +    rtv.tv_usec = (timeoutMs % 1000) * 1000;
++    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rtv, sizeof(rtv));
 +    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &rtv, sizeof(rtv));
 +
 +    if (!HttpSendAll(fd, req, reqLen, deadline)) {
@@ -925,52 +2335,23 @@ index 0000000..51f1ae7
 +    long contentLength = -1;
 +    size_t headerEnd = 0;
 +
-+    /* 收包循环改成短超时轮询 + 每轮检查中止标志:
-+     * 以前 recv 会一口气卡到超时(最长 6 秒),用户按返回时特斯拉菜单就要等
-+     * 这一整轮查询跑完才出来 —— 这就是"返回还是要过一会"的主因之一。 */
 +    for (;;) {
 +        if (std::chrono::steady_clock::now() >= deadline) {
 +            /* 超时:已有完整响应体则接受,否则失败 */
 +            if (haveHeaders)
 +                break;
-+            g_httpErr = 4;
 +            close(fd);
 +            return false;
 +        }
-+        if (IoAbort()) {
-+            g_httpErr = 6;
-+            close(fd);
-+            return false;
-+        }
-+        /* 先 select 等 15ms 再看有没有数据:这样既能每 15ms 检查一次中止
-+         * 标志,又不用依赖 errno。libnx 的 bsd 把错误放在线程私有的
-+         * g_bsdErrno 里,不写 newlib 的 errno,靠 errno 判断 EAGAIN 不可靠。 */
-+        fd_set rset;
-+        FD_ZERO(&rset);
-+        FD_SET(fd, &rset);
-+        struct timeval wtv;
-+        wtv.tv_sec = 0;
-+        wtv.tv_usec = 15 * 1000;
-+        int sel = select(fd + 1, &rset, nullptr, nullptr, &wtv);
-+        if (sel < 0) {
-+            if (haveHeaders)
-+                break;
-+            g_httpErr = 5;
-+            close(fd);
-+            return false;
-+        }
-+        if (sel == 0)
-+            continue;                                /* 还没数据:回去查中止标志 */
 +        ssize_t n = recv(fd, buf, sizeof(buf), 0);
++        if (n == 0)
++            break;                                   /* 对端关闭:EOF 定界 */
 +        if (n < 0) {
 +            if (haveHeaders)
 +                break;
-+            g_httpErr = 5;
 +            close(fd);
 +            return false;
 +        }
-+        if (n == 0)
-+            break;                                   /* 对端关闭:EOF 定界 */
 +        if (raw.size() + (size_t)n > maxBody + 8192) {
 +            close(fd);
 +            return false;
@@ -1122,12 +2503,6 @@ index 0000000..51f1ae7
 +    return n;
 +}
 +
-+/* curl 进度回调:CURLE_ABORTED_BY_CALLBACK 让 perform 立刻返回,
-+ * 3MB 订阅下载不会在用户关掉插件后继续霸占 CPU/网络。 */
-+static int CurlAbort(void *, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
-+    return IoAbort() ? 1 : 0;
-+}
-+
 +static bool HttpsGet(const char *url, std::string *outBody, int timeoutMs) {
 +    if (strncmp(url, "https://", 8) != 0)
 +        return false;
@@ -1181,8 +2556,6 @@ index 0000000..51f1ae7
 +    curl_easy_setopt(curl, CURLOPT_MAXFILESIZE, (long)kMaxDownload);
 +    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeoutMs);
 +    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, CurlAbort);
 +    curl_easy_setopt(curl, CURLOPT_USERAGENT, "ldn-mitm-monitor");
 +    MonLog("curl-try");
 +    CURLcode rc = curl_easy_perform(curl);
@@ -2091,10 +3464,6 @@ index 0000000..51f1ae7
 +
 +    u8 frame[2048];
 +    while (std::chrono::steady_clock::now() < deadline && qr->roomN < MONITOR_MAX_ROOMS) {
-+        if (IoAbort()) {
-+            close(fd);
-+            return;
-+        }
 +        Deadline now = std::chrono::steady_clock::now();
 +        if (now >= nextSend) {
 +            send(fd, kScanFrame, sizeof(kScanFrame), 0);
@@ -2312,7 +3681,7 @@ index 0000000..51f1ae7
 +    /* 2. 订阅(chinese_db.json):开盖/手动刷新时拉取(周期轮询跳过),
 +     *    失败退回本地缓存;servers.json 已彻底移除,服务器列表只读 relay.cfg。
 +     *    下载走 HTTPS 加速镜像(https://v6.gh-proxy.org/),删了缓存也能重拉 */
-+    if (reloadSubs && !IoAbort()) {
++    if (reloadSubs) {
 +        MonLog("subs-start");
 +        std::string chineseJson;
 +        bool gotChinese = DownloadSubscription(kSubChinesePath, &chineseJson);
@@ -2361,14 +3730,8 @@ index 0000000..51f1ae7
 +    /* 4. 查询:自动识别 —— graphql 优先(含房间),失败再 rest
 +     *    (servers.json 已移除,不再按 host:port 查类型表) */
 +    bool ok = QueryGraphql(host, port, &qr);
-+    if (!ok && !IoAbort())
++    if (!ok)
 +        ok = QueryRest(host, port, &qr);
-+    /* 返回/退出时查询会被 HTTP 层中止:此时不要写任何快照,
-+       免得把 "查询失败 e=6" 显示到界面上。 */
-+    if (IoAbort()) {
-+        MonLog("refresh-discard aborted");
-+        return;
-+    }
 +    {
 +        char m[56];
 +        snprintf(m, sizeof(m), "query auto e=%d on=%d rooms=%u",
@@ -2377,7 +3740,7 @@ index 0000000..51f1ae7
 +    }
 +
 +    /* 6. 接口不给房间时,用 UDP 主动扫描补房间(rest 1.0 服务器) */
-+    if (ok && qr.roomN == 0 && !IoAbort()) {
++    if (ok && qr.roomN == 0) {
 +        UdpRoomScan(host, port, &qr);
 +        char m[24];
 +        snprintf(m, sizeof(m), "scan rooms=%u", (unsigned)qr.roomN);
@@ -2453,302 +3816,15 @@ index 0000000..51f1ae7
 +}
 +
 +/* ------------------------------------------------------------------ */
-+/* 每台服务器各自的在线 / 房间 / 延迟                                    */
-+/* ------------------------------------------------------------------ */
-+
-+/* 背景:选中的服务器由 DoRefresh 全量查询;这里负责把其余服务器也测一遍,
-+ * 让界面上每一行都能显示数值(不用先点选)。实现刻意用"最便宜"的探测:
-+ *   延迟  = TCP connect 到 host:port 的往返耗时(中继端口本来就会接受连接)
-+ *   在线/房间 = POST 一个只有 serverInfo 的 GraphQL;不支持就退回 /info
-+ * 轮转顺序:每次空闲测一台,优先测"最久没测过的",选中服务器隔轮重测一次
-+ * (它已经有 DoRefresh,这里只是让延迟也一直新鲜)。 */
-+static constexpr u32  kStatUnknown    = 0xFFFFFFFFu;
-+static constexpr u64  kStatFreshMs    = 20ull * 1000;
-+static constexpr int  kStatProbeMs    = 1500;
-+static constexpr u32  kStatMaxServers = MONITOR_MAX_SERVERS;
-+
-+struct ServerStat {
-+    char name[32];
-+    char addr[64];
-+    s32  online;        /* -1 = 未知 */
-+    s32  rooms;         /* -1 = 未知 */
-+    s32  latencyMs;     /* 0 = 未知 */
-+    u64  stampMs;       /* 上次测量时刻;0 = 从未测过 */
-+};
-+
-+static ServerStat g_stats[kStatMaxServers];
-+static u32 g_statCount = 0;
-+static char g_statCfgKey[64];        /* relay.cfg 指纹,变了就重建表 */
-+static u32 g_statCursor = 0;
-+
-+static u64 MonNowMs() {
-+    return armTicksToNs(armGetSystemTick()) / 1000000ull;
-+}
-+
-+static u64 g_statCfgCheckedMs = 0;
-+
-+static void StatsBuildTableIfNeeded(bool force = false) {
-+    /* relay.cfg 不必每 200ms 读一次:3 秒查一次足够(新增/删除服务器是用户
-+       在界面里操作,下一次轮询就会重建)。 */
-+    const u64 nowMs = armTicksToNs(armGetSystemTick()) / 1000000ull;
-+    if (!force && g_statCfgCheckedMs != 0 && nowMs - g_statCfgCheckedMs < 3000)
-+        return;
-+    g_statCfgCheckedMs = nowMs;
-+    std::string cfg;
-+    if (!LoadFile(kRelayCfgPath, &cfg))
-+        return;
-+    char key[64];
-+    snprintf(key, sizeof(key), "%u:%u", (unsigned)cfg.size(),
-+             (unsigned)(cfg.empty() ? 0 : (u8)cfg[0] + (u8)cfg[cfg.size() / 2]));
-+    if (strcmp(key, g_statCfgKey) == 0)
-+        return;
-+    snprintf(g_statCfgKey, sizeof(g_statCfgKey), "%s", key);
-+
-+    ServerStat fresh[kStatMaxServers] = {};
-+    u32 n = 0;
-+    size_t i = 0;
-+    while (i < cfg.size() && n < kStatMaxServers) {
-+        size_t e = cfg.find_first_of("\r\n", i);
-+        std::string line = cfg.substr(i, e == std::string::npos ? std::string::npos : e - i);
-+        i = (e == std::string::npos) ? cfg.size() : e + 1;
-+        char name[32] = {}, host[64] = {};
-+        u16 port = 0;
-+        if (!RelayParseLine(line.c_str(), name, sizeof(name), host, sizeof(host), &port))
-+            continue;
-+        snprintf(fresh[n].name, sizeof(fresh[n].name), "%s", name);
-+        snprintf(fresh[n].addr, sizeof(fresh[n].addr), "%.55s:%u", host, (unsigned)port);
-+        fresh[n].online = -1;
-+        fresh[n].rooms = -1;
-+        n++;
-+    }
-+    {
-+        std::scoped_lock lk(g_mutex);
-+        memcpy(g_stats, fresh, sizeof(fresh));
-+        g_statCount = n;
-+    }
-+    char m[48];
-+    snprintf(m, sizeof(m), "stats table n=%u", (unsigned)n);
-+    MonLog(m);
-+}
-+
-+static void StatsStore(u32 idx, s32 online, s32 rooms, s32 latency, u64 nowMs) {
-+    std::scoped_lock lk(g_mutex);
-+    if (idx >= g_statCount)
-+        return;
-+    ServerStat &st = g_stats[idx];
-+    if (online >= 0)
-+        st.online = online;
-+    if (rooms >= 0)
-+        st.rooms = rooms;
-+    if (latency > 0)
-+        st.latencyMs = latency;
-+    st.stampMs = nowMs;
-+}
-+
-+/* TCP connect 往返耗时(毫秒,0 = 连不上)。可被 IoAbort 立刻打断。 */
-+static s32 ProbeLatencyMs(const char *host, u16 port) {
-+    struct sockaddr_in sa;
-+    if (!HttpResolve(host, &sa))
-+        return 0;
-+    sa.sin_port = htons(port);
-+    int fd = socket(AF_INET, SOCK_STREAM, 0);
-+    if (fd < 0)
-+        return 0;
-+    HttpSetNonBlock(fd, true);
-+    s32 ms = 0;
-+    Deadline start = std::chrono::steady_clock::now();
-+    int rc = connect(fd, (struct sockaddr *)&sa, sizeof(sa));
-+    /* 非阻塞 connect 正常会立刻返回非 0(EINPROGRESS);成功与否由 select +
-+     * SO_ERROR 判定。这里不能看 errno:libnx 的 bsd 不写 newlib 的 errno。 */
-+    if (rc != 0) {
-+        for (;;) {
-+            if (IoAbort()) { close(fd); return 0; }
-+            long left = (long)std::chrono::duration_cast<std::chrono::milliseconds>(
-+                start + std::chrono::milliseconds(kStatProbeMs) -
-+                std::chrono::steady_clock::now()).count();
-+            if (left <= 0) { close(fd); return 0; }
-+            struct timeval tv;
-+            tv.tv_sec = 0;
-+            tv.tv_usec = left * 1000 < 100000 ? left * 1000 : 100000;
-+            fd_set wset;
-+            FD_ZERO(&wset);
-+            FD_SET(fd, &wset);
-+            int sel = select(fd + 1, nullptr, &wset, nullptr, &tv);
-+            if (sel < 0) { close(fd); return 0; }
-+            if (sel == 0)
-+                continue;
-+            int err = 0;
-+            socklen_t elen = sizeof(err);
-+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen) != 0 || err != 0) {
-+                close(fd);
-+                return 0;
-+            }
-+            ms = (s32)std::chrono::duration_cast<std::chrono::milliseconds>(
-+                std::chrono::steady_clock::now() - start).count();
-+            break;
-+        }
-+    }
-+    close(fd);
-+    return ms > 0 ? ms : 0;
-+}
-+
-+/* 只有 serverInfo 的轻查询;服务器不支持时退回 /info(与 DoRefresh 同逻辑)。 */
-+static bool ProbeOnlineRooms(const char *host, u16 port, s32 *online, s32 *rooms) {
-+    static const char *kLightQuery =
-+        "query PublicRoomSnapshot { serverInfo { online idle } }";
-+    char url[160];
-+    snprintf(url, sizeof(url), "http://%s:%u/", host, (unsigned)port);
-+    std::string payload = "{\"query\":\"";
-+    payload += kLightQuery;
-+    payload += "\"}";
-+    std::string resp;
-+    if (HttpPostJson(url, payload.c_str(), &resp, kStatProbeMs, kMaxHttpBody)) {
-+        const char *data = JsonGet(resp.c_str(), "data");
-+        const char *info = data ? JsonGet(data, "serverInfo") : nullptr;
-+        u32 v = 0;
-+        if (info && JsonGetU32(info, "online", &v)) {
-+            *online = (s32)v;
-+            u32 idle = 0;
-+            if (JsonGetU32(info, "idle", &idle)) {
-+                /* 部分服务器把"在线 - 空闲"当房间数;没有 idle 就不猜 */
-+                *rooms = (v >= idle) ? (s32)(v - idle) : -1;
-+            }
-+            return true;
-+        }
-+    }
-+    if (IoAbort())
-+        return false;
-+    snprintf(url, sizeof(url), "http://%s:%u/info", host, (unsigned)port);
-+    resp.clear();
-+    if (!HttpGet(url, &resp, kStatProbeMs, kMaxHttpBody))
-+        return false;
-+    const char *root = JsWs(SkipBom(resp.c_str()));
-+    u32 v = 0;
-+    if (!JsonGetU32(root, "online", &v) && !JsonGetU32(root, "clientCount", &v))
-+        return false;
-+    *online = (s32)v;
-+    u32 rc2 = 0;
-+    *rooms = JsonGetU32(root, "roomCount", &rc2) ? (s32)rc2 : -1;
-+    return true;
-+}
-+
-+/* 工作线程空闲时调用:测一台(轮转),本轮测完再睡。 */
-+static void RefreshOneServerStat() {
-+    StatsBuildTableIfNeeded();
-+    u32 n;
-+    {
-+        std::scoped_lock lk(g_mutex);
-+        n = g_statCount;
-+    }
-+    if (n == 0) {
-+        svcSleepThread(200'000'000);
-+        return;
-+    }
-+    const u64 now = MonNowMs();
-+
-+    /* 选一台:最久没测过的;全都很新就睡一会儿 */
-+    u32 pick = kStatUnknown;
-+    u64 oldest = 0;
-+    {
-+        std::scoped_lock lk(g_mutex);
-+        for (u32 k = 0; k < n; k++) {
-+            u32 idx = (g_statCursor + k) % n;
-+            if (g_stats[idx].stampMs == 0) {
-+                pick = idx;
-+                break;
-+            }
-+            u64 age = now - g_stats[idx].stampMs;
-+            if (age > oldest) {
-+                oldest = age;
-+                if (pick == kStatUnknown)
-+                    pick = idx;
-+            }
-+        }
-+    }
-+    if (pick == kStatUnknown)
-+        pick = g_statCursor % n;
-+    if (oldest < kStatFreshMs && oldest != 0) {
-+        svcSleepThread(200'000'000);         /* 都还新鲜:歇 200ms 再看 */
-+        return;
-+    }
-+    g_statCursor = (pick + 1) % n;
-+
-+    char addr[64], host[64] = {};
-+    u16 port = 11451;
-+    {
-+        std::scoped_lock lk(g_mutex);
-+        snprintf(addr, sizeof(addr), "%s", g_stats[pick].addr);
-+    }
-+    char *colon = strrchr(addr, ':');
-+    if (colon) {
-+        *colon = 0;
-+        port = (u16)atoi(colon + 1);
-+    }
-+    snprintf(host, sizeof(host), "%s", addr);
-+    if (host[0] == 0)
-+        return;
-+
-+    const s32 lat = ProbeLatencyMs(host, port);
-+    if (IoAbort())
-+        return;
-+    s32 online = -1, rooms = -1;
-+    ProbeOnlineRooms(host, port, &online, &rooms);
-+    if (IoAbort())
-+        return;
-+    StatsStore(pick, online, rooms, lat, MonNowMs());
-+    {
-+        char m[96];
-+        snprintf(m, sizeof(m), "stat #%u %s:%u on=%d rooms=%d lat=%d",
-+                 (unsigned)pick, host, (unsigned)port, (int)online, (int)rooms,
-+                 (int)lat);
-+        MonLog(m);
-+    }
-+}
-+
-+u32 MonitorListServerStats(MonitorServerStat *out, u32 max) {
-+    if (!out || max == 0)
-+        return 0;
-+    StatsBuildTableIfNeeded();     /* 节流 3 秒,避免界面刷新时频繁读 SD */
-+    const u64 now = MonNowMs();
-+    u32 n = 0;
-+    std::scoped_lock lk(g_mutex);
-+    for (u32 k = 0; k < g_statCount && n < max; k++) {
-+        snprintf(out[n].name, sizeof(out[n].name), "%s", g_stats[k].name);
-+        snprintf(out[n].addr, sizeof(out[n].addr), "%s", g_stats[k].addr);
-+        out[n].online = g_stats[k].online;
-+        out[n].rooms = g_stats[k].rooms;
-+        out[n].latencyMs = g_stats[k].latencyMs;
-+        out[n].ageMs = g_stats[k].stampMs ? (now - g_stats[k].stampMs) : 0;
-+        n++;
-+    }
-+    return n;
-+}
-+
-+/* ------------------------------------------------------------------ */
 +/* 后台线程(libnx 线程,风格同 libtesla)                               */
 +/* ------------------------------------------------------------------ */
 +
 +
 +static void MonitorWorker(void *) {
-+    /* 线程一起来就把启动阶段欠下的重活做掉:挂载 SD/建目录/补写日志、
-+     * 堆余量探针、socket 探针。此时 UI 已经在画了,不再阻塞首帧。 */
-+    MonitorOpenLog();
-+    ProbeHeap();
-+    if (g_sockInited) {
-+        int fd = socket(AF_INET, SOCK_STREAM, 0);
-+        char m[24];
-+        snprintf(m, sizeof(m), "soc-probe fd=%d", fd);
-+        MonLog(m);
-+        if (fd >= 0)
-+            close(fd);
-+    }
-+    MonLog("worker-ready");
-+
 +    while (!g_exit.load()) {
 +        u32 want = g_reqGen.load();
-+        if (want != g_doneGen.load()) {
-+            g_auxPhase.store(false);
-+            g_doneGen.store(want);
++        if (want != g_doneGen) {
++            g_doneGen = want;
 +            char name[48];
 +            bool subs;
 +            MonitorTargetGeneration::Value targetGen;
@@ -2761,12 +3837,6 @@ index 0000000..51f1ae7
 +            }
 +            DoRefresh(name[0] ? name : nullptr, subs, targetGen);
 +            MonLog("refresh-done");
-+        } else if (!IoAbort()) {
-+            /* 空闲:给其它服务器(非选中行)测一轮延迟 + 在线/房间,
-+               界面就能"每行都显示数值"而不必先选中它。 */
-+            g_auxPhase.store(true);
-+            RefreshOneServerStat();
-+            g_auxPhase.store(false);
 +        } else {
 +            svcSleepThread(50'000'000);      /* 50ms */
 +        }
@@ -2775,10 +3845,6 @@ index 0000000..51f1ae7
 +
 +void MonitorSetTraditional(bool traditional) {
 +    g_traditional.store(traditional);
-+}
-+
-+void MonitorSetPaused(bool paused) {
-+    g_paused.store(paused);
 +}
 +
 +/* 标题表延迟到首次解析时才分配(约 0.5MB),避免在 overlay 刚打开、
@@ -2797,21 +3863,20 @@ index 0000000..51f1ae7
 +    }
 +}
 +
-+/* 工作线程优先级:0x3B 比 UI 线程(libtesla 用 0x2C)低,订阅下载/查询
-+ * 再重也抢不过界面。之前用 0x2C 时,3MB 的订阅下载会把默认线程挤到后面,
-+ * 表现就是「插件里按返回,特斯拉菜单要等一会儿才出来」。 */
-+static constexpr int kWorkerPriority = 0x3B;
-+
 +void MonitorInit() {
 +    if (g_inited)
 +        return;
 +    g_inited = true;
 +    g_exit.store(false);
 +    g_pendingName[0] = 0;
-+    MonLog("worker-init");        /* 只进内存缓冲,不碰 SD */
++    EnsureSd();
++    mkdir("sdmc:/config", 0777);
++    mkdir(kSaveDir, 0777);
++    MonLog("worker-init");
++    ProbeHeap();
 +
 +    Result rc = threadCreate(&g_thread, MonitorWorker, nullptr, g_workerStack,
-+                             sizeof(g_workerStack), kWorkerPriority, -2);
++                             sizeof(g_workerStack), 0x2C, -2);
 +    if (R_SUCCEEDED(rc))
 +        threadStart(&g_thread);
 +}
@@ -2874,10 +3939,10 @@ index 0000000..51f1ae7
 +}
 diff --git a/overlay/source/monitor.hpp b/overlay/source/monitor.hpp
 new file mode 100644
-index 0000000..95ab8f7
+index 0000000..3e9ee8a
 --- /dev/null
 +++ b/overlay/source/monitor.hpp
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,71 @@
 +#pragma once
 +#include <switch.h>
 +
@@ -2926,10 +3991,6 @@ index 0000000..95ab8f7
 +/* 简繁文案切换(与 UI 的 T() 同步)。 */
 +void MonitorSetTraditional(bool traditional);
 +
-+/* 插件隐藏(onHide)/重新可见(onShow):隐藏时后台立即放弃正在进行的
-+ * 下载与查询,别让它们拖住返回特斯拉菜单的那一帧。 */
-+void MonitorSetPaused(bool paused);
-+
 +/* 服务器列表:直接读 relay.cfg(第 i 条与 sysmodule 的 g_servers[i] 对应)。
 + * addr 形如 "host:port"。 */
 +struct MonitorServer {
@@ -2937,21 +3998,6 @@ index 0000000..95ab8f7
 +    char addr[64];
 +};
 +u32 MonitorListRelayServers(MonitorServer *out, u32 max);
-+
-+/* 每台服务器自己的在线/房间/延迟(界面所有行都显示,不只是选中行)。
-+ * 后台线程按轮转顺序逐台探测,所以数值是"最近一次测到的":
-+ * ageMs = 距上次测量多久(0 = 还没测过)。 */
-+struct MonitorServerStat {
-+    char name[32];
-+    char addr[64];
-+    s32  online;      /* -1 = 未知 */
-+    s32  rooms;       /* -1 = 未知 */
-+    s32  latencyMs;   /* 0 = 未知 */
-+    u64  ageMs;       /* 距上次测量的毫秒数;0 = 从未测过 */
-+};
-+
-+/* 读当前统计表(按 relay.cfg 顺序,与服务器行一一对应)。 */
-+u32 MonitorListServerStats(MonitorServerStat *out, u32 max);
 +
 +/* 请求一次后台刷新(每次打开 overlay / 切换服务器时调用)。
 + * serverName:选中的服务器名(可空,空则读 relay.cfg 的 selected=)。
@@ -3188,3 +4234,124 @@ index 0000000..d0ac8cc
 +}
 +
 +} // namespace MonitorTitleResolver
+diff --git a/overlay/tests/monitor_player_filter_test.cpp b/overlay/tests/monitor_player_filter_test.cpp
+new file mode 100644
+index 0000000..bd1fe8d
+--- /dev/null
++++ b/overlay/tests/monitor_player_filter_test.cpp
+@@ -0,0 +1,29 @@
++#include "../source/monitor_player_filter.hpp"
++
++#include <cassert>
++
++int main() {
++    using MonitorPlayerFilter::IncludeNode;
++
++    /* Older schemas without the optional field retain their name list. */
++    assert(IncludeNode(false, nullptr));
++    assert(IncludeNode(false, "false"));
++
++    /* Current GraphQL/REST schemas include only live nodes. */
++    assert(IncludeNode(true, "true"));
++    assert(IncludeNode(true, " true ,"));
++    assert(!IncludeNode(true, "false"));
++    assert(!IncludeNode(true, "false}"));
++    assert(!IncludeNode(true, "null"));
++    assert(!IncludeNode(true, nullptr));
++    assert(!IncludeNode(true, "trueish"));
++
++    /* UDP NetworkInfo is a fixed-size node array; stale entries at indices
++     * beyond nodeCount must not leak names from earlier room occupants. */
++    using MonitorPlayerFilter::IncludeConnectedSlot;
++    assert(IncludeConnectedSlot(0, 1, true));
++    assert(!IncludeConnectedSlot(1, 1, true));
++    assert(!IncludeConnectedSlot(0, 1, false));
++    assert(!IncludeConnectedSlot(0, 0, true));
++    return 0;
++}
+diff --git a/overlay/tests/monitor_target_generation_test.cpp b/overlay/tests/monitor_target_generation_test.cpp
+new file mode 100644
+index 0000000..a0e003f
+--- /dev/null
++++ b/overlay/tests/monitor_target_generation_test.cpp
+@@ -0,0 +1,22 @@
++#include "../source/monitor_target_generation.hpp"
++
++#include <cassert>
++
++int main() {
++    MonitorTargetGeneration::Gate gate;
++
++    /* A response may publish only while it still owns the latest request. */
++    const auto shanghaiRequest = gate.Advance();
++    assert(gate.IsCurrent(shanghaiRequest));
++
++    /* Switching to another server invalidates the in-flight old response. */
++    const auto denmarkRequest = gate.Advance();
++    assert(!gate.IsCurrent(shanghaiRequest));
++    assert(gate.IsCurrent(denmarkRequest));
++
++    /* A later refresh supersedes even a same-target response. */
++    const auto newerRefresh = gate.Advance();
++    assert(!gate.IsCurrent(denmarkRequest));
++    assert(gate.IsCurrent(newerRefresh));
++    return 0;
++}
+diff --git a/overlay/tests/monitor_title_resolver_test.cpp b/overlay/tests/monitor_title_resolver_test.cpp
+new file mode 100644
+index 0000000..f716702
+--- /dev/null
++++ b/overlay/tests/monitor_title_resolver_test.cpp
+@@ -0,0 +1,49 @@
++#include "../source/monitor_title_resolver.hpp"
++
++#include <assert.h>
++#include <string.h>
++
++using MonitorTitleResolver::ResolveAdvertisedTitleId;
++
++static void ExpectResolved(const char *advertiseData, const char *hostName,
++                          const char *expectedTitleId) {
++    char titleId[17] = {};
++    assert(ResolveAdvertisedTitleId(advertiseData, hostName,
++                                    titleId, sizeof(titleId)));
++    assert(strcmp(titleId, expectedTitleId) == 0);
++}
++
++static void ExpectUnresolved(const char *advertiseData, const char *hostName) {
++    char titleId[17] = "not-a-title-id";
++    assert(!ResolveAdvertisedTitleId(advertiseData, hostName,
++                                     titleId, sizeof(titleId)));
++    assert(titleId[0] == 0);
++}
++
++int main() {
++    ExpectResolved("ffff0000", nullptr, "0100A250097F0000");
++    ExpectResolved("7b7d", nullptr, "01005EE0036EC000");
++    ExpectResolved("00000000081000008b9000"
++                   "00000004"
++                   "1234"
++                   "00000004"
++                   "5678",
++                   nullptr, "0100B04011742000");
++    ExpectResolved("00000000081000000a0000"
++                   "00000004"
++                   "1234",
++                   nullptr, "0100E21011446000");
++    ExpectResolved("00112233445566778899aabbccddeeff4d6961", "Mia",
++                   "0100D71004694000");
++
++    /* Case/spacing normalization is harmless, while partial signatures are
++     * not promoted to a title. Unknown sentinels must remain unknown. */
++    ExpectResolved("FF FF 00 00", nullptr, "0100A250097F0000");
++    ExpectUnresolved("00000000081000008b9000"
++                     "00000004"
++                     "1234",
++                     nullptr); // Rise signature is missing its second delimiter.
++    ExpectUnresolved("00112233445566778899aabbccddeeff4d6961", "Not-Mia");
++    ExpectUnresolved("11223344", nullptr);
++    return 0;
++}
+-- 
+2.47.3
+
