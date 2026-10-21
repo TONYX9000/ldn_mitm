@@ -2600,7 +2600,9 @@ static void DoRefresh(const char *nameOverride, bool reloadSubs,
             }
             g_snap.roomN = n;
             const bool fresh = g_haveLastOk && (now - g_lastOk) <= kRoomTtl;
-            if (ok) {
+            /* HTTP 接口不通时,只要 UDP 扫到了房间,也算拿到了数据,不能把在线/房间数清成 -1 */
+            const bool have = ok || n > 0;
+            if (have) {
                 s32 on = qr.online >= udpOnline ? qr.online : udpOnline;
                 g_snap.online = on;
                 g_snap.roomCount = (s32)n;
@@ -2615,13 +2617,13 @@ static void DoRefresh(const char *nameOverride, bool reloadSubs,
                 g_snap.online = -1;
                 g_snap.roomCount = -1;
             }
-            if (!ok && !fresh) {
+            if (!have && !fresh) {
                 if (!g_sockInited)
                     snprintf(g_snap.status, sizeof(g_snap.status), "%s",
                              T_STR("网络初始化失败", "網絡初始化失敗"));
                 else
-                    snprintf(g_snap.status, sizeof(g_snap.status), "%s e=%d",
-                             T_STR("查询失败", "查詢失敗"), selHttpErr);
+                    snprintf(g_snap.status, sizeof(g_snap.status), "%s",
+                             T_STR("该服务器无房间信息", "該伺服器無房間資訊"));
             } else if (n == 0) {
                 snprintf(g_snap.status, sizeof(g_snap.status), "%s",
                          T_STR("暂无房间", "暫無房間"));
@@ -3086,7 +3088,7 @@ static void BatchUdpRoomScan(BatchServerItem *items, const u32 *scanIdxs, u32 sc
         std::scoped_lock lk(g_mutex);
         for (u32 s = 0; s < scanN; s++) {
             u32 idx = scanIdxs[s];
-            if ((s32)idx == selIdx || idx >= kStatMaxServers)
+            if (idx >= kStatMaxServers)
                 continue;
             g_srvRoomN[idx] = 0;
         }
@@ -3195,7 +3197,8 @@ static void BatchUdpRoomScan(BatchServerItem *items, const u32 *scanIdxs, u32 sc
         udpOnline[matchS] += (room.players > 0) ? (s32)room.players : 1;
         if ((s32)idx == selIdx && selQr && selQr->roomN < MONITOR_MAX_ROOMS) {
             selQr->rooms[selQr->roomN++] = room;
-        } else if ((s32)idx != selIdx && idx < kStatMaxServers) {
+        }
+        if (idx < kStatMaxServers) {
             std::scoped_lock lk(g_mutex);
             u8 &rn = g_srvRoomN[idx];
             if (rn < MONITOR_ALL_ROOMS_MAX)

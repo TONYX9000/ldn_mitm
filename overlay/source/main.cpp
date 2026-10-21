@@ -900,21 +900,16 @@ public:
     }
 
     virtual void update() override {
-        static MonitorRoom rooms[MONITOR_ALL_ROOMS_MAX];
-        static MonitorRoom prev[MONITOR_ALL_ROOMS_MAX];
-        static u32 prevN = 0xFFFFFFFFu;
-        static s32 prevOnline = -2;
-
         s32 online = -1;
-        const u32 n = MonitorCopyServerRooms(m_addr.c_str(), rooms, MONITOR_ALL_ROOMS_MAX, &online);
-        const bool changed = (n != prevN) || (online != prevOnline) ||
-                             (n > 0 && memcmp(rooms, prev, n * sizeof(MonitorRoom)) != 0);
+        const u32 n = MonitorCopyServerRooms(m_addr.c_str(), m_rooms, MONITOR_ALL_ROOMS_MAX, &online);
+        const bool changed = (n != m_prevN) || (online != m_prevOnline) ||
+                             (n > 0 && memcmp(m_rooms, m_prev, n * sizeof(MonitorRoom)) != 0);
         if (!changed)
             return;
-        prevN = n;
-        prevOnline = online;
+        m_prevN = n;
+        m_prevOnline = online;
         if (n > 0)
-            memcpy(prev, rooms, n * sizeof(MonitorRoom));
+            memcpy(m_prev, m_rooms, n * sizeof(MonitorRoom));
 
         char hdr[80];
         snprintf(hdr, sizeof(hdr), T("在线 %d · 房间 %u", "線上 %d · 房間 %u"),
@@ -929,7 +924,7 @@ public:
                 else
                     m_rows[i]->clearRow();
             } else if (i < n) {
-                m_rows[i]->setRoom(rooms[i]);
+                m_rows[i]->setRoom(m_rooms[i]);
             } else {
                 m_rows[i]->clearRow();
             }
@@ -941,6 +936,10 @@ private:
     std::string m_addr;
     tsl::elm::CategoryHeader *m_header = nullptr;
     std::vector<RoomRow *> m_rows;
+    MonitorRoom m_rooms[MONITOR_ALL_ROOMS_MAX] = {};
+    MonitorRoom m_prev[MONITOR_ALL_ROOMS_MAX] = {};
+    u32 m_prevN = 0xFFFFFFFFu;
+    s32 m_prevOnline = -2;
 };
 
 class AllServersGui : public tsl::Gui {
