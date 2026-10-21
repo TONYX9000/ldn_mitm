@@ -1,4 +1,4 @@
-From a9cca357a890b238bf5e1b73e25a65b4400a8a59 Mon Sep 17 00:00:00 2001
+From 50b77ff420f5f9962b870176680a00481c9ae0f5 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH] overlay: online counts/room list and relay management
@@ -8,7 +8,7 @@ Content-Transfer-Encoding: 8bit
 
 联机监视器(0010):
 - 底部按键提示按系统语言显示「返回/确定」(覆盖 libtesla 的英文 Back/OK)
-- 部分游戏将 LDN LocalCommunicationId 写为 FFFFFFFFFFFFFFFF(auto sentinel);按每个房间自己的 advertiseData 识别 Dragon Ball FighterZ、Rocket League、MONSTER HUNTER RISE、Monster Hunter Stories 2、Minecraft 与 Pokémon Scarlet/Violet;S/V 校验 132 字节 Pia+游戏数据,覆盖搜索字段、无密码/链接码及 Union Circle,并纳入 srv.jaxlewis.top 实测的 aa88f4、47.102.121.212 实测的 aa e8 8c，以及本次重部署后实测的 aa 88 72;由于重建会改变标记尾字节，严格校验其余 Pia/链接码结构后按已观测的 aa08/aa88/aae8 前缀族识别;两版本都广告 Scarlet 通信 ID,all-F 房间显示「宝可梦 朱/紫」而不猜具体版;未知模式安全回退且不读取本机前台 ProgramId
+- 部分游戏将 LDN LocalCommunicationId 写为 FFFFFFFFFFFFFFFF(auto sentinel);按每个房间自己的 advertiseData 识别 Dragon Ball FighterZ、Rocket League、MONSTER HUNTER RISE、Monster Hunter Stories 2、Minecraft 与 Pokémon Scarlet/Violet;S/V 校验 132 字节 Pia+游戏数据,覆盖搜索字段、无密码/链接码及 Union Circle,并纳入 srv.jaxlewis.top 实测的 aa88f4、47.102.121.212 实测的 aa e8 8c，以及本次重部署后实测的 aa 88 72;由于重建会改变标记尾字节，严格校验其余 Pia/链接码结构后按已观测的 aa08/aa88/aae8 前缀族识别;两版本都广告 Scarlet 通信 ID;家族名视为可补充信息并触发 GraphQL 按需查询房间自身 game/name,明确为 Scarlet/Violet 时分别显示「宝可梦朱/宝可梦紫」,没有版本信息仍回退「宝可梦 朱/紫」;未知模式安全回退且不读取本机前台 ProgramId
 - 标题下方两列统计:标签「在线/房间」在上、数字在下;刷新 1s 一次,
   与延迟 ping(sysmodule RelayPingIntervalMs)同节奏,仅可见时轮询,
   周期刷新不重拉订阅、不改目标
@@ -91,7 +91,7 @@ CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
 - 合入分支服务器管理页 AddServerGui、添加/删除/恢复默认操作、列表重建与焦点恢复；服务器列表继续使用 patch 10 的自绘 ServerRow，保留名称/地址布局、右侧延迟和在线/房间数字间距。
 - 游戏房间行改为与服务器行同高的 70px 固定双排布局：上排游戏标题、下排玩家名常显、人数右对齐；长名单在下排窗口内滚动。MonitorFrame 下方同时显示版本，空版本显示“版本未知”。
 - 最大容量统一为 32；出厂及恢复默认列表为 12 条，0009 中移除 relay.cfg 的「中国·江苏(2) yordon.cn:11451」；17 条添加候选目录仍保留该服务器作为可选候选，另有 4 条备用节点。
-- 在既有补丁 0010 内根源修复接口字段缺失：房间解析兼容 contentId/content_id/titleId 等标题 ID 别名、game 字符串与嵌套对象；缺 ID/all-F 时先尝试该房间自己的 advertiseData，再使用接口提供的游戏名；GraphQL 按 schema 回退标题/广告/节点字段，按需读取 game 标量或对象并缓存字段支持状态。未知仍安全回退；不读取本机前台 ProgramId。纯主机回归测试覆盖 ID 规范化、房间游戏名、广告识别、未知负例及 GraphQL 查询构造/字段协商。
+- 在既有补丁 0010 内根源修复接口字段缺失：房间解析兼容 contentId/content_id/titleId 等标题 ID 别名、game 字符串与嵌套对象；缺 ID/all-F 时先尝试该房间自己的 advertiseData，再使用接口提供的游戏名；GraphQL 按 schema 回退标题/广告/节点字段，按需读取 game 标量或对象并缓存字段支持状态；朱/紫家族名不再阻断该按需查询，只有房间自身数据明确给出单版本时才细分标题，否则保留家族名。未知仍安全回退；不读取本机前台 ProgramId。纯主机回归测试覆盖 ID 规范化、版本名分类、房间游戏名、广告识别、未知负例及 GraphQL 查询构造/字段协商。
 
 Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-TONYX9000
 
@@ -103,6 +103,7 @@ Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-T
 CI 构建修复（DevkitPro 包数据库 HTTP 403）：
 - build/nightly/release 的依赖安装步骤已加入缓存回退；本次用户提供的 beta 构建日志显示 beta.yml 仍直接运行 dkp-pacman -Sy --noconfirm switch-curl，依赖步骤失败，Build 被跳过。
 - beta.yml 现复用同一策略：先检查 switch-curl 是否已安装；索引刷新失败时继续尝试用缓存数据库安装；最后用 dkp-pacman -Q 校验依赖，否则明确报缺失并停止，不吞掉真实依赖错误。
+- beta.yml 在同一补丁内把版本固定为 beta-g<GITHUB_SHA 前 7 位>，并以命令行 TARGET_VERSION 传入递归 Make；不再出现 dev-x 或 beta-x-xxxx 距离段，也不移动/推送 tag。
 - 四个 workflow 的 YAML 解析与 shell 分支均以 mock 测过：已安装、403 后缓存安装成功、正常刷新安装成功、依赖缺失时清楚失败。
 
 玩家名单切服串台修复（截图反馈）：
@@ -115,24 +116,24 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
 - 每次打开刷新或切换目标时更新请求代次，并立即把已发布的房间列表与新选择解绑、清空；
 - 单 worker 的旧服务器查询返回后，若请求代次已过期，则不写入房间缓存、在线/房间数或快照，避免把旧结果显示到新服务器下；新增纯主机 generation gate 回归测试。
 ---
- .github/workflows/beta.yml                    |   16 +-
+ .github/workflows/beta.yml                    |   27 +-
  .github/workflows/build.yml                   |   34 +-
  .github/workflows/nightly.yml                 |   37 +-
  .github/workflows/release.yml                 |   44 +-
  Makefile                                      |    6 +
  overlay/Makefile                              |    9 +-
  overlay/source/main.cpp                       | 1029 +++++-
- overlay/source/monitor.cpp                    | 2777 +++++++++++++++++
+ overlay/source/monitor.cpp                    | 2798 +++++++++++++++++
  overlay/source/monitor.hpp                    |   71 +
  overlay/source/monitor_graphql_compat.hpp     |  203 ++
  overlay/source/monitor_player_filter.hpp      |   32 +
  overlay/source/monitor_target_generation.hpp  |   22 +
- overlay/source/monitor_title_resolver.hpp     |  414 +++
+ overlay/source/monitor_title_resolver.hpp     |  461 +++
  overlay/tests/monitor_graphql_compat_test.cpp |   85 +
  overlay/tests/monitor_player_filter_test.cpp  |   29 +
  .../tests/monitor_target_generation_test.cpp  |   22 +
- overlay/tests/monitor_title_resolver_test.cpp |  173 +
- 17 files changed, 4845 insertions(+), 158 deletions(-)
+ overlay/tests/monitor_title_resolver_test.cpp |  195 ++
+ 17 files changed, 4943 insertions(+), 161 deletions(-)
  create mode 100644 overlay/source/monitor.cpp
  create mode 100644 overlay/source/monitor.hpp
  create mode 100644 overlay/source/monitor_graphql_compat.hpp
@@ -145,10 +146,30 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
  create mode 100644 overlay/tests/monitor_title_resolver_test.cpp
 
 diff --git a/.github/workflows/beta.yml b/.github/workflows/beta.yml
-index e61dc52..9c225b0 100644
+index e61dc52..dbeba86 100644
 --- a/.github/workflows/beta.yml
 +++ b/.github/workflows/beta.yml
-@@ -120,9 +120,23 @@ jobs:
+@@ -48,14 +48,17 @@ jobs:
+         run: git config --global --add safe.directory '*'
+ 
+       - name: Toolchain versions
++        id: beta_version
+         continue-on-error: true
+         run: |
+           (dkp-pacman -Q 2>/dev/null || pacman -Q 2>/dev/null) \
+             | grep -Ei 'devkita64|libnx|newlib|binutils' || true
+           "${DEVKITPRO:-/opt/devkitpro}/devkitA64/bin/aarch64-none-elf-gcc" --version | head -1 || true
+           git --version || true
+-          echo "version string this build will stamp:"
+-          echo "  $(git describe --tags 2>/dev/null)$(git diff --quiet --ignore-submodules=all HEAD 2>/dev/null || echo -dirty)"
++          short_sha="${GITHUB_SHA:0:7}"
++          version="beta-g${short_sha}"
++          echo "version=${version}" >> "$GITHUB_OUTPUT"
++          echo "Beta plugin version: ${version}"
+           exit 0
+ 
+       - name: Apply port patches (patches/*.patch)
+@@ -120,13 +123,29 @@ jobs:
  
        - name: Install switch-curl (订阅 HTTPS 下载)
          run: |
@@ -173,6 +194,13 @@ index e61dc52..9c225b0 100644
  
        - name: Build
          id: build
+-        run: make -j8 PREFIX="ccache aarch64-none-elf-"
++        env:
++          TARGET_VERSION: ${{ steps.beta_version.outputs.version }}
++        run: make -j8 PREFIX="ccache aarch64-none-elf-" TARGET_VERSION="$TARGET_VERSION"
+ 
+       - name: Upload sdcard
+         uses: actions/upload-artifact@v7
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
 index 3d7bc8b..b37dab7 100644
 --- a/.github/workflows/build.yml
@@ -1533,10 +1561,10 @@ index 8e07c19..8eea790 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..5c0eb6f
+index 0000000..45d0231
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
-@@ -0,0 +1,2777 @@
+@@ -0,0 +1,2798 @@
 +/* 联机监视器实现:订阅下载 + 服务器查询 + UDP 房间扫描 + 后台刷新。
 + *
 + * 数据口径与 LanPlayMonitor 一致:
@@ -3012,6 +3040,8 @@ index 0000000..5c0eb6f
 +static int RoomGameLabelQuality(const char *label) {
 +    if (IsUnknownGameLabel(label))
 +        return 0;
++    if (MonitorTitleResolver::IsPokemonScarletVioletFamilyName(label))
++        return 1; /* A family label can still be enriched by the room's game name. */
 +    char titleId[17] = {};
 +    return MonitorTitleResolver::NormalizeTitleId(label, titleId, sizeof(titleId)) ? 1 : 2;
 +}
@@ -3022,20 +3052,39 @@ index 0000000..5c0eb6f
 +                           const char *gameName, const char *advertiseData,
 +                           const char *hostPlayerName, char *out, size_t n) {
 +    char normalizedName[52] = {};
-+    if (!MonitorTitleResolver::NormalizeRoomGameName(
-+            gameName, normalizedName, sizeof(normalizedName)))
-+        MonitorTitleResolver::NormalizeRoomGameName(
-+            gameValue, normalizedName, sizeof(normalizedName));
++    char normalizedGameValue[52] = {};
++    const bool hasRoomName = MonitorTitleResolver::NormalizeRoomGameName(
++        gameName, normalizedName, sizeof(normalizedName));
++    const bool hasRoomGameValue = MonitorTitleResolver::NormalizeRoomGameName(
++        gameValue, normalizedGameValue, sizeof(normalizedGameValue));
++    if (!hasRoomName && hasRoomGameValue)
++        snprintf(normalizedName, sizeof(normalizedName), "%s", normalizedGameValue);
 +
 +    char titleId[17] = {};
 +    const bool hasTitleId = MonitorTitleResolver::ResolveRoomTitleId(
 +        contentId, gameValue, advertiseData, hostPlayerName,
 +        titleId, sizeof(titleId));
 +    if (hasTitleId && strcmp(titleId, "0100A3D008C5C000") == 0) {
-+        /* Violet also advertises Scarlet's communication ID; the room payload
-+         * identifies the shared family, not a specific version. */
-+        snprintf(out, n, "%s", T_STR("宝可梦 朱/紫", "寶可夢 朱/紫"));
-+        return;
++        /* Scarlet and Violet share this communication ID. Use a version only
++         * when the room itself provides a specific game name; never infer it
++         * from the local foreground application's ProgramId. */
++        MonitorTitleResolver::PokemonScarletVioletVersion roomVersion =
++            MonitorTitleResolver::PokemonVersionFromRoomName(normalizedName);
++        if (roomVersion == MonitorTitleResolver::PokemonScarletVioletVersion::Unspecified &&
++            hasRoomName && hasRoomGameValue)
++            roomVersion = MonitorTitleResolver::PokemonVersionFromRoomName(normalizedGameValue);
++        switch (roomVersion) {
++            case MonitorTitleResolver::PokemonScarletVioletVersion::Scarlet:
++                snprintf(out, n, "%s", T_STR("宝可梦朱", "寶可夢朱"));
++                return;
++            case MonitorTitleResolver::PokemonScarletVioletVersion::Violet:
++                snprintf(out, n, "%s", T_STR("宝可梦紫", "寶可梦紫"));
++                return;
++            case MonitorTitleResolver::PokemonScarletVioletVersion::Unspecified:
++            default:
++                snprintf(out, n, "%s", T_STR("宝可梦 朱/紫", "寶可梦 朱/紫"));
++                return;
++        }
 +    }
 +
 +    if (hasTitleId) {
@@ -4668,10 +4717,10 @@ index 0000000..a0a3d78
 +} // namespace MonitorTargetGeneration
 diff --git a/overlay/source/monitor_title_resolver.hpp b/overlay/source/monitor_title_resolver.hpp
 new file mode 100644
-index 0000000..f754b5c
+index 0000000..93dae19
 --- /dev/null
 +++ b/overlay/source/monitor_title_resolver.hpp
-@@ -0,0 +1,414 @@
+@@ -0,0 +1,461 @@
 +#pragma once
 +
 +#include <stddef.h>
@@ -4825,6 +4874,53 @@ index 0000000..f754b5c
 +            return false;
 +    }
 +    return true;
++}
++
++inline bool AsciiCaseContains(const char *value, const char *needle) {
++    if (!value || !needle || !needle[0])
++        return false;
++    const size_t needleLen = strlen(needle);
++    for (const char *p = value; *p; ++p) {
++        size_t i = 0;
++        while (i < needleLen && p[i]) {
++            char a = p[i];
++            char b = needle[i];
++            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
++            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
++            if (a != b)
++                break;
++            ++i;
++        }
++        if (i == needleLen)
++            return true;
++    }
++    return false;
++}
++
++enum class PokemonScarletVioletVersion : unsigned char {
++    Unspecified = 0,
++    Scarlet,
++    Violet,
++};
++
++inline bool IsPokemonScarletVioletFamilyName(const char *name) {
++    if (!name)
++        return false;
++    const bool hasScarlet = strstr(name, "朱") != nullptr ||
++                            AsciiCaseContains(name, "scarlet");
++    const bool hasViolet = strstr(name, "紫") != nullptr ||
++                           AsciiCaseContains(name, "violet");
++    return hasScarlet && hasViolet;
++}
++
++inline PokemonScarletVioletVersion PokemonVersionFromRoomName(const char *name) {
++    if (!name || IsPokemonScarletVioletFamilyName(name))
++        return PokemonScarletVioletVersion::Unspecified;
++    if (strstr(name, "紫") || AsciiCaseContains(name, "violet"))
++        return PokemonScarletVioletVersion::Violet;
++    if (strstr(name, "朱") || AsciiCaseContains(name, "scarlet"))
++        return PokemonScarletVioletVersion::Scarlet;
++    return PokemonScarletVioletVersion::Unspecified;
 +}
 +
 +inline bool NormalizeRoomGameName(const char *src, char *out, size_t outN) {
@@ -5242,10 +5338,10 @@ index 0000000..a0e003f
 +}
 diff --git a/overlay/tests/monitor_title_resolver_test.cpp b/overlay/tests/monitor_title_resolver_test.cpp
 new file mode 100644
-index 0000000..a450656
+index 0000000..24aa3b2
 --- /dev/null
 +++ b/overlay/tests/monitor_title_resolver_test.cpp
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,195 @@
 +#include "../source/monitor_title_resolver.hpp"
 +
 +#include <assert.h>
@@ -5254,6 +5350,9 @@ index 0000000..a450656
 +using MonitorTitleResolver::kAdvertiseDataMaxHex;
 +using MonitorTitleResolver::NormalizeRoomGameName;
 +using MonitorTitleResolver::NormalizeTitleId;
++using MonitorTitleResolver::PokemonScarletVioletVersion;
++using MonitorTitleResolver::PokemonVersionFromRoomName;
++using MonitorTitleResolver::IsPokemonScarletVioletFamilyName;
 +using MonitorTitleResolver::ResolveAdvertisedTitleId;
 +using MonitorTitleResolver::ResolveRoomTitleId;
 +
@@ -5406,6 +5505,25 @@ index 0000000..a450656
 +    assert(!NormalizeRoomGameName("Unknown game (unknown)", roomGameName,
 +                                  sizeof(roomGameName)));
 +
++    /* Only an explicit room game name can refine the shared Scarlet/Violet
++     * communication ID to a single version. Combined family names stay
++     * ambiguous and therefore retain the safe family fallback. */
++    assert(PokemonVersionFromRoomName("Pokémon Violet") ==
++           PokemonScarletVioletVersion::Violet);
++    assert(PokemonVersionFromRoomName("宝可梦紫") ==
++           PokemonScarletVioletVersion::Violet);
++    assert(PokemonVersionFromRoomName("Pokemon Scarlet") ==
++           PokemonScarletVioletVersion::Scarlet);
++    assert(PokemonVersionFromRoomName("宝可梦朱") ==
++           PokemonScarletVioletVersion::Scarlet);
++    assert(PokemonVersionFromRoomName("Pokémon Scarlet and Violet") ==
++           PokemonScarletVioletVersion::Unspecified);
++    assert(PokemonVersionFromRoomName("宝可梦 朱/紫") ==
++           PokemonScarletVioletVersion::Unspecified);
++    assert(IsPokemonScarletVioletFamilyName("宝可梦 朱/紫"));
++    assert(IsPokemonScarletVioletFamilyName("Pokémon Scarlet/Violet"));
++    assert(!IsPokemonScarletVioletFamilyName("Pokémon Violet"));
++
 +    /* Missing and all-F IDs both try the advertisement belonging to this room. */
 +    BuildScarletVioletAdvertiseData(sv, sizeof(sv), 6);
 +    assert(ResolveRoomTitleId("", "", sv, nullptr,
@@ -5419,3 +5537,6 @@ index 0000000..a450656
 +    assert(normalizedId[0] == 0);
 +    return 0;
 +}
+-- 
+2.47.3
+
