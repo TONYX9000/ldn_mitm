@@ -6,56 +6,144 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-标题栏改版(本次反馈,仍在补丁 0010 内,不新增编号):
-- 去掉「联机插件」标题下面的「阿东版·版本号」副标题;版本仍保留在列表底部
-  「关于 → 版本」一行,g_brand 与 detectLanguage 里的品牌串一并删除。
-- 标题右侧新增「有房间的服务器 + 房间数量」标签:形如「中国·江苏(2)」,
-  2 = 该基础名在 relay.cfg 里的条目数(「美国」+「美国(2)」并成 美国(2));
-  一行最多两个,当前选中的服务器排第一,其余按数量多→relay.cfg 顺序;
-  字号与「在线/房间」一致(15px),可用宽度按标题实际宽度算:两项放不下只画
-  一个,一个都放不下才截断加「…」,全放不下留白。
-- 纯逻辑放在 overlay/source/monitor_title_bar.hpp,配套
-  overlay/tests/monitor_title_bar_test.cpp;tools/check_titlebar_harness.py
-  把 main.cpp 的标题栏代码原样抽出来编译并跑(含 aarch64 类型检查),
-  tools/run-host-tests.sh + .github/workflows/host-tests.yml 在 CI 跑纯主机测试。
-- patches/0010 已重写为本提交相对 0009 的完整 diff,patches/0000 封面信同步更新。
----
- .github/workflows/build.yml                   |   34 +-
- .github/workflows/host-tests.yml              |   19 +
- .github/workflows/nightly.yml                 |   37 +-
- .github/workflows/release.yml                 |   44 +-
- Makefile                                      |    6 +
- overlay/Makefile                              |    9 +-
- overlay/source/main.cpp                       | 1129 +++++++-
- overlay/source/monitor.cpp                    | 2429 +++++++++++++++++
- overlay/source/monitor.hpp                    |   71 +
- overlay/source/monitor_player_filter.hpp      |   32 +
- overlay/source/monitor_target_generation.hpp  |   22 +
- overlay/source/monitor_title_bar.hpp          |  268 ++
- overlay/source/monitor_title_resolver.hpp     |  148 +
- overlay/tests/monitor_player_filter_test.cpp  |   29 +
- .../tests/monitor_target_generation_test.cpp  |   22 +
- overlay/tests/monitor_title_bar_harness.cpp   |  254 ++
- overlay/tests/monitor_title_bar_test.cpp      |  171 ++
- overlay/tests/monitor_title_resolver_test.cpp |   49 +
- tools/check_titlebar_harness.py               |  241 ++
- tools/run-host-tests.sh                       |   41 +
- 20 files changed, 4893 insertions(+), 162 deletions(-)
- create mode 100644 .github/workflows/host-tests.yml
- create mode 100644 overlay/source/monitor.cpp
- create mode 100644 overlay/source/monitor.hpp
- create mode 100644 overlay/source/monitor_player_filter.hpp
- create mode 100644 overlay/source/monitor_target_generation.hpp
- create mode 100644 overlay/source/monitor_title_bar.hpp
- create mode 100644 overlay/source/monitor_title_resolver.hpp
- create mode 100644 overlay/tests/monitor_player_filter_test.cpp
- create mode 100644 overlay/tests/monitor_target_generation_test.cpp
- create mode 100644 overlay/tests/monitor_title_bar_harness.cpp
- create mode 100644 overlay/tests/monitor_title_bar_test.cpp
- create mode 100644 overlay/tests/monitor_title_resolver_test.cpp
- create mode 100644 tools/check_titlebar_harness.py
- create mode 100755 tools/run-host-tests.sh
+联机监视器(0010):
+- 底部按键提示按系统语言显示「返回/确定」(覆盖 libtesla 的英文 Back/OK)
+- 部分游戏将 LDN LocalCommunicationId 写为 FFFFFFFFFFFFFFFF(auto sentinel);按每个房间自己的 advertiseData 识别 Dragon Ball FighterZ、Rocket League、MONSTER HUNTER RISE、Monster Hunter Stories 2 与 Minecraft 的标题 ID;未知模式安全显示「未知游戏」,不再用本机前台 ProgramId 误标远端房间
+- 标题下方两列统计:标签「在线/房间」在上、数字在下;刷新 1s 一次,
+  与延迟 ping(sysmodule RelayPingIntervalMs)同节奏,仅可见时轮询,
+  周期刷新不重拉订阅、不改目标
+- 「游戏房间」列表:chinese_db.json 标题ID→中文名映射 + N/M 人数;
+  玩家名单(hostPlayerName 置顶 + nodes 玩家名)随查询解析入库
+- 房间行与服务器行一致采用 70px 固定双排布局:上排显示游戏标题、下排常显玩家名单,房主高亮;名单过长时在下排 scissor 窗口内滚动(停 90 帧后 1px/帧滑动);人数在右侧显示;房间区与「中继服务器(按 A 切换)」用分隔标题隔开;行对象持久复用,焦点安全
+- 服务器列表以 sysmodule 加载的 relay.cfg 为真值源,overlay 通过 IPC
+  读取名称/地址/端口;servers.json 下载/解析/类型表/名字兜底全部移除。
+  服务器行双排布局(上=名称、下=地址 host:port,行高 70 不变,
+  右侧保留「* 延迟」)
+- 订阅(chinese_db.json)每次打开 overlay 经 https://v6.gh-proxy.org/
+  加速镜像(GitHub 链接前加镜像前缀)重新下载,失败退回
+  /config/ldn_mitm/ 缓存;overlay 内置 switch-curl(libnx SSL 后端)
+  提供 TLS(GitHub 全站强制 HTTPS,纯 HTTP 轻客户端拉不动),DNS 以
+  原始解析预钉 IP(curl 的 getaddrinfo 在 overlay 里同样不可用);
+  graphql/rest 分型查询(rest 1.0 用 UDP LDN 主动扫描补房间);切换
+  服务器即时刷新
+- 订阅缓存随构建包预置(仅 chinese_db.json;CI 构建时新鲜抓取铺进
+  sdcard 并自检),运行时下载成功则更新缓存
 
+内存与稳定性(真机 23.0.1 排障并入):
+- EnsureSd():tesla 覆盖 __appInit 后 sdmc 未挂载,曾致 fclose(NULL)
+  崩溃与全部文件 I/O 静默失效;现幂等挂载 + 日志截断判空
+- 标题表懒加载 + 流式解析 + Content-Length 预留,消除 0x559 OutOfMemory
+- socket 在 initServices(帧缓冲前)初始化:自带 sm 会话包裹,失败
+  缩容重试、bsd:s 兜底,AlreadyInitialized 视为成功;soc-probe 实测
+- 帧缓冲降级兜底(--wrap=framebufferCreate):双缓冲失败自动单缓冲
+- 堆探针 + 全链路日志(worker-init/probe-*/fb:/ui-*/first-frame/
+  sockets-init rc/soc-probe/resolve ok|fallback|FAIL|noname…[条目名]/
+  query e=/scan/download ok|try fail e=/chinese: use cache|no cache):
+  日志截断移到最早,避免吃掉 sockets-init;查询失败状态文本带错误码,
+  游戏房间区直接显示
+- getaddrinfo 在桌面 23.x 系统 overlay 进程里直接不可用(rc 262-0-1201,
+  不是 DNS 配置问题):overlay 与 sysmodule 一样改为 raw UDP/53 + nifm
+  获取 DNS(srv records 不可用,自动退回 223.5.5.5/114/8/1 台);
+  网络层增加 5 秒超时 + 「查询超时」诊断,日志加 dns 标签(dns nifm=/
+  dns srv…/dns ok|fail|timeout host rc=)与名字解析标签(resolve name|
+  noname|nohost/entry|nohost)
+- 测试(主机侧,monitor.cpp 直编):DnsBuildQuery/DnsParseA/MatchRelayLine/
+  RelayParseLine(\v \f 空白)/MonitorListRelayServers/ResolveSelectedServer
+  (\v 行 noname 复现修复)/HttpsGet(curl stub)/LdnDecompress/
+  ParseNetworkInfo/ParseRoomArray(玩家名/房主置顶/sessionId)/Http 解析/
+  DnsInitServers;chinese_db 流式解析 + 标题映射冒烟;FormatGameName(all-F sentinel -> room advertiseData);独立 monitor_title_resolver_test 覆盖已知/未知广告模式
+
+CI(适配最新系统):构建前 Atmosphere-libs 顶到 master + libnx master;
+安装 switch-curl(订阅 HTTPS 下载)
+
+崩溃修复与构建修复(2026-10-19 真机 2168-0002 排障并入):
+- 死因定位:2168-0002 (0x4a8) 死于首次刷新的下载窗口(resolve ok 之后、
+  curl perform 前后),寄存器 X10=5000(下载超时参数)指向 HttpGet 深度
+- CURLOPT_RESOLVE 收的是 struct curl_slist *,此前误传 char*——字符串
+  地址被当链表头解引用,首次 perform 即崩;现 curl_slist_append 组包、
+  perform 后 curl_slist_free_all
+- 栈上巨结构全部改 static:DoRefresh 的 QueryResult(约 8.7KB)、
+  MonitorFrame::draw/update 的 MonitorSnapshot(约 8.6KB);服务器管理行
+  改为 IPC 逐项读取,不再在 createUI 栈上放 MonitorServer[32](3KB)。
+  ovlloader 小栈被挤爆是另一根因;工作线程栈 32KB→64KB;日志新增
+  stack-free 便于复测验证
+- overlay/Makefile 补齐 $(PORTLIBS)/include(CI 编译找不到 curl/curl.h
+  即「构建报错」根因)与 -lcurl -lz(链接缺库);诊断日志加
+  subs-start/curl-try/curl-done,再有崩溃日志即可钉死窗口
+- 删掉 main.cpp 的 #include <arm/counter.h>(错误路径:libnx 里是
+  switch/arm/counter.h,且 <switch.h> 本就传递包含;真实 CI 硬错误
+  fatal error: arm/counter.h: No such file or directory)
+
+反馈修复(均在补丁 10 内完成,不新增补丁):
+- 房间 5 秒 TTL 缓存:以 sessionId 为键,命中刷新时间戳、当次未出现
+  再保留 5 秒;查询瞬间失败时 5 秒内沿用最近一次成功的在线/房间数;
+  轮询查询窗口内不再清空统计与列表,消除扫描丢包导致的每秒闪烁;
+  服务器身份(host:port)变化时缓存整体清空防串台
+- 游戏名/游戏标题完整显示、不加省略号(宽度不够时整体缩字号);
+  服务器名/地址仅当会伸进右侧「* 延迟」区域时才截断加省略号
+  (libtesla limitStringLength 会无条件补「…」,原无条件调用把刚好
+  放得下的文本末字符也切掉了)
+- 扫描响应的 NetworkInfo 解析 nodes[] 用户名(0x68 起、步长 0x40,
+  isConnected @+11、userName[33] @+12),主机 nodes[0] 置顶;
+  扫描补出的房间不再永远显示「该服务器未提供玩家名单」
+
+本轮合并（仍在既有补丁 0010 内，不新增编号）：
+- 合入分支服务器管理页 AddServerGui、添加/删除/恢复默认操作、列表重建与焦点恢复；服务器列表继续使用 patch 10 的自绘 ServerRow，保留名称/地址布局、右侧延迟和在线/房间数字间距。
+- 游戏房间行改为与服务器行同高的 70px 固定双排布局：上排游戏标题、下排玩家名常显、人数右对齐；长名单在下排窗口内滚动。MonitorFrame 下方同时显示版本，空版本显示“版本未知”。
+- 最大容量统一为 32；出厂及恢复默认列表为 12 条，0009 中移除 relay.cfg 的「中国·江苏(2) yordon.cn:11451」；17 条添加候选目录仍保留该服务器作为可选候选，另有 4 条备用节点。
+- 在既有补丁 0010 内增加 room advertiseData 标题识别、UDP NetworkInfo 广告数据解析、旧 GraphQL schema 回退及纯主机回归测试；未识别 all-F 房间安全显示「未知游戏」，不读取本机 ProgramId。
+
+Ported-from: https://github.com/aylz10/ldn_mitm2/tree/beta/bsd-broadcast-relay-TONYX9000
+
+旧系统兼容性（2026-10-19，HOS 19.0.1 / Atmosphère 1.9.5-pre 日志；根因待实机确认）：
+- 附件记录 2168-0001 Instruction Abort；查询和 UDP 扫描曾成功，崩溃线程 SP 靠近 User Exception Address。该信息值得排查线程栈/内存边界，但不能单独证实栈溢出。
+- 为降低旧运行环境下的线程栈压力，monitor worker 栈从 64 KiB 增至 256 KiB；LDN 解压 8 KiB 临时缓冲移为单 worker 专用静态缓冲。
+- 修正 stack-free 的无符号地址相减；仅在 probe 位于传入栈区时显示 used/free，否则记录 probe 和栈区范围，供复测诊断。
+
+CI 构建修复（DevkitPro 包数据库 HTTP 403）：
+- build/nightly/release 的依赖安装步骤已加入缓存回退；本次用户提供的 beta 构建日志显示 beta.yml 仍直接运行 dkp-pacman -Sy --noconfirm switch-curl，依赖步骤失败，Build 被跳过。
+- beta.yml 现复用同一策略：先检查 switch-curl 是否已安装；索引刷新失败时继续尝试用缓存数据库安装；最后用 dkp-pacman -Q 校验依赖，否则明确报缺失并停止，不吞掉真实依赖错误。
+- 四个 workflow 的 YAML 解析与 shell 分支均以 mock 测过：已安装、403 后缓存安装成功、正常刷新安装成功、依赖缺失时清楚失败。
+
+玩家名单切服串台修复（截图反馈）：
+- 对照 slp-server-rust 的 GraphQL NodeInfo，nodes 同时含 player_name 与 is_connected；旧 overlay 只查询 playerName，并把所有非空节点名都加入房间名单，可能把节点槽里已断开的旧昵称显示出来，造成 1/6 却出现多个名字。
+- 主查询增加 isConnected 字段；解析按 connected=true 过滤，去重，并在服务端给出 nodeCount 时以该计数限制名字数。为兼容旧 schema 增加逐级字段回退；旧 schema 没有连接标记时维持原行为。
+- UDP NetworkInfo 的 nodes 是固定 8 槽数组；扫描解析原先遍历全部槽位，nodeCount=1 时也可能读到尾部残留昵称。现只读 nodeCount 范围内的槽并去重，避免切换房间/服务器后偶发串名。
+- 切换服务器时立即清掉 worker 房间缓存与已发布快照，避免新查询完成前显示上一服务器的名单；纯主机测试覆盖连接状态、旧 schema 与 nodeCount 边界。
+
+服务器切换后的房间快照错位修复（反馈）：
+- 每次打开刷新或切换目标时更新请求代次，并立即把已发布的房间列表与新选择解绑、清空；
+- 单 worker 的旧服务器查询返回后，若请求代次已过期，则不写入房间缓存、在线/房间数或快照，避免把旧结果显示到新服务器下；新增纯主机 generation gate 回归测试。
+
+diff --git a/.github/workflows/beta.yml b/.github/workflows/beta.yml
+index e61dc52..9c225b0 100644
+--- a/.github/workflows/beta.yml
++++ b/.github/workflows/beta.yml
+@@ -120,9 +120,23 @@ jobs:
+ 
+       - name: Install switch-curl (订阅 HTTPS 下载)
+         run: |
++          set -euo pipefail
+           # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
+           # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
+-          dkp-pacman -Sy --noconfirm switch-curl
++          if dkp-pacman -Q switch-curl >/dev/null 2>&1; then
++            echo "switch-curl already installed"
++          else
++            # DevkitPro package DB refresh can fail with HTTP 403. Do not
++            # make a mirror refresh failure fatal if cached DBs can install it.
++            if ! dkp-pacman -Sy --noconfirm; then
++              echo "::warning::DevkitPro package DB refresh failed; trying cached metadata."
++            fi
++            dkp-pacman -S --noconfirm --needed switch-curl || true
++          fi
++          if ! dkp-pacman -Q switch-curl >/dev/null 2>&1; then
++            echo "::error::Required package switch-curl is not installed."
++            exit 1
++          fi
+ 
+       - name: Build
+         id: build
 diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
 index 3d7bc8b..b37dab7 100644
 --- a/.github/workflows/build.yml
@@ -109,31 +197,6 @@ index 3d7bc8b..b37dab7 100644
        - name: Clear invalid ccache after libnx update 
          run: ccache -C
  
-diff --git a/.github/workflows/host-tests.yml b/.github/workflows/host-tests.yml
-new file mode 100644
-index 0000000..9526aaa
---- /dev/null
-+++ b/.github/workflows/host-tests.yml
-@@ -0,0 +1,19 @@
-+name: Host tests
-+
-+on: [push, pull_request, workflow_dispatch]
-+
-+jobs:
-+  overlay:
-+    runs-on: ubuntu-latest
-+    steps:
-+      - uses: actions/checkout@v6
-+
-+      - name: Run overlay host tests
-+        run: ./tools/run-host-tests.sh
-+
-+      - name: Type-check with a second toolchain (catches aarch64-specific slips)
-+        run: |
-+          set -euo pipefail
-+          sudo apt-get update
-+          sudo apt-get install -y g++-aarch64-linux-gnu
-+          ./tools/run-host-tests.sh aarch64-linux-gnu-g++
 diff --git a/.github/workflows/nightly.yml b/.github/workflows/nightly.yml
 index c53077f..d78034c 100644
 --- a/.github/workflows/nightly.yml
@@ -305,34 +368,29 @@ index da2bd21..788dac7 100644
  #---------------------------------------------------------------------------------
  # list of directories containing libraries, this must be the top level containing
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..5d36eb7 100644
+index 8e07c19..8eea790 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
-@@ -1,6 +1,9 @@
+@@ -1,6 +1,8 @@
  #define TESLA_INIT_IMPL // If you have more than one file using the tesla header, only define this in the main one
  #include <tesla.hpp>    // The Tesla Header
  #include "ldn.h"
 +#include "monitor.hpp"
-+#include "monitor_title_bar.hpp"
 +#include <functional>
  #include <vector>
  
  enum class State {
-@@ -14,11 +17,8 @@ LdnMitmConfigService g_ldnConfig;
- State g_state;
- char g_version[32];
+@@ -18,7 +20,8 @@ char g_version[32];
+    OverlayFrame keeps the pointer instead of copying it. */
+ char g_brand[64] = "阿东版";   // overwritten by detectLanguage() at startup
  
--/* Brand string shown in the frame header. Must outlive createUI(), because
--   OverlayFrame keeps the pointer instead of copying it. */
--char g_brand[64] = "阿东版";   // overwritten by detectLanguage() at startup
--
 -std::vector<tsl::elm::ListItem*> g_serverItems;
 +class ServerRow;
 +std::vector<ServerRow*> g_serverRows;
  
  /* Latency value currently painted on the server rows. Lives at file scope
     rather than as a function-local static so createUI() can invalidate it:
-@@ -26,6 +26,12 @@ std::vector<tsl::elm::ListItem*> g_serverItems;
+@@ -26,6 +29,12 @@ std::vector<tsl::elm::ListItem*> g_serverItems;
     painting them entirely. */
  u32 g_shown_latency = 0xFFFFFFFFu;
  
@@ -345,7 +403,7 @@ index 8e07c19..5d36eb7 100644
  /* Traditional / Simplified Chinese switch. The overlay used to hardcode
     Simplified strings, which left Traditional Chinese consoles with the
     wrong glyphs. libtesla already loads both CJK shared fonts, so all we
-@@ -34,6 +40,507 @@ static bool g_isTraditional = false;
+@@ -34,6 +43,416 @@ static bool g_isTraditional = false;
  
  #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
  
@@ -393,93 +451,6 @@ index 8e07c19..5d36eb7 100644
 +
 +/* 当前选中的服务器名,监视器按它查询(切换时立即刷新)。 */
 +static char g_selectedName[48] = {};
-+
-+/* 标题右侧的「有房间的服务器(带房间数量)」标签(补丁 0010):
-+   显示哪些服务器上有房间、各有几个,例如「中国·江苏(2)」。
-+   归组 / 挑选项 / 测宽截断都在 monitor_title_bar.hpp 里(有桌面端单测);这里只
-+   负责「什么时候重算 + 画在哪」。服务器列表变化时打脏标记,下一帧重算一次。 */
-+static constexpr float kTitleBarFont = 15;   /* 与标题下「在线/房间」标签、数字同号 */
-+
-+struct TitleBarState {
-+    /* 只存要显示的两项:整张服务器表放 BSS 会白占 1.7KB(ovlloader 堆很紧),
-+       放栈上又和补丁 0010「栈上巨结构全部改 static」的结论相冲。 */
-+    monitor_title_bar::Item items[monitor_title_bar::kMaxPerLine];
-+    u32 itemN;
-+    bool dirty;
-+};
-+
-+static TitleBarState g_titleBar = { {}, 0, true };
-+
-+/* 只测不画:透明色走的是同一套字体度量(与 ServerRow/RoomRow 的取宽写法一致)。 */
-+static u32 TitleBarMeasureAt(tsl::gfx::Renderer *renderer, const char *text, float font) {
-+    return renderer->drawString(text, false, 0, 0, font,
-+                                tsl::style::color::ColorTransparent).first;
-+}
-+
-+/* libtesla 的测宽回调只要一个 (text, user) 函数指针;字号在这里定死。 */
-+static u32 TitleBarMeasure(const char *text, void *user) {
-+    return TitleBarMeasureAt(static_cast<tsl::gfx::Renderer *>(user), text, kTitleBarFont);
-+}
-+
-+/* 读一次 relay.cfg(服务器列表的真值源),算出标题栏要显示的服务器名与数量。 */
-+static void TitleBarRefresh() {
-+    g_titleBar.dirty = false;
-+    g_titleBar.itemN = 0;
-+
-+    /* 3KB 的服务器表放 static:同补丁 0010 对大结构的处理办法。 */
-+    static monitor_title_bar::Entry entries[monitor_title_bar::kMaxServers];
-+    u32 n = 0;
-+    {
-+        static MonitorServer raw[monitor_title_bar::kMaxServers];
-+        const u32 rawN = MonitorListRelayServers(raw, monitor_title_bar::kMaxServers);
-+        for (u32 i = 0; i < rawN; i++) {
-+            snprintf(entries[n].name, sizeof(entries[n].name), "%s", raw[i].name);
-+            snprintf(entries[n].addr, sizeof(entries[n].addr), "%s", raw[i].addr);
-+            n++;
-+        }
-+    }
-+
-+    static monitor_title_bar::Group groups[monitor_title_bar::kMaxServers];
-+    const u32 groupN = monitor_title_bar::GroupEntries(entries, n, groups,
-+                                                       monitor_title_bar::kMaxServers);
-+    static monitor_title_bar::Item all[monitor_title_bar::kMaxServers];
-+    const u32 itemN = monitor_title_bar::PickItems(groups, groupN,
-+                                                   g_selectedName[0] ? g_selectedName : nullptr,
-+                                                   all, monitor_title_bar::kMaxServers);
-+    /* 一行最多两个:选中的排第一,其余按房间数从多到少、同数按 relay.cfg 顺序。 */
-+    g_titleBar.itemN = (itemN > monitor_title_bar::kMaxPerLine)
-+                           ? monitor_title_bar::kMaxPerLine
-+                           : itemN;
-+    for (u32 i = 0; i < g_titleBar.itemN; i++)
-+        g_titleBar.items[i] = all[i];
-+}
-+
-+/* 画在标题右侧。libtesla 的 OverlayFrame 把标题画在 (20, 50) 字号 30,标签从
-+   标题右边缘再往右 16px 起画,右侧留 16px 边距;放不下两个就只画一个。 */
-+static void TitleBarDraw(tsl::gfx::Renderer *renderer, const char *frameTitle,
-+                         s32 titleX, s32 top) {
-+    if (g_titleBar.dirty)
-+        TitleBarRefresh();
-+    if (g_titleBar.itemN == 0)
-+        return;
-+
-+    const u32 titleW = TitleBarMeasureAt(renderer, frameTitle, 30);
-+    s32 x = titleX + static_cast<s32>(titleW) + 16;
-+    u32 avail = (tsl::cfg::FramebufferWidth > x + 16)
-+                    ? static_cast<u32>(tsl::cfg::FramebufferWidth - x - 16)
-+                    : 0;
-+
-+    /* static:ovlloader 给的小栈(见 MonitorFrame::draw 里的同类注释)。 */
-+    static char line[512];
-+    u32 lineW = 0;
-+    monitor_title_bar::BuildFittedLine(g_titleBar.items, g_titleBar.itemN, avail,
-+                                       TitleBarMeasure, renderer, line, sizeof(line),
-+                                       &lineW);
-+    if (!line[0])
-+        return;
-+    renderer->drawString(line, false, x, top, kTitleBarFont,
-+                         tsl::gfx::Renderer::a(tsl::style::color::ColorText));
-+}
 +
 +/* 游戏房间区块:标题 + 自绘房间行(持久池,只增不删,焦点安全)。 */
 +static tsl::elm::CategoryHeader *g_roomHeader = nullptr;
@@ -843,22 +814,19 @@ index 8e07c19..5d36eb7 100644
 +        renderer->drawString(rooms, false, colX[1], 109, 20,
 +                             tsl::gfx::Renderer::a(tsl::style::color::ColorText));
 +
-+        /* 标题右侧:有房间的服务器名 + 房间数量标签(如「中国·江苏(2)」),
-+           一行最多两个,字号与上面「在线/房间」一致。 */
-+        TitleBarDraw(renderer, this->m_title.c_str(), 20, 63);
-+
 +        renderer->disableScissoring();
 +    }
 +};
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -66,8 +573,51 @@ static void detectLanguage()
-     char code[9] = {};
-     memcpy(code, &langCode, 8);
-     g_isTraditional = (strncmp(code, "zh-Hant", 7) == 0);
-+}
-+
+@@ -70,140 +489,67 @@ static void detectLanguage()
+     strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
+ }
+ 
+-class MainGui : public tsl::Gui {
+-public:
+-    MainGui() { }
 +/* (重)建“游戏房间”区块的行。快照 version 变化时由 update() 调用。
 +   行是持久池(只增不删):不用的行 height=0,焦点永远不会挂在已删除
 +   元素上;有效房间行固定为 70px,快照变化时更新标题与玩家名。 */
@@ -866,14 +834,21 @@ index 8e07c19..5d36eb7 100644
 +{
 +    if (!g_list || !g_roomHeader || g_roomHeaderIndex < 0)
 +        return;
-+
+ 
+-    virtual tsl::elm::Element* createUI() override {
+-        // This overlay ships inside a Chinese integration package and the
+-        // bundled font has CJK glyphs, so the UI is localised in place.
+-        // The header subtitle carries the release brand; the full version
+-        // string is repeated in the T("关于", "關於") block at the bottom.
+-        auto frame = new tsl::elm::OverlayFrame(T("联机插件", "連線插件"), g_brand);
 +    char header[80];
 +    if (snap.server[0])
 +        snprintf(header, sizeof(header), "%s · %s", T("游戏房间", "遊戲房間"), snap.server);
 +    else
 +        snprintf(header, sizeof(header), "%s", T("游戏房间", "遊戲房間"));
 +    g_roomHeader->setText(header);
-+
+ 
+-        auto list = new tsl::elm::List();
 +    u32 need = snap.roomN > 0 ? snap.roomN : 1;   /* 0 房间时用 1 行提示 */
 +    while (g_roomRows.size() < need) {
 +        auto *row = new RoomRow();
@@ -881,44 +856,6 @@ index 8e07c19..5d36eb7 100644
 +        g_list->addItem(row, 0, g_roomHeaderIndex + 1 + (int)g_roomRows.size() - 1);
 +    }
  
--    strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
-+    for (u32 i = 0; i < g_roomRows.size(); i++) {
-+        if (snap.roomN == 0) {
-+            if (i == 0) {
-+                const char *msg;
-+                if (snap.busy)
-+                    msg = T("正在查询…", "正在查詢…");
-+                else if (snap.status[0])
-+                    msg = snap.status;
-+                else
-+                    msg = T("暂无房间", "暫無房間");
-+                g_roomRows[i]->setHint(msg);
-+            } else {
-+                g_roomRows[i]->clearRow();
-+            }
-+        } else if (i < snap.roomN) {
-+            g_roomRows[i]->setRoom(snap.rooms[i]);
-+        } else {
-+            g_roomRows[i]->clearRow();
-+        }
-+    }
-+    g_list->invalidate();
- }
- 
- class MainGui : public tsl::Gui {
-@@ -75,135 +625,17 @@ public:
-     MainGui() { }
- 
-     virtual tsl::elm::Element* createUI() override {
-+        MonitorLog("ui-begin");
-         // This overlay ships inside a Chinese integration package and the
-         // bundled font has CJK glyphs, so the UI is localised in place.
--        // The header subtitle carries the release brand; the full version
--        // string is repeated in the T("关于", "關於") block at the bottom.
--        auto frame = new tsl::elm::OverlayFrame(T("联机插件", "連線插件"), g_brand);
--
--        auto list = new tsl::elm::List();
--
 -        if (g_state == State::Error) {
 -            list->addItem(new tsl::elm::ListItem(T("插件没有加载", "插件沒有載入")));
 -        } else if (g_state == State::Uninit) {
@@ -937,7 +874,18 @@ index 8e07c19..5d36eb7 100644
 -                list->addItem(new tsl::elm::ListItem(T("读取服务器列表失败", "讀取伺服器清單失敗")));
 -            } else if (count == 0) {
 -                list->addItem(new tsl::elm::ListItem(T("没有服务器，请编辑 relay.cfg", "沒有伺服器，請編輯 relay.cfg")));
--            } else {
++    for (u32 i = 0; i < g_roomRows.size(); i++) {
++        if (snap.roomN == 0) {
++            if (i == 0) {
++                const char *msg;
++                if (snap.busy)
++                    msg = T("正在查询…", "正在查詢…");
++                else if (snap.status[0])
++                    msg = snap.status;
++                else
++                    msg = T("暂无房间", "暫無房間");
++                g_roomRows[i]->setHint(msg);
+             } else {
 -                u32 selected = 0;
 -                if (R_FAILED(ldnMitmGetSelectedRelayServer(&g_ldnConfig, &selected))) {
 -                    selected = count;
@@ -969,8 +917,17 @@ index 8e07c19..5d36eb7 100644
 -                    g_serverItems.push_back(item);
 -                    list->addItem(item);
 -                }
--            }
--
++                g_roomRows[i]->clearRow();
+             }
++        } else if (i < snap.roomN) {
++            g_roomRows[i]->setRoom(snap.rooms[i]);
++        } else {
++            g_roomRows[i]->clearRow();
++        }
++    }
++    g_list->invalidate();
++}
+ 
 -            // Show this console's relay identity. relay.cfg only stores the
 -            // low 16 bits (`id=`), and the plugin assigns one on first use if
 -            // the line is absent, so this is the only place to read it back.
@@ -991,9 +948,9 @@ index 8e07c19..5d36eb7 100644
 -            } else {
 -                list->addItem(new tsl::elm::ListItem(T("本机 IP", "本機 IP"), T("建立房间后显示", "建立房間後顯示")));
 -            }
-+        // 标题下方不再放「阿东版·版本号」:版本在列表底部「关于 → 版本」里已经有,
-+        // 标题右侧改成显示「有房间的服务器 + 数量」(见 MonitorFrame::draw)。
-+        auto frame = new MonitorFrame(T("联机插件", "連線插件"), "");
++class MainGui : public tsl::Gui {
++public:
++    MainGui() { }
  
 -            u32 vaddr = 0;
 -            const bool addr_ok = R_SUCCEEDED(ldnMitmGetRelayVirtualAddress(&g_ldnConfig, &vaddr));
@@ -1008,8 +965,13 @@ index 8e07c19..5d36eb7 100644
 -                         (vaddr >> 8) & 0xff, vaddr & 0xff, vaddr & 0xffff);
 -                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), buf));
 -            }
-+        g_list = new RebuildList();
-+        buildList(g_list);
++    virtual tsl::elm::Element* createUI() override {
++        MonitorLog("ui-begin");
++        // This overlay ships inside a Chinese integration package and the
++        // bundled font has CJK glyphs, so the UI is localised in place.
++        // The header subtitle carries the release brand and resolved build
++        // version; the full version is also repeated in the About block.
++        auto frame = new MonitorFrame(T("联机插件", "連線插件"), g_brand);
  
 -            // Tell the user whether the address is stable. T("硬件派生", "硬體衍生") is
 -            // derived from this console's LAN address, so it is the same on
@@ -1043,13 +1005,15 @@ index 8e07c19..5d36eb7 100644
 -            list->addItem(new tsl::elm::ListItem(T("版本", "版本"), g_version));
 -            list->addItem(new tsl::elm::ListItem(T("声明", "聲明"), T("免费分享 禁止倒卖", "免費分享 禁止轉賣")));
 -        }
--
++        g_list = new RebuildList();
++        buildList(g_list);
+ 
 -        frame->setContent(list);
 +        frame->setContent(g_list);
  
          // Every item was just created with a bare "*". Force the first
          // update() to paint the latency text even if the reading has not
-@@ -211,16 +643,76 @@ public:
+@@ -211,16 +557,75 @@ public:
          // cached value made update() return early and the label stayed at
          // just "*" with no "--" and no number.
          g_shown_latency = 0xFFFFFFFFu;
@@ -1066,7 +1030,6 @@ index 8e07c19..5d36eb7 100644
 +        // Gui sat underneath it, so rebuild now that it is on top again.
 +        if (g_main_list_dirty) {
 +            g_main_list_dirty = false;
-+            g_titleBar.dirty = true;   /* 服务器增删会改变标题右侧的标签 */
 +            rebuildUi();
 +            focusAfterRebuild(g_addServerItem);
 +        }
@@ -1127,7 +1090,7 @@ index 8e07c19..5d36eb7 100644
              return;
          }
          u32 ms = 0;
-@@ -233,9 +725,8 @@ public:
+@@ -233,9 +638,8 @@ public:
          }
          g_shown_latency = ms;
  
@@ -1139,7 +1102,7 @@ index 8e07c19..5d36eb7 100644
          char buf[48];
          bool faint = false;
          if (ms == 0) {
-@@ -247,9 +738,9 @@ public:
+@@ -247,9 +651,9 @@ public:
          } else {
              snprintf(buf, sizeof(buf), T("* 延迟 %ums", "* 延遲 %ums"), ms);
          }
@@ -1152,7 +1115,7 @@ index 8e07c19..5d36eb7 100644
              }
          }
      }
-@@ -260,14 +751,353 @@ public:
+@@ -260,14 +664,349 @@ public:
      }
  };
  
@@ -1245,7 +1208,6 @@ index 8e07c19..5d36eb7 100644
 +/* Keep the monitor target aligned with the sysmodule's selected relay after
 +   deleting the selected row or restoring the factory list. */
 +static void syncMonitorTargetFromRelaySelection() {
-+    g_titleBar.dirty = true;
 +    u32 count = 0;
 +    u32 selected = 0;
 +    if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count)) || count == 0 ||
@@ -1269,8 +1231,6 @@ index 8e07c19..5d36eb7 100644
 +   single row, but it can delete and re-add the whole list on the next
 +   frame (List::clear() + addItem() are both deferred). */
 +static void buildList(tsl::elm::List *list) {
-+    /* 服务器列表(增删/恢复默认)会改变「哪些服务器有房间」:标题栏要重算。 */
-+    g_titleBar.dirty = true;
 +    g_serverRows.clear();
 +    g_roomRows.clear();
 +    g_roomHeader = nullptr;
@@ -1340,7 +1300,6 @@ index 8e07c19..5d36eb7 100644
 +                        g_serverRows[k]->setSelected(k == i);
 +                    g_shown_latency = 0xFFFFFFFFu;
 +                    snprintf(g_selectedName, sizeof(g_selectedName), "%s", name.c_str());
-+                    g_titleBar.dirty = true;   /* 选中的服务器要排在标题栏第一位 */
 +                    MonitorRequestSwitch(g_selectedName);
 +                });
 +
@@ -1506,17 +1465,18 @@ index 8e07c19..5d36eb7 100644
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,14 +1118,33 @@ public:
+@@ -288,14 +1027,34 @@ public:
              g_state = State::Loaded;
          });
  
-+        /* Keep a readable label in the About row even if the service call
++        /* Keep the build identity under the title even if the service call
 +           failed or returned an empty string. Normally the Makefiles stamp
 +           git describe --tags --always, so tagless CI builds still show the
-+           commit hash. The header subtitle is gone (patch 0010), so the About
-+           row is the only place the version is shown. */
++           commit hash instead of a blank subtitle. */
 +        if (g_version[0] == '\0')
 +            snprintf(g_version, sizeof(g_version), "%s", T("版本未知", "版本未知"));
++        snprintf(g_brand, sizeof(g_brand), "%s · %s",
++                 g_isTraditional ? "阿東版" : "阿东版", g_version);
 +
 +        MonitorInitSockets();   /* 自带 sm 包裹;放在 initScreen 帧缓冲之前,堆最宽裕 */
 +        MonitorInit();
@@ -4120,280 +4080,6 @@ index 0000000..a0a3d78
 +};
 +
 +} // namespace MonitorTargetGeneration
-diff --git a/overlay/source/monitor_title_bar.hpp b/overlay/source/monitor_title_bar.hpp
-new file mode 100644
-index 0000000..c2fe7a3
---- /dev/null
-+++ b/overlay/source/monitor_title_bar.hpp
-@@ -0,0 +1,268 @@
-+#pragma once
-+#include <cstddef>
-+#include <cstdint>
-+#include <cstdio>
-+#include <cstring>
-+
-+/* 联机插件标题右侧的「有房间的服务器」标签(补丁 0010)。
-+ *
-+ * 需求:
-+ *   - 标题右侧显示有房间的服务器名称,名称后跟房间数量标签,
-+ *     例如「中国·江苏」有两条中继条目 → 「中国·江苏(2)」;
-+ *   - 一行最多显示两个服务器名称;
-+ *   - 字体大小与「在线 / 房间」一致(由绘制方决定,本文件只算内容)。
-+ *
-+ * 房间数量的口径:以 sysmodule 加载的 relay.cfg 为真值源(与补丁 0010 的
-+ * 服务器列表一致)——文件里每一条服务器条目就是一个「有房间的服务器」,
-+ * 同名的两条(「美国」+「美国(2)」)归到同一个基础名下并计数为 2。
-+ *
-+ * 这里只有纯字符串/数组逻辑,不依赖 libnx 与 libtesla,可在桌面端直接单测
-+ * (overlay/tests/monitor_title_bar_test.cpp);真正需要字体的测宽/截断放在
-+ * overlay/source/main.cpp 的绘制代码里。
-+ */
-+
-+namespace monitor_title_bar {
-+
-+constexpr uint32_t kNameLen = 48;    /* 与 MonitorSnapshot::server 一致 */
-+constexpr uint32_t kAddrLen = 80;
-+constexpr uint32_t kMaxServers = 32; /* 与 MONITOR_MAX_SERVERS 一致 */
-+constexpr uint32_t kMaxPerLine = 2;  /* 一行最多两个服务器名称 */
-+
-+/* relay.cfg 里的一行服务器条目(名字 + host:port)。 */
-+struct Entry {
-+    char name[kNameLen];
-+    char addr[kAddrLen];
-+};
-+
-+/* 一个基础名(去掉尾部「(N)」编号后的名字)及其条目数量。 */
-+struct Group {
-+    char name[kNameLen];
-+    uint32_t count;
-+};
-+
-+/* 标题栏上的一项:服务器名 + 房间数量。 */
-+struct Item {
-+    char name[kNameLen];
-+    uint32_t rooms;
-+};
-+
-+/* 去掉首尾空白(relay.cfg 里名字用空白切 token,理论上不会有;防御一下)。 */
-+inline char *Trim(char *s) {
-+    while (*s == ' ' || *s == '\t')
-+        s++;
-+    size_t n = strlen(s);
-+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t'))
-+        s[--n] = 0;
-+    return s;
-+}
-+
-+/* 尾部「(N)」/「（N)」是条目编号而非地区名的一部分:relay.cfg 用「美国」和
-+   「美国(2)」表示同地两台中继。归组前先剥掉这层后缀,数量才能并到一起;
-+   剥不动的名字(「德国·萨克森」)原样返回。 */
-+inline void BaseName(const char *in, char *out, size_t outN) {
-+    if (!out || outN == 0)
-+        return;
-+    out[0] = 0;
-+    if (!in || !in[0])
-+        return;
-+
-+    char buf[kNameLen * 2];
-+    snprintf(buf, sizeof(buf), "%s", in);
-+    char *head = Trim(buf);
-+    size_t len = strlen(head);
-+
-+    /* 尾部「）」/「」) 才是候选编号;中间的括号(域名、地区说明)一概不动。 */
-+    const char *close_full = "\xEF\xBC\x89";  /* ） */
-+    const char *open_full = "\xEF\xBC\x88";   /* （ */
-+    const size_t full_len = strlen(close_full);
-+    bool fullwidth = (len >= full_len && strcmp(head + len - full_len, close_full) == 0);
-+    bool ascii = !fullwidth && len >= 1 && head[len - 1] == ')';
-+
-+    if (fullwidth || ascii) {
-+        size_t p = fullwidth ? len - full_len : len - 1;   /* 括号内侧 */
-+        size_t digits = 0;
-+        while (p > 0 && head[p - 1] >= '0' && head[p - 1] <= '9') {
-+            p--;
-+            digits++;
-+        }
-+        bool open_ok = digits > 0 && p >= (fullwidth ? full_len : 1) &&
-+                       (fullwidth ? memcmp(head + p - full_len, open_full, full_len) == 0
-+                                  : head[p - 1] == '(');
-+        if (open_ok)
-+            head[p - (fullwidth ? full_len : 1)] = 0;
-+    }
-+
-+    head = Trim(head);
-+    snprintf(out, outN, "%s", head[0] ? head : in);
-+}
-+
-+/* 按基础名归组计数,顺序沿用 relay.cfg 里第一次出现的先后。 */
-+inline uint32_t GroupEntries(const Entry *entries, uint32_t entryN,
-+                             Group *groups, uint32_t maxGroups) {
-+    uint32_t n = 0;
-+    if (!entries || !groups)
-+        return 0;
-+    for (uint32_t i = 0; i < entryN; i++) {
-+        char base[kNameLen];
-+        BaseName(entries[i].name, base, sizeof(base));
-+        if (!base[0])
-+            continue;
-+        uint32_t k = 0;
-+        for (k = 0; k < n; k++) {
-+            if (strcmp(groups[k].name, base) == 0) {
-+                groups[k].count++;
-+                break;
-+            }
-+        }
-+        if (k == n && n < maxGroups) {
-+            snprintf(groups[n].name, sizeof(groups[n].name), "%s", base);
-+            groups[n].count = 1;
-+            n++;
-+        }
-+    }
-+    return n;
-+}
-+
-+/* 挑出标题栏要显示的最多 kMaxPerLine 项:当前选中的服务器永远排第一,
-+   其余按房间数从多到少、同数按 relay.cfg 顺序补齐。 */
-+inline uint32_t PickItems(const Group *groups, uint32_t groupN,
-+                          const char *selectedName, Item *items, uint32_t maxItems) {
-+    if (!groups || !items || maxItems == 0)
-+        return 0;
-+
-+    bool used[kMaxServers] = {};
-+    uint32_t n = 0;
-+
-+    if (selectedName && selectedName[0]) {
-+        char want[kNameLen];
-+        BaseName(selectedName, want, sizeof(want));
-+        for (uint32_t i = 0; i < groupN && n < maxItems; i++) {
-+            if (strcmp(groups[i].name, want) != 0)
-+                continue;
-+            snprintf(items[n].name, sizeof(items[n].name), "%s", groups[i].name);
-+            items[n].rooms = groups[i].count;
-+            used[i] = true;
-+            n++;
-+            break;
-+        }
-+    }
-+
-+    /* 数量多的先上(稳定:同数量保持 relay.cfg 顺序)。 */
-+    for (uint32_t cnt = kMaxServers; cnt >= 1 && n < maxItems; cnt--) {
-+        for (uint32_t i = 0; i < groupN && n < maxItems; i++) {
-+            if (used[i] || groups[i].count != cnt)
-+                continue;
-+            snprintf(items[n].name, sizeof(items[n].name), "%s", groups[i].name);
-+            items[n].rooms = groups[i].count;
-+            used[i] = true;
-+            n++;
-+        }
-+    }
-+    return n;
-+}
-+
-+/* 「中国·江苏(2)」;只有一条时不带数量括号。 */
-+inline void FormatItem(const Item &item, char *out, size_t outN) {
-+    if (!out || outN == 0)
-+        return;
-+    if (item.rooms > 1)
-+        snprintf(out, outN, "%s(%u)", item.name, static_cast<unsigned>(item.rooms));
-+    else
-+        snprintf(out, outN, "%s", item.name);
-+}
-+
-+/* 整行文本(两项用两个空格分隔),供绘制方测宽后再决定是否截断。 */
-+inline void BuildLine(const Item *items, uint32_t itemN, char *out, size_t outN) {
-+    if (!out || outN == 0)
-+        return;
-+    out[0] = 0;
-+    for (uint32_t i = 0; i < itemN && i < kMaxPerLine; i++) {
-+        char piece[128];
-+        FormatItem(items[i], piece, sizeof(piece));
-+        if (i > 0)
-+            strncat(out, "  ", outN - strlen(out) - 1);
-+        strncat(out, piece, outN - strlen(out) - 1);
-+    }
-+}
-+
-+/* 文本测宽回调:设备端用 renderer->drawString(text,false,0,0,font,透明色)
-+   返回的宽度即可(透明色只测不画);桌面端单测塞个假测量函数。 */
-+typedef uint32_t (*MeasureFn)(const char *text, void *user);
-+
-+/* 把 text 塞进「maxBytes 字节 / width 像素」两个上限内,超出部分用「…」结尾。
-+   maxBytes 传 0 表示不限制字节数;width 传 0 表示不测宽。逐码点回退,
-+   不会把三字节汉字切成半个。 */
-+inline void FitText(char *text, size_t cap, uint32_t maxBytes, uint32_t width,
-+                    MeasureFn measure, void *user) {
-+    if (!text || cap < 4 || !text[0])
-+        return;
-+
-+    const char *kEllipsis = "\xE2\x80\xA6";   /* … */
-+    const size_t kEllipsisLen = strlen(kEllipsis);
-+    const size_t textLen = strlen(text);
-+    size_t used = textLen;
-+    bool cut = false;
-+
-+    if (maxBytes > kEllipsisLen && used > maxBytes - kEllipsisLen) {
-+        used = maxBytes - kEllipsisLen;
-+        while (used > 0 && (static_cast<unsigned char>(text[used]) & 0xC0) == 0x80)
-+            used--;   /* 退到一个码点边界 */
-+        cut = true;
-+    }
-+    if (measure && width > 0) {
-+        char probe[520];
-+        for (;;) {
-+            if (used == 0) {
-+                cut = true;
-+                break;
-+            }
-+            snprintf(probe, sizeof(probe), "%.*s%s", static_cast<int>(used), text,
-+                     cut ? kEllipsis : "");
-+            if (measure(probe, user) <= width)
-+                break;
-+            cut = true;
-+            used--;    /* 逐码点回退,量的是「正文 + …」的整体 */
-+            while (used > 0 && (static_cast<unsigned char>(text[used]) & 0xC0) == 0x80)
-+                used--;
-+        }
-+    }
-+    if (used == 0) {
-+        text[0] = 0;
-+        return;
-+    }
-+    text[used] = 0;
-+    if (cut)
-+        snprintf(text + used, cap - used, "%s", kEllipsis);
-+}
-+
-+/* 生成标题栏文本:先试两个服务器名,标题区放不下就退回只显示一个(第二项整体
-+   丢掉,而不是画半截);一个名字都放不下时截断加「…」,连一个字都塞不进就留空。
-+   out 至少 512 字节。 */
-+inline void BuildFittedLine(const Item *items, uint32_t itemN, uint32_t width,
-+                            MeasureFn measure, void *user, char *out, size_t outN,
-+                            uint32_t *widthOut) {
-+    if (widthOut)
-+        *widthOut = 0;
-+    if (!out || outN < 512 || !items)
-+        return;
-+    out[0] = 0;
-+    const uint32_t maxTake = (itemN > kMaxPerLine) ? kMaxPerLine : itemN;
-+    for (uint32_t take = maxTake; take >= 1; take--) {
-+        char line[512];
-+        BuildLine(items, take, line, sizeof(line));
-+        if (!line[0])
-+            continue;
-+        if (take > 1 && measure && width > 0 && measure(line, user) > width)
-+            continue;          /* 两项放不下 → 只留第一项 */
-+        const uint32_t fit_width = (take == 1) ? width : 0;
-+        FitText(line, sizeof(line), 0, fit_width, measure, user);
-+        if (!line[0])
-+            continue;          /* 一个字都放不下 → 什么都不画 */
-+        snprintf(out, outN, "%s", line);
-+        if (widthOut && measure)
-+            *widthOut = measure(out, user);
-+        return;
-+    }
-+}
-+
-+}  /* namespace monitor_title_bar */
 diff --git a/overlay/source/monitor_title_resolver.hpp b/overlay/source/monitor_title_resolver.hpp
 new file mode 100644
 index 0000000..d0ac8cc
@@ -4611,443 +4297,6 @@ index 0000000..a0e003f
 +    assert(gate.IsCurrent(newerRefresh));
 +    return 0;
 +}
-diff --git a/overlay/tests/monitor_title_bar_harness.cpp b/overlay/tests/monitor_title_bar_harness.cpp
-new file mode 100644
-index 0000000..319fbaf
---- /dev/null
-+++ b/overlay/tests/monitor_title_bar_harness.cpp
-@@ -0,0 +1,254 @@
-+/* Generated by tools/check_titlebar_harness.py -- do not edit by hand.
-+
-+   It compiles the title-bar block copied VERBATIM from overlay/source/main.cpp
-+   against small stubs, so that code is type-checked and unit-tested even where
-+   devkitPro / libnx / libtesla are not installed. Keep main.cpp's block between
-+   the markers intact, or regenerate this file. */
-+#include <assert.h>
-+#include <initializer_list>
-+#include <stdint.h>
-+#include <stdio.h>
-+#include <string.h>
-+#include <cstddef>
-+#include <string>
-+#include <utility>
-+#include <vector>
-+
-+typedef int8_t s8; typedef int16_t s16; typedef int32_t s32; typedef int64_t s64;
-+typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t u64;
-+
-+#include "../source/monitor_title_bar.hpp"
-+
-+/* --- libtesla stand-ins used by the block below --- */
-+namespace tsl {
-+namespace cfg {
-+constexpr s32 FramebufferWidth = 1280;
-+constexpr s32 FramebufferHeight = 720;
-+}  // namespace cfg
-+/* libtesla: one Color struct at tsl:: scope; style::color holds the constants. */
-+struct Color {
-+    union { u32 rgba; struct { u8 r, g, b, a; }; };
-+    constexpr Color(u16 raw) : rgba(raw) {}
-+    constexpr Color(u8 r, u8 g, u8 b, u8 a) : r(r), g(g), b(b), a(a) {}
-+};
-+namespace style {
-+namespace color {
-+constexpr Color ColorFrameBackground = { 0x0, 0x0, 0x0, 0xD };
-+constexpr Color ColorTransparent     = { 0x0, 0x0, 0x0, 0x0 };
-+constexpr Color ColorHighlight       = { 0x0, 0xF, 0xD, 0xF };
-+constexpr Color ColorText            = { 0xF, 0xF, 0xF, 0xF };
-+constexpr Color ColorDescription     = { 0xA, 0xA, 0xA, 0xF };
-+}  // namespace color
-+}  // namespace style
-+namespace gfx {
-+struct Renderer {
-+    static Color a(const Color &c) { return c; }
-+    /* Real signature: returns {width, height}; a transparent colour means
-+       "measure only". Fake metrics here: 6px per CJK codepoint, 3px per ASCII. */
-+    std::pair<u32, u32> drawString(const char *text, bool monospace, s32 x, s32 y,
-+                                   float fontSize, Color color, long maxWidth = 0) {
-+        (void)monospace; (void)x; (void)y; (void)fontSize; (void)maxWidth;
-+        u32 w = 0;
-+        for (const unsigned char *c = reinterpret_cast<const unsigned char *>(text); *c;) {
-+            if (c[0] == 0xE2 && c[1] == 0x80 && c[2] == 0xA6) { w += 6; c += 3; continue; }
-+            size_t n = (c[0] >= 0xF0) ? 4 : (c[0] >= 0xE0) ? 3 : (c[0] >= 0xC0) ? 2 : 1;
-+            w += (n >= 3) ? 6 : 3;   /* 6px/汉字, 3px/ASCII */
-+            c += n;
-+        }
-+        if (color.a)   /* transparent == measure-only (same as libtesla) */
-+            painted.push_back(std::string(text));
-+        return { w, 0 };
-+    }
-+    void enableScissoring(s32, s32, s32, s32) {}
-+    void disableScissoring() {}
-+    static std::vector<std::string> painted;
-+};
-+inline std::vector<std::string> Renderer::painted;
-+}  // namespace gfx
-+}  // namespace tsl
-+
-+/* --- monitor.hpp stand-ins (relay.cfg feed) --- */
-+#define MONITOR_MAX_SERVERS 32
-+struct MonitorServer { char name[32]; char addr[64]; };
-+static std::vector<MonitorServer> g_fakeServers;
-+static u32 MonitorListRelayServers(MonitorServer *out, u32 max) {
-+    u32 n = 0;
-+    for (auto &s : g_fakeServers) {
-+        if (n >= max)
-+            break;
-+        out[n] = s;
-+        n++;
-+    }
-+    return n;
-+}
-+static char g_selectedName[48] = {};
-+
-+/* 标题右侧的「有房间的服务器(带房间数量)」标签(补丁 0010):
-+   显示哪些服务器上有房间、各有几个,例如「中国·江苏(2)」。
-+   归组 / 挑选项 / 测宽截断都在 monitor_title_bar.hpp 里(有桌面端单测);这里只
-+   负责「什么时候重算 + 画在哪」。服务器列表变化时打脏标记,下一帧重算一次。 */
-+static constexpr float kTitleBarFont = 15;   /* 与标题下「在线/房间」标签、数字同号 */
-+
-+struct TitleBarState {
-+    /* 只存要显示的两项:整张服务器表放 BSS 会白占 1.7KB(ovlloader 堆很紧),
-+       放栈上又和补丁 0010「栈上巨结构全部改 static」的结论相冲。 */
-+    monitor_title_bar::Item items[monitor_title_bar::kMaxPerLine];
-+    u32 itemN;
-+    bool dirty;
-+};
-+
-+static TitleBarState g_titleBar = { {}, 0, true };
-+
-+/* 只测不画:透明色走的是同一套字体度量(与 ServerRow/RoomRow 的取宽写法一致)。 */
-+static u32 TitleBarMeasureAt(tsl::gfx::Renderer *renderer, const char *text, float font) {
-+    return renderer->drawString(text, false, 0, 0, font,
-+                                tsl::style::color::ColorTransparent).first;
-+}
-+
-+/* libtesla 的测宽回调只要一个 (text, user) 函数指针;字号在这里定死。 */
-+static u32 TitleBarMeasure(const char *text, void *user) {
-+    return TitleBarMeasureAt(static_cast<tsl::gfx::Renderer *>(user), text, kTitleBarFont);
-+}
-+
-+/* 读一次 relay.cfg(服务器列表的真值源),算出标题栏要显示的服务器名与数量。 */
-+static void TitleBarRefresh() {
-+    g_titleBar.dirty = false;
-+    g_titleBar.itemN = 0;
-+
-+    /* 3KB 的服务器表放 static:同补丁 0010 对大结构的处理办法。 */
-+    static monitor_title_bar::Entry entries[monitor_title_bar::kMaxServers];
-+    u32 n = 0;
-+    {
-+        static MonitorServer raw[monitor_title_bar::kMaxServers];
-+        const u32 rawN = MonitorListRelayServers(raw, monitor_title_bar::kMaxServers);
-+        for (u32 i = 0; i < rawN; i++) {
-+            snprintf(entries[n].name, sizeof(entries[n].name), "%s", raw[i].name);
-+            snprintf(entries[n].addr, sizeof(entries[n].addr), "%s", raw[i].addr);
-+            n++;
-+        }
-+    }
-+
-+    static monitor_title_bar::Group groups[monitor_title_bar::kMaxServers];
-+    const u32 groupN = monitor_title_bar::GroupEntries(entries, n, groups,
-+                                                       monitor_title_bar::kMaxServers);
-+    static monitor_title_bar::Item all[monitor_title_bar::kMaxServers];
-+    const u32 itemN = monitor_title_bar::PickItems(groups, groupN,
-+                                                   g_selectedName[0] ? g_selectedName : nullptr,
-+                                                   all, monitor_title_bar::kMaxServers);
-+    /* 一行最多两个:选中的排第一,其余按房间数从多到少、同数按 relay.cfg 顺序。 */
-+    g_titleBar.itemN = (itemN > monitor_title_bar::kMaxPerLine)
-+                           ? monitor_title_bar::kMaxPerLine
-+                           : itemN;
-+    for (u32 i = 0; i < g_titleBar.itemN; i++)
-+        g_titleBar.items[i] = all[i];
-+}
-+
-+/* 画在标题右侧。libtesla 的 OverlayFrame 把标题画在 (20, 50) 字号 30,标签从
-+   标题右边缘再往右 16px 起画,右侧留 16px 边距;放不下两个就只画一个。 */
-+static void TitleBarDraw(tsl::gfx::Renderer *renderer, const char *frameTitle,
-+                         s32 titleX, s32 top) {
-+    if (g_titleBar.dirty)
-+        TitleBarRefresh();
-+    if (g_titleBar.itemN == 0)
-+        return;
-+
-+    const u32 titleW = TitleBarMeasureAt(renderer, frameTitle, 30);
-+    s32 x = titleX + static_cast<s32>(titleW) + 16;
-+    u32 avail = (tsl::cfg::FramebufferWidth > x + 16)
-+                    ? static_cast<u32>(tsl::cfg::FramebufferWidth - x - 16)
-+                    : 0;
-+
-+    /* static:ovlloader 给的小栈(见 MonitorFrame::draw 里的同类注释)。 */
-+    static char line[512];
-+    u32 lineW = 0;
-+    monitor_title_bar::BuildFittedLine(g_titleBar.items, g_titleBar.itemN, avail,
-+                                       TitleBarMeasure, renderer, line, sizeof(line),
-+                                       &lineW);
-+    if (!line[0])
-+        return;
-+    renderer->drawString(line, false, x, top, kTitleBarFont,
-+                         tsl::gfx::Renderer::a(tsl::style::color::ColorText));
-+}
-+
-+
-+/* ---------------- harness ---------------- */
-+static void SetServers(std::initializer_list<const char *> names) {
-+    g_fakeServers.clear();
-+    for (auto *n : names) {
-+        MonitorServer s = {};
-+        snprintf(s.name, sizeof(s.name), "%s", n);
-+        snprintf(s.addr, sizeof(s.addr), "host:%u", static_cast<unsigned>(11451 + g_fakeServers.size()));
-+        g_fakeServers.push_back(s);
-+    }
-+    g_titleBar.dirty = true;
-+    g_selectedName[0] = 0;
-+    tsl::gfx::Renderer::painted.clear();
-+}
-+
-+static const char *LastPainted() {
-+    if (tsl::gfx::Renderer::painted.empty())
-+        return "";
-+    return tsl::gfx::Renderer::painted.back().c_str();
-+}
-+
-+int main() {
-+    tsl::gfx::Renderer r;
-+
-+    /* 1) 「中国·江苏」两条条目 → 标题右侧「中国·江苏(2)」 */
-+    SetServers({ "中国·江苏", "中国·江苏(2)" });
-+    TitleBarDraw(&r, "联机插件", 20, 63);
-+    assert(strcmp(LastPainted(), "中国·江苏(2)") == 0);
-+
-+    /* 2) 一行最多两个服务器名(其余丢掉,不画半截) */
-+    SetServers({ "中国·江苏", "中国·江苏(2)", "中国·广东", "中国·北京" });
-+    TitleBarDraw(&r, "联机插件", 20, 63);
-+    assert(strcmp(LastPainted(), "中国·江苏(2)  中国·广东") == 0);
-+
-+    /* 3) 没有服务器 → 一行都不画 */
-+    SetServers({});
-+    TitleBarDraw(&r, "联机插件", 20, 63);
-+    assert(r.painted.empty());
-+
-+    /* 4) 当前选中的服务器排第一(哪怕它只有一个房间) */
-+    SetServers({ "中国·河南", "中国·河南(2)", "中国·上海" });
-+    snprintf(g_selectedName, sizeof(g_selectedName), "%s", "中国·上海");
-+    g_titleBar.dirty = true;
-+    TitleBarDraw(&r, "联机插件", 20, 63);
-+    assert(strcmp(LastPainted(), "中国·上海  中国·河南(2)") == 0);
-+
-+    /* 5) 只有一台服务器时不带「(1)」 */
-+    SetServers({ "美国" });
-+    TitleBarDraw(&r, "联机插件", 20, 63);
-+    assert(strcmp(LastPainted(), "美国") == 0);
-+    /* 标题太长 → 只剩一个服务器的位置,第二项被丢掉(直接验 BuildFittedLine 的降级)。 */
-+    SetServers({ "中国·河南", "中国·河南(2)", "中国·广东" });
-+    TitleBarRefresh();
-+    char line[512];
-+    u32 lineW = 0;
-+    monitor_title_bar::BuildFittedLine(g_titleBar.items, g_titleBar.itemN, 60,
-+                                       TitleBarMeasure, &r, line, sizeof(line), &lineW);
-+    assert(strcmp(line, "中国·河南(2)") == 0);
-+    monitor_title_bar::BuildFittedLine(g_titleBar.items, g_titleBar.itemN, 24,
-+                                       TitleBarMeasure, &r, line, sizeof(line), &lineW);
-+    /* 单项也放不下 → 截断而不是画满一行(「中国·河…」=27px 已超 24,退到「中国·…」=21px) */
-+    assert(strcmp(line, "中国·…") == 0);
-+    assert(lineW <= 24 && TitleBarMeasure(line, &r) <= 24);
-+    monitor_title_bar::BuildFittedLine(g_titleBar.items, g_titleBar.itemN, 9,
-+                                       TitleBarMeasure, &r, line, sizeof(line), &lineW);
-+    assert(line[0] == 0 && lineW == 0);   /* 连一个字 + 省略号都放不下 → 整行不画 */
-+
-+    /* 6) 脏标记没置起就不重读 relay.cfg(缓存有效);每帧照常画完整的两行 */
-+    g_titleBar.dirty = false;
-+    g_fakeServers.clear();          /* 列表实际变了,但没有 dirty 就不该被重读 */
-+    r.painted.clear();
-+    TitleBarDraw(&r, "联机插件", 20, 63);
-+    assert(r.painted.size() == 1);
-+    assert(r.painted[0] == "中国·河南(2)  中国·广东");
-+    g_titleBar.dirty = true;        /* 置脏后重新读列表 → 空列表 → 什么都不画 */
-+    r.painted.clear();
-+    TitleBarDraw(&r, "联机插件", 20, 63);
-+    assert(r.painted.empty());
-+
-+    printf("monitor_title_bar_harness OK\n");
-+    return 0;
-+}
-diff --git a/overlay/tests/monitor_title_bar_test.cpp b/overlay/tests/monitor_title_bar_test.cpp
-new file mode 100644
-index 0000000..a7a0fc8
---- /dev/null
-+++ b/overlay/tests/monitor_title_bar_test.cpp
-@@ -0,0 +1,171 @@
-+#include "../source/monitor_title_bar.hpp"
-+
-+#include <cassert>
-+#include <cstdio>
-+#include <cstring>
-+
-+using namespace monitor_title_bar;
-+
-+static const char *kFactory[] = {
-+    "中国·河南", "中国·河南(2)", "中国·广东", "中国·江苏", "中国·北京",
-+    "中国·上海", "中国·丹麦", "美国",     "美国(2)",     "荷兰",
-+    "荷兰(2)",  "德国·萨克森",
-+};
-+
-+static uint32_t Collect(const char *const *names, uint32_t nameN, const char *selected,
-+                        Item *items, uint32_t maxItems) {
-+    Entry entries[kMaxServers] = {};
-+    for (uint32_t i = 0; i < nameN && i < kMaxServers; i++)
-+        snprintf(entries[i].name, sizeof(entries[i].name), "%s", names[i]);
-+    Group groups[kMaxServers] = {};
-+    uint32_t groupN = GroupEntries(entries, nameN < kMaxServers ? nameN : kMaxServers,
-+                                   groups, kMaxServers);
-+    return PickItems(groups, groupN, selected, items, maxItems);
-+}
-+
-+/* 假测量:汉字(3 字节码点)6px、ASCII 3px、省略号 6px。 */
-+static uint32_t FakeMeasure(const char *text, void *) {
-+    uint32_t w = 0;
-+    for (const unsigned char *c = reinterpret_cast<const unsigned char *>(text); *c;) {
-+        if (c[0] == 0xE2 && c[1] == 0x80 && c[2] == 0xA6) { w += 6; c += 3; continue; }
-+        size_t n = (c[0] >= 0xF0) ? 4 : (c[0] >= 0xE0) ? 3 : (c[0] >= 0xC0) ? 2 : 1;
-+        w += (n >= 3) ? 6 : 3;
-+        c += n;
-+    }
-+    return w;
-+}
-+
-+int main() {
-+    /* 1) 尾部「(N)」只是同地多台中继的编号,剥掉后才能合并计数。 */
-+    char base[kNameLen];
-+    BaseName("中国·江苏(2)", base, sizeof(base));
-+    assert(strcmp(base, "中国·江苏") == 0);
-+    BaseName("美国", base, sizeof(base));
-+    assert(strcmp(base, "美国") == 0);
-+    BaseName("德国·萨克森", base, sizeof(base));
-+    assert(strcmp(base, "德国·萨克森") == 0);
-+    BaseName("荷兰（3）", base, sizeof(base));    /* 全角括号 */
-+    assert(strcmp(base, "荷兰") == 0);
-+    BaseName("srv(x86)", base, sizeof(base));    /* 括号里不是数字:原样保留 */
-+    assert(strcmp(base, "srv(x86)") == 0);
-+    BaseName("relay.example.com", base, sizeof(base));
-+    assert(strcmp(base, "relay.example.com") == 0);
-+    BaseName("  日本(10)  ", base, sizeof(base)); /* 先剪首尾空白再剥编号 */
-+    assert(strcmp(base, "日本") == 0);
-+
-+    /* 2) relay.cfg:12 条条目 → 9 个基础名,河南/美国/荷兰各 2。 */
-+    {
-+        Entry entries[kMaxServers] = {};
-+        uint32_t n = 0;
-+        for (const char *name : kFactory) {
-+            snprintf(entries[n].name, sizeof(entries[n].name), "%s", name);
-+            n++;
-+        }
-+        Group groups[kMaxServers] = {};
-+        uint32_t groupN = GroupEntries(entries, n, groups, kMaxServers);
-+        assert(groupN == 9);   /* 12 条 - 3 条重复编号 */
-+
-+        uint32_t jiangsu = 0, us = 0, nl = 0, henan = 0;
-+        for (uint32_t i = 0; i < groupN; i++) {
-+            if (strcmp(groups[i].name, "中国·江苏") == 0)
-+                jiangsu = groups[i].count;
-+            if (strcmp(groups[i].name, "美国") == 0)
-+                us = groups[i].count;
-+            if (strcmp(groups[i].name, "荷兰") == 0)
-+                nl = groups[i].count;
-+            if (strcmp(groups[i].name, "中国·河南") == 0)
-+                henan = groups[i].count;
-+        }
-+        assert(jiangsu == 1 && us == 2 && nl == 2 && henan == 2);
-+        /* 分组顺序沿用 relay.cfg 首次出现的顺序。 */
-+        assert(strcmp(groups[0].name, "中国·河南") == 0);
-+        assert(strcmp(groups[1].name, "中国·广东") == 0);
-+    }
-+
-+    /* 3) 一行最多两个;选中的服务器优先,第二项取数量最多、同数量时最先出现的。 */
-+    {
-+        Item items[4] = {};
-+        uint32_t m = Collect(kFactory, 12, "中国·江苏", items, 2);
-+        assert(m == 2);
-+        char line[192];
-+        BuildLine(items, m, line, sizeof(line));
-+        assert(strcmp(line, "中国·江苏  中国·河南(2)") == 0);
-+    }
-+
-+    /* 4) 选中的服务器本身就有两条时,标签写成「美国(2)」。 */
-+    {
-+        Item items[4] = {};
-+        uint32_t m = Collect(kFactory, 12, "美国(2)", items, 2);
-+        assert(m == 2);
-+        char line[192];
-+        BuildLine(items, m, line, sizeof(line));
-+        assert(strcmp(line, "美国(2)  中国·河南(2)") == 0);
-+    }
-+
-+    /* 5) 数量多的先上;同数量按 relay.cfg 顺序。 */
-+    {
-+        static const char *names[] = {"甲", "乙", "乙(2)", "丙", "丙(2)", "丙(3)"};
-+        Item items[4] = {};
-+        uint32_t m = Collect(names, 6, nullptr, items, kMaxPerLine);
-+        assert(m == 2);
-+        char line[192];
-+        BuildLine(items, m, line, sizeof(line));
-+        assert(strcmp(line, "丙(3)  乙(2)") == 0);
-+    }
-+
-+    /* 6) 没有服务器 / 只有一条的情况。 */
-+    {
-+        Item items[4] = {};
-+        assert(Collect(kFactory, 0, nullptr, items, 2) == 0);
-+        char line[192];
-+        BuildLine(items, 0, line, sizeof(line));
-+        assert(line[0] == 0);
-+
-+        static const char *one[] = {"中国·北京"};
-+        assert(Collect(one, 1, "中国·北京", items, 2) == 1);
-+        char piece[128];
-+        FormatItem(items[0], piece, sizeof(piece));
-+        assert(strcmp(piece, "中国·北京") == 0);   /* 单条不带「(1)」 */
-+    }
-+
-+    /* 7) 截断:按像素预算裁字并补省略号,不吞整行、不切半个汉字。 */
-+    {
-+        char t[512];
-+        snprintf(t, sizeof(t), "%s", "中国·江苏");
-+        FitText(t, sizeof(t), 0, 30, FakeMeasure, nullptr);
-+        assert(strcmp(t, "中国·江苏") == 0);           /* 刚好放得下:不加省略号 */
-+
-+        snprintf(t, sizeof(t), "%s", "中国·江苏  中国·河南(2)");
-+        FitText(t, sizeof(t), 0, 42, FakeMeasure, nullptr);
-+        assert(strcmp(t, "中国·江苏  …") == 0);        /* 回退后 33px+…6px=39 ≤ 42:是「放得下的最长串」 */
-+
-+        snprintf(t, sizeof(t), "%s", "中国·江苏");
-+        FitText(t, sizeof(t), 12, 0, nullptr, nullptr);
-+        assert(strcmp(t, "中国·…") == 0);              /* 按字节上限截:留 9 字节正文 + 省略号」 */
-+    }
-+
-+    /* 8) 一行放不下两个 → 只留第一个;标题区极窄 → 空串。 */
-+    {
-+        Item items[4] = {};
-+        uint32_t m = Collect(kFactory, 12, "中国·河南", items, 2);
-+        assert(m == 2);
-+        char line[512];
-+        uint32_t w = 0;
-+        BuildFittedLine(items, m, 10000, FakeMeasure, nullptr, line, sizeof(line), &w);
-+        assert(strcmp(line, "中国·河南(2)  美国(2)") == 0);
-+        assert(w == FakeMeasure(line, nullptr));
-+
-+        BuildFittedLine(items, m, 60, FakeMeasure, nullptr, line, sizeof(line), &w);   /* 只放得下第一项 */
-+        assert(strcmp(line, "中国·河南(2)") == 0);
-+
-+        BuildFittedLine(items, m, 21, FakeMeasure, nullptr, line, sizeof(line), &w);
-+        assert(strcmp(line, "中国·…") == 0);      /* 「中国·河…」=24px 已超预算 → 再退一格 =21px */
-+        assert(w == 21);
-+
-+        BuildFittedLine(items, m, 3, FakeMeasure, nullptr, line, sizeof(line), &w);    /* 一个字都放不下 */
-+        assert(line[0] == 0 && w == 0);
-+    }
-+
-+    printf("monitor_title_bar_test OK\n");
-+    return 0;
-+}
 diff --git a/overlay/tests/monitor_title_resolver_test.cpp b/overlay/tests/monitor_title_resolver_test.cpp
 new file mode 100644
 index 0000000..f716702
@@ -5103,300 +4352,6 @@ index 0000000..f716702
 +    ExpectUnresolved("11223344", nullptr);
 +    return 0;
 +}
-diff --git a/tools/check_titlebar_harness.py b/tools/check_titlebar_harness.py
-new file mode 100644
-index 0000000..649a853
---- /dev/null
-+++ b/tools/check_titlebar_harness.py
-@@ -0,0 +1,241 @@
-+#!/usr/bin/env python3
-+"""Regenerate overlay/tests/monitor_title_bar_harness.cpp.
-+
-+The overlay's title-bar helpers ("标题右侧显示有房间的服务器 + 房间数量") live in
-+overlay/source/main.cpp, next to libtesla's renderer, so they cannot be compiled
-+on a host without devkitPro. This script lifts that block verbatim into a tiny
-+harness with fake types, so the real shipping code is what gets type-checked
-+(with any compiler, e.g. aarch64-linux-gnu-g++) and unit-tested.
-+
-+Run:  python3 tools/check_titlebar_harness.py [cxx]
-+Exit: 0 when the harness compiles and all asserts pass.
-+"""
-+import os
-+import subprocess
-+import sys
-+
-+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-+MAIN = os.path.join(ROOT, "overlay", "source", "main.cpp")
-+OUT = os.path.join(ROOT, "overlay", "tests", "monitor_title_bar_harness.cpp")
-+
-+START = "/* 标题右侧的「有房间的服务器(带房间数量)」标签(补丁 0010):"
-+END = "/* 游戏房间区块:标题 + 自绘房间行(持久池,只增不删,焦点安全)。 */"
-+
-+HEADER = r'''/* Generated by tools/check_titlebar_harness.py -- do not edit by hand.
-+
-+   It compiles the title-bar block copied VERBATIM from overlay/source/main.cpp
-+   against small stubs, so that code is type-checked and unit-tested even where
-+   devkitPro / libnx / libtesla are not installed. Keep main.cpp's block between
-+   the markers intact, or regenerate this file. */
-+#include <assert.h>
-+#include <initializer_list>
-+#include <stdint.h>
-+#include <stdio.h>
-+#include <string.h>
-+#include <cstddef>
-+#include <string>
-+#include <utility>
-+#include <vector>
-+
-+typedef int8_t s8; typedef int16_t s16; typedef int32_t s32; typedef int64_t s64;
-+typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t u64;
-+
-+#include "../source/monitor_title_bar.hpp"
-+
-+/* --- libtesla stand-ins used by the block below --- */
-+namespace tsl {
-+namespace cfg {
-+constexpr s32 FramebufferWidth = 1280;
-+constexpr s32 FramebufferHeight = 720;
-+}  // namespace cfg
-+/* libtesla: one Color struct at tsl:: scope; style::color holds the constants. */
-+struct Color {
-+    union { u32 rgba; struct { u8 r, g, b, a; }; };
-+    constexpr Color(u16 raw) : rgba(raw) {}
-+    constexpr Color(u8 r, u8 g, u8 b, u8 a) : r(r), g(g), b(b), a(a) {}
-+};
-+namespace style {
-+namespace color {
-+constexpr Color ColorFrameBackground = { 0x0, 0x0, 0x0, 0xD };
-+constexpr Color ColorTransparent     = { 0x0, 0x0, 0x0, 0x0 };
-+constexpr Color ColorHighlight       = { 0x0, 0xF, 0xD, 0xF };
-+constexpr Color ColorText            = { 0xF, 0xF, 0xF, 0xF };
-+constexpr Color ColorDescription     = { 0xA, 0xA, 0xA, 0xF };
-+}  // namespace color
-+}  // namespace style
-+namespace gfx {
-+struct Renderer {
-+    static Color a(const Color &c) { return c; }
-+    /* Real signature: returns {width, height}; a transparent colour means
-+       "measure only". Fake metrics here: 6px per CJK codepoint, 3px per ASCII. */
-+    std::pair<u32, u32> drawString(const char *text, bool monospace, s32 x, s32 y,
-+                                   float fontSize, Color color, long maxWidth = 0) {
-+        (void)monospace; (void)x; (void)y; (void)fontSize; (void)maxWidth;
-+        u32 w = 0;
-+        for (const unsigned char *c = reinterpret_cast<const unsigned char *>(text); *c;) {
-+            if (c[0] == 0xE2 && c[1] == 0x80 && c[2] == 0xA6) { w += 6; c += 3; continue; }
-+            size_t n = (c[0] >= 0xF0) ? 4 : (c[0] >= 0xE0) ? 3 : (c[0] >= 0xC0) ? 2 : 1;
-+            w += (n >= 3) ? 6 : 3;   /* 6px/汉字, 3px/ASCII */
-+            c += n;
-+        }
-+        if (color.a)   /* transparent == measure-only (same as libtesla) */
-+            painted.push_back(std::string(text));
-+        return { w, 0 };
-+    }
-+    void enableScissoring(s32, s32, s32, s32) {}
-+    void disableScissoring() {}
-+    static std::vector<std::string> painted;
-+};
-+inline std::vector<std::string> Renderer::painted;
-+}  // namespace gfx
-+}  // namespace tsl
-+
-+/* --- monitor.hpp stand-ins (relay.cfg feed) --- */
-+#define MONITOR_MAX_SERVERS 32
-+struct MonitorServer { char name[32]; char addr[64]; };
-+static std::vector<MonitorServer> g_fakeServers;
-+static u32 MonitorListRelayServers(MonitorServer *out, u32 max) {
-+    u32 n = 0;
-+    for (auto &s : g_fakeServers) {
-+        if (n >= max)
-+            break;
-+        out[n] = s;
-+        n++;
-+    }
-+    return n;
-+}
-+static char g_selectedName[48] = {};
-+
-+'''
-+
-+FOOTER = r'''
-+/* ---------------- harness ---------------- */
-+static void SetServers(std::initializer_list<const char *> names) {
-+    g_fakeServers.clear();
-+    for (auto *n : names) {
-+        MonitorServer s = {};
-+        snprintf(s.name, sizeof(s.name), "%s", n);
-+        snprintf(s.addr, sizeof(s.addr), "host:%u", static_cast<unsigned>(11451 + g_fakeServers.size()));
-+        g_fakeServers.push_back(s);
-+    }
-+    g_titleBar.dirty = true;
-+    g_selectedName[0] = 0;
-+    tsl::gfx::Renderer::painted.clear();
-+}
-+
-+static const char *LastPainted() {
-+    if (tsl::gfx::Renderer::painted.empty())
-+        return "";
-+    return tsl::gfx::Renderer::painted.back().c_str();
-+}
-+
-+int main() {
-+    tsl::gfx::Renderer r;
-+
-+    /* 1) 「中国·江苏」两条条目 → 标题右侧「中国·江苏(2)」 */
-+    SetServers({ "中国·江苏", "中国·江苏(2)" });
-+    TitleBarDraw(&r, "联机插件", 20, 63);
-+    assert(strcmp(LastPainted(), "中国·江苏(2)") == 0);
-+
-+    /* 2) 一行最多两个服务器名(其余丢掉,不画半截) */
-+    SetServers({ "中国·江苏", "中国·江苏(2)", "中国·广东", "中国·北京" });
-+    TitleBarDraw(&r, "联机插件", 20, 63);
-+    assert(strcmp(LastPainted(), "中国·江苏(2)  中国·广东") == 0);
-+
-+    /* 3) 没有服务器 → 一行都不画 */
-+    SetServers({});
-+    TitleBarDraw(&r, "联机插件", 20, 63);
-+    assert(r.painted.empty());
-+
-+    /* 4) 当前选中的服务器排第一(哪怕它只有一个房间) */
-+    SetServers({ "中国·河南", "中国·河南(2)", "中国·上海" });
-+    snprintf(g_selectedName, sizeof(g_selectedName), "%s", "中国·上海");
-+    g_titleBar.dirty = true;
-+    TitleBarDraw(&r, "联机插件", 20, 63);
-+    assert(strcmp(LastPainted(), "中国·上海  中国·河南(2)") == 0);
-+
-+    /* 5) 只有一台服务器时不带「(1)」 */
-+    SetServers({ "美国" });
-+    TitleBarDraw(&r, "联机插件", 20, 63);
-+    assert(strcmp(LastPainted(), "美国") == 0);
-+    /* 标题太长 → 只剩一个服务器的位置,第二项被丢掉(直接验 BuildFittedLine 的降级)。 */
-+    SetServers({ "中国·河南", "中国·河南(2)", "中国·广东" });
-+    TitleBarRefresh();
-+    char line[512];
-+    u32 lineW = 0;
-+    monitor_title_bar::BuildFittedLine(g_titleBar.items, g_titleBar.itemN, 60,
-+                                       TitleBarMeasure, &r, line, sizeof(line), &lineW);
-+    assert(strcmp(line, "中国·河南(2)") == 0);
-+    monitor_title_bar::BuildFittedLine(g_titleBar.items, g_titleBar.itemN, 24,
-+                                       TitleBarMeasure, &r, line, sizeof(line), &lineW);
-+    /* 单项也放不下 → 截断而不是画满一行(「中国·河…」=27px 已超 24,退到「中国·…」=21px) */
-+    assert(strcmp(line, "中国·…") == 0);
-+    assert(lineW <= 24 && TitleBarMeasure(line, &r) <= 24);
-+    monitor_title_bar::BuildFittedLine(g_titleBar.items, g_titleBar.itemN, 9,
-+                                       TitleBarMeasure, &r, line, sizeof(line), &lineW);
-+    assert(line[0] == 0 && lineW == 0);   /* 连一个字 + 省略号都放不下 → 整行不画 */
-+
-+    /* 6) 脏标记没置起就不重读 relay.cfg(缓存有效);每帧照常画完整的两行 */
-+    g_titleBar.dirty = false;
-+    g_fakeServers.clear();          /* 列表实际变了,但没有 dirty 就不该被重读 */
-+    r.painted.clear();
-+    TitleBarDraw(&r, "联机插件", 20, 63);
-+    assert(r.painted.size() == 1);
-+    assert(r.painted[0] == "中国·河南(2)  中国·广东");
-+    g_titleBar.dirty = true;        /* 置脏后重新读列表 → 空列表 → 什么都不画 */
-+    r.painted.clear();
-+    TitleBarDraw(&r, "联机插件", 20, 63);
-+    assert(r.painted.empty());
-+
-+    printf("monitor_title_bar_harness OK\n");
-+    return 0;
-+}
-+'''
-+
-+
-+def main() -> int:
-+    with open(MAIN, encoding="utf-8") as f:
-+        src = f.read()
-+    a = src.index(START)
-+    b = src.index(END)
-+    block = src[a:b]
-+    body = HEADER + block + FOOTER
-+    old = None
-+    if os.path.exists(OUT):
-+        with open(OUT, encoding="utf-8") as f:
-+            old = f.read()
-+    with open(OUT, "w", encoding="utf-8") as f:
-+        f.write(body)
-+
-+    cxx = sys.argv[1] if len(sys.argv) > 1 else None
-+    src_flags = ["-std=c++20", "-Wall", "-Wextra", "-Wpedantic", "-I",
-+                 os.path.join(ROOT, "overlay", "source"), OUT]
-+
-+    if cxx:
-+        cmd = [cxx, *src_flags, "-fsyntax-only"]
-+        print("+ " + " ".join(cmd))
-+        p = subprocess.run(cmd, capture_output=True, text=True)
-+        sys.stdout.write(p.stdout + p.stderr)
-+        if p.returncode != 0:
-+            print("target toolchain check FAILED")
-+            return 1
-+        print("target toolchain check OK (type-checked with %s)" % cxx)
-+
-+    for flags in ([], ["-O2", "-fsanitize=address,undefined"]):
-+        cmd = ["g++", *src_flags[:-1], *flags, "-o", "/tmp/monitor_title_bar_harness", OUT]
-+        print("+ " + " ".join(cmd))
-+        p = subprocess.run(cmd, capture_output=True, text=True)
-+        sys.stdout.write(p.stdout + p.stderr)
-+        if p.returncode != 0:
-+            return 1
-+        run = subprocess.run(["/tmp/monitor_title_bar_harness"], capture_output=True, text=True)
-+        print(run.stdout.strip() or run.stderr.strip())
-+        if run.returncode != 0:
-+            return 1
-+    if old is not None and old != body:
-+        print("(regenerated harness file)")
-+    return 0
-+
-+
-+if __name__ == "__main__":
-+    sys.exit(main())
-diff --git a/tools/run-host-tests.sh b/tools/run-host-tests.sh
-new file mode 100755
-index 0000000..c5a15e1
---- /dev/null
-+++ b/tools/run-host-tests.sh
-@@ -0,0 +1,41 @@
-+#!/usr/bin/env bash
-+# 纯主机侧测试(不需要 devkitPro):overlay/tests 下的自包含用例 +
-+# tools/check_titlebar_harness.py(把 main.cpp 里的标题栏代码原样抽出来编译并跑)。
-+#
-+#   tools/run-host-tests.sh              # 用本机 g++ 编译并运行
-+#   tools/run-host-tests.sh <cxx>        # 只给 <cxx> 做类型检查(交叉三元组跑不了)
-+set -euo pipefail
-+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-+cd "$root"
-+
-+cxx="${CXX:-g++}"
-+only_typecheck=0
-+if [[ $# -ge 1 ]]; then
-+  cxx="$1"
-+  only_typecheck=1     # 传进来的多是交叉三元组:只检查类型,不执行
-+fi
-+flags=(-std=c++20 -Wall -Wextra)
-+
-+tests=(
-+  overlay/tests/monitor_player_filter_test.cpp
-+  overlay/tests/monitor_target_generation_test.cpp
-+  overlay/tests/monitor_title_bar_test.cpp
-+  overlay/tests/monitor_title_resolver_test.cpp
-+)
-+
-+for t in "${tests[@]}"; do
-+  printf '== %s\n' "$t"
-+  if [[ "$only_typecheck" == 1 ]]; then
-+    "$cxx" "${flags[@]}" -I overlay/source -fsyntax-only "$t"
-+    continue
-+  fi
-+  bin="$(mktemp)"
-+  "$cxx" "${flags[@]}" -I overlay/source -o "$bin" "$t"
-+  "$bin"
-+  rm -f "$bin"
-+done
-+
-+printf '== monitor_title_bar harness (main.cpp 原样抽取)\n'
-+python3 tools/check_titlebar_harness.py "$cxx"
-+
-+echo "all host tests OK"
 -- 
 2.47.3
 
