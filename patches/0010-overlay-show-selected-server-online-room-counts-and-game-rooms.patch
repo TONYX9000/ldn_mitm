@@ -1,4 +1,4 @@
-From 7d4be52ce78e88c8cf883fbb24ff34f4c398cb0e Mon Sep 17 00:00:00 2001
+From a10d616c08de56c8cd42f9d13a5d2d6dfd0633f7 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH 10/10] overlay: online counts/room list and relay management
@@ -396,7 +396,7 @@ index da2bd21..a08980f 100644
  #---------------------------------------------------------------------------------
  # list of directories containing libraries, this must be the top level containing
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..7989228 100644
+index 8e07c19..3d5ff4e 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,8 @@
@@ -630,7 +630,7 @@ index 8e07c19..7989228 100644
 +        m_hostName = m_room.player[0];
 +        m_playerSuffix.clear();
 +        for (u8 i = 1; i < m_room.playerN; i++) {
-+            m_playerSuffix += "、";
++            m_playerSuffix += " ";
 +            m_playerSuffix += m_room.player[i];
 +        }
 +        m_playerStrip = m_hostName + m_playerSuffix;
