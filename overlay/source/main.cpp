@@ -665,46 +665,255 @@ static void refreshServerRowStats(const MonitorSnapshot &snap)
 }
 /* 全部服务器总览:逐台查在线人数/房间数。A 展开该服的房间(最多 8 个),
    X 重新查询,B 返回。只在打开本页时扫描;离开(析构)立即取消。 */
+/* ------------------------------------------------------------------ */
+/* 全部服务器总览                                                      */
+/* ------------------------------------------------------------------ */
+
+/* 行模板:名字/地址/数值全用定长缓冲,不走长寿命 std::string。
+   主界面 ServerRow 也是这个写法——overlay 的小堆上,页面级 std::string
+   会被后来的大缓冲(HTTP 响应、chinese_db)顶掉,实测表现就是行文字变成
+   一堆 JSON / 游戏名片段。 */
+class AllServerRow : public tsl::elm::Element {
+public:
+    static constexpr u16 kHeight = kMonitorListRowHeight;
+
+    void setName(const char *name) { snprintf(m_name, sizeof(m_name), "%s", name); }
+    void setAddr(const char *addr) { snprintf(m_addr, sizeof(m_addr), "%s", addr); }
+    void setValue(const char *value, bool faint) {
+        snprintf(m_value, sizeof(m_value), "%s", value);
+        m_faint = faint;
+    }
+    void setClickListener(std::function<void()> fn) { m_click = std::move(fn); }
+
+    virtual void layout(u16, u16, u16, u16) override {
+        this->setBoundaries(this->getX(), this->getY(), this->getWidth(), kHeight);
+    }
+
+    virtual void draw(tsl::gfx::Renderer *renderer) override {
+        using R = tsl::gfx::Renderer;
+        renderer->drawRect(this->getX(), this->getY(), this->getWidth(), 1,
+                           R::a(tsl::style::color::ColorFrame));
+
+        s32 rightReserve = 20;
+        if (m_value[0]) {
+            auto [vw, vh] = renderer->drawString(m_value, false, 0, 0, 20,
+                                                 R::a(tsl::style::color::ColorTransparent));
+            (void)vh;
+            rightReserve += (s32)vw + 14;
+        }
+        const s32 avail = this->getWidth() - 20 - rightReserve;
+
+        auto drawClipped = [&](const char *text, float size, s32 x, s32 y,
+                               tsl::Color color) {
+            auto [w, h] = renderer->drawString(text, false, 0, 0, size,
+                                               R::a(tsl::style::color::ColorTransparent));
+            (void)h;
+            if ((s32)w <= avail) {
+                renderer->drawString(text, false, x, y, size, R::a(color));
+            } else {
+                std::string cut = renderer->limitStringLength(text, false, size, avail);
+                renderer->drawString(cut.c_str(), false, x, y, size, R::a(color));
+            }
+        };
+        drawClipped(m_name, 22, this->getX() + 20, this->getY() + 32,
+                    tsl::style::color::ColorText);
+        if (m_addr[0])
+            drawClipped(m_addr, 16, this->getX() + 20, this->getY() + 58,
+                        tsl::style::color::ColorDescription);
+
+        if (m_value[0]) {
+            auto [vw, vh] = renderer->drawString(m_value, false, 0, 0, 20,
+                                                 R::a(tsl::style::color::ColorTransparent));
+            (void)vh;
+            renderer->drawString(m_value, false,
+                                 this->getX() + this->getWidth() - 20 - (s32)vw,
+                                 this->getY() + 45, 20,
+                                 R::a(m_faint ? tsl::style::color::ColorDescription
+                                              : tsl::style::color::ColorHighlight));
+        }
+    }
+
+    virtual tsl::elm::Element *requestFocus(tsl::elm::Element *oldFocus,
+                                            tsl::FocusDirection direction) override {
+        (void)oldFocus;
+        (void)direction;
+        return this;
+    }
+
+    virtual bool onClick(u64 keys) override {
+        if (keys & HidNpadButton_A) {
+            if (m_click)
+                m_click();
+            this->triggerClickAnimation();
+            return true;
+        }
+        return false;
+    }
+
+    virtual bool onTouch(tsl::elm::TouchEvent event, s32 currX, s32 currY,
+                         s32 prevX, s32 prevY, s32 initialX, s32 initialY) override {
+        (void)prevX;
+        (void)prevY;
+        (void)initialX;
+        (void)initialY;
+        if (event == tsl::elm::TouchEvent::Touch)
+            m_touched = this->inBounds(currX, currY);
+        if (event == tsl::elm::TouchEvent::Release && m_touched) {
+            m_touched = false;
+            if (tsl::elm::Element::getInputMode() == tsl::InputMode::Touch)
+                return this->onClick(HidNpadButton_A);
+        }
+        return false;
+    }
+
+private:
+    char m_name[40] = {};
+    char m_addr[80] = {};
+    char m_value[48] = {};
+    bool m_faint = true;
+    bool m_touched = false;
+    std::function<void()> m_click;
+};
+
+/* 单台服务器的房间页:A 从总览进来看看这台有哪些房;B 返回。 */
+class AllRoomsGui : public tsl::Gui {
+public:
+    AllRoomsGui(std::string name, u32 index)
+        : m_name(std::move(name)), m_index(index) {}
+
+    virtual tsl::elm::Element* createUI() override {
+        MonitorSetTraditional(g_isTraditional);
+        auto *frame = new MonitorFrame(m_name,
+                                       T("B 返回 · X 重新查询", "B 返回 · X 重新查詢"));
+        auto *list = new RebuildList();
+
+        MonitorCopyAllSnapshot(&m_snap);
+
+        const u32 idx = m_index < MONITOR_ALL_MAX ? m_index : 0;
+        const MonitorAllServer &s = m_snap.servers[idx];
+
+        char hdr[80];
+        if (s.online >= 0)
+            snprintf(hdr, sizeof(hdr), T("在线 %d · %u 间", "線上 %d · %u 間"),
+                     static_cast<int>(s.online), static_cast<unsigned>(s.roomN));
+        else
+            snprintf(hdr, sizeof(hdr), "%s", T("该服务器的房间", "該伺服器的房間"));
+        list->addItem(new tsl::elm::CategoryHeader(hdr));
+
+        if (s.state == 1) {
+            list->addItem(new tsl::elm::ListItem(T("查询中…", "查詢中…")));
+        } else if (s.state == 3) {
+            list->addItem(new tsl::elm::ListItem(T("该服务器无房间信息", "該伺服器無房間資訊")));
+        } else if (s.roomN == 0) {
+            list->addItem(new tsl::elm::ListItem(T("暂无房间", "暫無房間")));
+        } else {
+            for (u32 k = 0; k < s.roomN && k < MONITOR_ALL_ROOMS_MAX; k++) {
+                auto *row = new AllServerRow();
+                row->setName(s.rooms[k].game[0] ? s.rooms[k].game
+                                                : T("未知游戏", "未知遊戲"));
+                char val[32] = {};
+                if (s.rooms[k].playersMax > 0)
+                    snprintf(val, sizeof(val), "%u/%u",
+                             static_cast<unsigned>(s.rooms[k].players),
+                             static_cast<unsigned>(s.rooms[k].playersMax));
+                else
+                    snprintf(val, sizeof(val), "%u",
+                             static_cast<unsigned>(s.rooms[k].players));
+                row->setValue(val, false);
+                list->addItem(row);
+            }
+        }
+
+        /* 房间页不占着扫描:回去时总览会重新开扫;这里只保留 X 强制刷新。 */
+        frame->setContent(list);
+        return frame;
+    }
+
+    virtual bool handleInput(u64 keysDown, u64 keysHeld,
+                             const HidTouchState &touchPos,
+                             HidAnalogStickState joyStickPosLeft,
+                             HidAnalogStickState joyStickPosRight) override {
+        (void)keysHeld; (void)touchPos; (void)joyStickPosLeft; (void)joyStickPosRight;
+        if (keysDown & HidNpadButton_X) {
+            MonitorRequestAll(0, true);
+            tsl::goBack();
+            return true;
+        }
+        return false;
+    }
+
+private:
+    std::string m_name;
+    u32 m_index = 0;
+    /* 36KB,放静态区 */
+    static inline MonitorAllSnapshot m_snap = {};
+};
+
+/* 全部服务器总览:进页面就开扫,逐台填在线/房间数。A 看这台的房间,
+   X 强制重查,B 返回。行只在 createUI 里建一次,之后只改数值,不重建。 */
 class AllServersGui : public tsl::Gui {
 public:
     ~AllServersGui() override { MonitorAllCancel(); }
 
     virtual tsl::elm::Element* createUI() override {
         MonitorSetTraditional(g_isTraditional);
+
+        auto *frame = new MonitorFrame(T("全部服务器", "全部伺服器"),
+                                       T("A 查看房间 · X 重新查询", "A 檢視房間 · X 重新查詢"));
+        m_list = new RebuildList();
+
+        m_header = new tsl::elm::CategoryHeader(T("服务器", "伺服器"));
+        m_list->addItem(m_header);
+
+        u32 count = 0;
+        if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count)))
+            count = 0;
+        if (count > MONITOR_ALL_MAX)
+            count = MONITOR_ALL_MAX;
+
+        for (u32 i = 0; i < count; i++) {
+            LdnRelayServerInfo info = {};
+            char name[32] = {};
+            char addr[80] = {};
+            if (R_SUCCEEDED(ldnMitmGetRelayServerInfo(&g_ldnConfig, i, &info))) {
+                snprintf(name, sizeof(name), "%s", info.name);
+                if (info.host[0])
+                    snprintf(addr, sizeof(addr), "%s:%u", info.host,
+                             static_cast<unsigned>(info.port));
+            } else {
+                ldnMitmGetRelayServerName(&g_ldnConfig, i, name);
+            }
+
+            auto *row = new AllServerRow();
+            row->setName(name);
+            row->setAddr(addr);
+            row->setValue(T("等待", "等待"), true);
+            row->setClickListener([i, label = std::string(name)]() {
+                tsl::changeTo<AllRoomsGui>(label, i);
+            });
+            m_rows.push_back(row);
+            m_list->addItem(row);
+        }
+        if (count == 0)
+            m_list->addItem(new tsl::elm::ListItem(T("没有服务器", "沒有伺服器")));
+
         MonitorRequestAll(0, false);
         MonitorCopyAllSnapshot(&m_snap);
-        m_limit = m_snap.limit;
-        m_version = m_snap.version;
+        UpdateValues();
 
-        auto frame = new MonitorFrame(T("全部服务器", "全部伺服器"),
-                                      T("A 展开房间 · X 重新查询", "A 展開房間 · X 重新查詢"));
-        m_list = new RebuildList();
-        Rebuild();
         frame->setContent(m_list);
         return frame;
     }
 
     virtual void update() override {
         MonitorCopyAllSnapshot(&m_snap);
-        if (m_snap.limit != m_limit) {
-            m_limit = m_snap.limit;
-            Rebuild();
-            return;
-        }
-        if (m_snap.version != m_version) {
-            m_version = m_snap.version;
-            if (m_expanded >= 0) {
-                Rebuild();
-            } else {
-                UpdateValues();
-            }
-            return;
-        }
         UpdateValues();
     }
 
-    virtual bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos,
-                             HidAnalogStickState joyStickPosLeft, HidAnalogStickState joyStickPosRight) override {
+    virtual bool handleInput(u64 keysDown, u64 keysHeld,
+                             const HidTouchState &touchPos,
+                             HidAnalogStickState joyStickPosLeft,
+                             HidAnalogStickState joyStickPosRight) override {
         (void)keysHeld; (void)touchPos; (void)joyStickPosLeft; (void)joyStickPosRight;
         if (keysDown & HidNpadButton_X) {
             MonitorRequestAll(0, true);
@@ -714,132 +923,56 @@ public:
     }
 
 private:
-    void Rebuild() {
-        m_list->clear();
-        m_header = nullptr;
-        m_serverItems.clear();
-        m_last.clear();
-
-        char hdr[80];
-        snprintf(hdr, sizeof(hdr), T("服务器（%u 台）", "伺服器（%u 台）"),
-                 static_cast<unsigned>(m_limit));
-        m_header = new tsl::elm::CategoryHeader(hdr);
-        m_list->addItem(m_header);
-
-        if (m_limit == 0) {
-            m_list->addItem(new tsl::elm::ListItem(T("没有服务器", "沒有伺服器")));
-            m_list->snapToFocus();
-            return;
-        }
-
-        for (u32 i = 0; i < m_limit && i < MONITOR_ALL_MAX; i++) {
-            const std::string name = m_snap.servers[i].name;
-            auto *item = new tsl::elm::ListItem(name);
-            item->setValue("…", true);
-            const u32 idx = i;
-            item->setClickListener([this, idx](u64 keys) {
-                if (keys & HidNpadButton_A) {
-                    m_expanded = (m_expanded == static_cast<s32>(idx)) ? -1
-                                                                      : static_cast<s32>(idx);
-                    Rebuild();
-                    return true;
-                }
-                return false;
-            });
-            m_serverItems.push_back(item);
-            m_last.push_back(std::string());
-            m_list->addItem(item);
-
-            if (static_cast<s32>(i) != m_expanded) {
-                continue;
-            }
-            const MonitorAllServer &s = m_snap.servers[i];
-            if (s.state != 2) {
-                auto *hint = new tsl::elm::ListItem(T("查询中…", "查詢中…"));
-                hint->setValue("…", true);
-                m_list->addItem(hint);
-            } else if (s.roomN == 0) {
-                auto *hint = new tsl::elm::ListItem(T("暂无房间", "暫無房間"));
-                hint->setValue(s.online >= 0 ? T("在线", "線上") : "", true);
-                m_list->addItem(hint);
-            } else {
-                for (u32 k = 0; k < s.roomN; k++) {
-                    char val[24];
-                    if (s.rooms[k].playersMax > 0) {
-                        snprintf(val, sizeof(val), "%u/%u",
-                                 static_cast<unsigned>(s.rooms[k].players),
-                                 static_cast<unsigned>(s.rooms[k].playersMax));
-                    } else {
-                        snprintf(val, sizeof(val), "%u",
-                                 static_cast<unsigned>(s.rooms[k].players));
-                    }
-                    auto *r = new tsl::elm::ListItem(s.rooms[k].game);
-                    r->setValue(val);
-                    m_list->addItem(r);
-                }
-            }
-        }
-        m_list->snapToFocus();
-        UpdateValues();
-    }
-
     void UpdateValues() {
         if (m_header != nullptr) {
             char hdr[80];
-            snprintf(hdr, sizeof(hdr), T("服务器（%u 台）· 已查 %u", "伺服器（%u 台）· 已查 %u"),
-                     static_cast<unsigned>(m_snap.limit), static_cast<unsigned>(m_snap.done));
+            snprintf(hdr, sizeof(hdr),
+                     T("服务器（%u 台）· 已查 %u", "伺服器（%u 台）· 已查 %u"),
+                     static_cast<unsigned>(m_snap.limit),
+                     static_cast<unsigned>(m_snap.done));
             m_header->setText(hdr);
         }
-        for (u32 i = 0; i < m_serverItems.size() && i < MONITOR_ALL_MAX; i++) {
+        for (u32 i = 0; i < m_rows.size(); i++) {
             const MonitorAllServer &s = m_snap.servers[i];
             char v[48] = {};
-            bool faint = false;
+            bool faint = true;
             switch (s.state) {
                 case 1:
                     snprintf(v, sizeof(v), "%s", T("查询中…", "查詢中…"));
-                    faint = true;
                     break;
                 case 2:
                     if (s.online >= 0 && s.roomCount >= 0) {
                         snprintf(v, sizeof(v), T("在线 %d · %d 间", "線上 %d · %d 間"),
                                  static_cast<int>(s.online), static_cast<int>(s.roomCount));
+                        faint = false;
                     } else if (s.roomCount >= 0) {
                         snprintf(v, sizeof(v), T("%d 间", "%d 間"),
                                  static_cast<int>(s.roomCount));
+                        faint = false;
                     } else {
                         snprintf(v, sizeof(v), "%s", T("已连通", "已連通"));
+                        faint = false;
                     }
                     break;
                 case 3:
                     snprintf(v, sizeof(v), "%s", T("无数据", "無資料"));
-                    faint = true;
                     break;
                 case 4:
                     snprintf(v, sizeof(v), "%s", T("跳过", "略過"));
-                    faint = true;
                     break;
                 default:
                     snprintf(v, sizeof(v), "%s", T("等待", "等待"));
-                    faint = true;
                     break;
             }
-            if (m_last[i] != v) {
-                m_last[i] = v;
-                m_serverItems[i]->setValue(v, faint);
-            }
+            m_rows[i]->setValue(v, faint);
         }
-        m_list->invalidate();
     }
 
     RebuildList *m_list = nullptr;
     tsl::elm::CategoryHeader *m_header = nullptr;
-    std::vector<tsl::elm::ListItem *> m_serverItems;
-    std::vector<std::string> m_last;
-    /* MonitorAllSnapshot 约 36 KB，放静态区。 */
+    std::vector<AllServerRow *> m_rows;
+    /* 36KB,放静态区 */
     static inline MonitorAllSnapshot m_snap = {};
-    u32 m_limit = 0;
-    u32 m_version = 0;
-    s32 m_expanded = -1;
 };
 
 class MainGui : public tsl::Gui {
