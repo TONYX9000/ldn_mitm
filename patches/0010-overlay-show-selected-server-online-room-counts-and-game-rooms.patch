@@ -145,194 +145,6 @@ CI 构建修复（DevkitPro 包数据库 HTTP 403）：
   * worker 优先级 0x2C → 0x3B（低于 libtesla 的 UI 线程）；选中服务器的周期刷新
     由 1s 放宽到 3s，给逐台探测留出空闲时间，网络与 CPU 占用都更低。
   * 新增 g_auxPhase：逐台探测期间一旦有新的刷新请求就立刻放弃本轮探测。
-diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
-index 3d7bc8b..b37dab7 100644
---- a/.github/workflows/build.yml
-+++ b/.github/workflows/build.yml
-@@ -38,8 +38,20 @@ jobs:
-       - name: Setup ccache
-         uses: hendrikmuhs/ccache-action@v1.2
- 
--      - name: Install latest libnx (before building)
-+      - name: update Atmosphere-libs (适配最新系统)
-         run: |
-+          # 与上游 nightly.yml 相同:构建前把 Atmosphere-libs 顶到 master,
-+          # 跟踪最新系统固件适配(23.0.1+);不顶的话插件会在新系统上启动报错。
-+          pushd Atmosphere-libs
-+          git fetch --all
-+          git reset --hard origin/master
-+          popd
-+
-+      - name: Install libnx master (before building)
-+        run: |
-+          # 最新 Atmosphere-libs 使用 pgl 新命名(pglEventObserverGetShellEvent 系,
-+          # libnx 2026-09-15 a13cd192 起),安装 libnx master 与其配套,
-+          # 保证无论镜像自带 libnx 版本如何都能编译。
-           pushd /tmp
-           git clone https://github.com/switchbrew/libnx
-           cd libnx
-@@ -48,6 +60,26 @@ jobs:
-           make install
-           popd
- 
-+      - name: Install switch-curl (订阅 HTTPS 下载)
-+        run: |
-+          set -euo pipefail
-+          # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
-+          # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
-+          if dkp-pacman -Q switch-curl >/dev/null 2>&1; then
-+            echo "switch-curl already installed"
-+          else
-+            # DevkitPro package DB refresh can fail with HTTP 403. Do not
-+            # make a mirror refresh failure fatal if cached DBs can install it.
-+            if ! dkp-pacman -Sy --noconfirm; then
-+              echo "::warning::DevkitPro package DB refresh failed; trying cached metadata."
-+            fi
-+            dkp-pacman -S --noconfirm --needed switch-curl || true
-+          fi
-+          if ! dkp-pacman -Q switch-curl >/dev/null 2>&1; then
-+            echo "::error::Required package switch-curl is not installed."
-+            exit 1
-+          fi
-+
-       - name: Clear invalid ccache after libnx update 
-         run: ccache -C
- 
-diff --git a/.github/workflows/nightly.yml b/.github/workflows/nightly.yml
-index c53077f..d78034c 100644
---- a/.github/workflows/nightly.yml
-+++ b/.github/workflows/nightly.yml
-@@ -37,22 +37,41 @@ jobs:
-           git reset --hard origin/master
-           popd
- 
--      - name: Build
--        id: build
--        run: make -j8 PREFIX="ccache aarch64-none-elf-"
--        continue-on-error: true
--
--      - name: Install libnx master & Retry build
--        id: retry
--        if: ${{ steps.build.outcome == 'failure' }}
-+      - name: Install libnx master (before building)
-         run: |
-+          # 最新 Atmosphere-libs(上一步已顶到 master)使用 pgl 新命名
-+          # (pglEventObserverGetShellEvent 系,libnx 2026-09-15 a13cd192 起),
-+          # 安装 libnx master 与其配套,保证无论镜像自带 libnx 版本如何都能编译。
-           pushd /tmp
-           git clone https://github.com/switchbrew/libnx
-           cd libnx
-           make -j8 PREFIX="ccache aarch64-none-elf-"
-           make install
-           popd
--          make -j8 PREFIX="ccache aarch64-none-elf-"
-+
-+      - name: Install switch-curl (订阅 HTTPS 下载)
-+        run: |
-+          set -euo pipefail
-+          # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
-+          # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
-+          if dkp-pacman -Q switch-curl >/dev/null 2>&1; then
-+            echo "switch-curl already installed"
-+          else
-+            # DevkitPro package DB refresh can fail with HTTP 403. Do not
-+            # make a mirror refresh failure fatal if cached DBs can install it.
-+            if ! dkp-pacman -Sy --noconfirm; then
-+              echo "::warning::DevkitPro package DB refresh failed; trying cached metadata."
-+            fi
-+            dkp-pacman -S --noconfirm --needed switch-curl || true
-+          fi
-+          if ! dkp-pacman -Q switch-curl >/dev/null 2>&1; then
-+            echo "::error::Required package switch-curl is not installed."
-+            exit 1
-+          fi
-+
-+      - name: Build
-+        id: build
-+        run: make -j8 PREFIX="ccache aarch64-none-elf-"
- 
-       - name: Upload built files
-         uses: actions/upload-artifact@v7
-diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
-index 7f34343..6a0c0f0 100644
---- a/.github/workflows/release.yml
-+++ b/.github/workflows/release.yml
-@@ -35,22 +35,50 @@ jobs:
-     - name: Setup ccache
-       uses: hendrikmuhs/ccache-action@v1.2
- 
--    - name: Build
--      id: build
--      run: make -j8 PREFIX="ccache aarch64-none-elf-"
--      continue-on-error: true
-+    - name: update Atmosphere-libs (适配最新系统)
-+      run: |
-+        # 与上游 nightly.yml 相同:构建前把 Atmosphere-libs 顶到 master,
-+        # 跟踪最新系统固件适配(23.0.1+);不顶的话插件会在新系统上启动报错。
-+        pushd Atmosphere-libs
-+        git fetch --all
-+        git reset --hard origin/master
-+        popd
- 
--    - name: Install libnx master & Retry build
--      id: retry
--      if: ${{ steps.build.outcome == 'failure' }}
-+    - name: Install libnx master (before building)
-       run: |
-+        # 最新 Atmosphere-libs 使用 pgl 新命名(pglEventObserverGetShellEvent 系,
-+        # libnx 2026-09-15 a13cd192 起),安装 libnx master 与其配套,
-+        # 保证无论镜像自带 libnx 版本如何都能编译。
-         pushd /tmp
-         git clone https://github.com/switchbrew/libnx
-         cd libnx
-         make -j8 PREFIX="ccache aarch64-none-elf-"
-         make install
-         popd
--        make -j8 PREFIX="ccache aarch64-none-elf-"
-+
-+    - name: Install switch-curl (订阅 HTTPS 下载)
-+      run: |
-+        set -euo pipefail
-+        # 订阅(chinese_db.json)经 https://v6.gh-proxy.org/ 加速镜像下载,
-+        # overlay 内置 switch-curl(libnx SSL 后端)走 TLS;确保镜像装了它。
-+        if dkp-pacman -Q switch-curl >/dev/null 2>&1; then
-+          echo "switch-curl already installed"
-+        else
-+          # DevkitPro package DB refresh can fail with HTTP 403. Do not
-+          # make a mirror refresh failure fatal if cached DBs can install it.
-+          if ! dkp-pacman -Sy --noconfirm; then
-+            echo "::warning::DevkitPro package DB refresh failed; trying cached metadata."
-+          fi
-+          dkp-pacman -S --noconfirm --needed switch-curl || true
-+        fi
-+        if ! dkp-pacman -Q switch-curl >/dev/null 2>&1; then
-+          echo "::error::Required package switch-curl is not installed."
-+          exit 1
-+        fi
-+
-+    - name: Build
-+      id: build
-+      run: make -j8 PREFIX="ccache aarch64-none-elf-"
- 
-     - name: Pack
-       run: |
-diff --git a/Makefile b/Makefile
-index efcb5e7..cd62b35 100644
---- a/Makefile
-+++ b/Makefile
-@@ -57,6 +57,12 @@ PACK: $(SUBFOLDERS)
- 	@ cp ldn_mitm/res/toolbox.json $(TITLE_DIR)/toolbox.json
- 	@ touch $(TITLE_DIR)/flags/boot2.flag
- 	@ cp config/ldn_mitm/relay.cfg $(SD_ROOT)/config/ldn_mitm/relay.cfg
-+	@ mkdir -p $(SD_ROOT)/config/nx-ovlloader
-+	@ printf '\000\000\200\000\000\000\000\000' > $(SD_ROOT)/config/nx-ovlloader/heap_size.bin
-+	@ echo "预置订阅缓存(chinese_db.json;运行时经 https://v6.gh-proxy.org/ 加速镜像刷新;服务器列表只读 relay.cfg,不预置 servers.json)"
-+	@ (curl -fsSL --max-time 60 https://raw.githubusercontent.com/jieluojun/LanPlayMonitor/refs/heads/main/chinese_db.json -o $(SD_ROOT)/config/ldn_mitm/chinese_db.json.tmp && mv $(SD_ROOT)/config/ldn_mitm/chinese_db.json.tmp $(SD_ROOT)/config/ldn_mitm/chinese_db.json) || (rm -f $(SD_ROOT)/config/ldn_mitm/chinese_db.json.tmp; echo "warn: chinese_db.json 预置失败")
-+	@ ls -la $(SD_ROOT)/config/ldn_mitm/
-+	@ (test -s $(SD_ROOT)/config/ldn_mitm/chinese_db.json) || echo "::warning::chinese_db.json 预置失败——请检查构建日志 curl 输出;即使缺失,在线/房间数字仍可工作(标题将显示标题ID)"
- #---------------------------------------------------------------------------------
- 
- .PHONY: all clean PACK atmosphere-patch $(SUBFOLDERS)
 diff --git a/ldn_mitm/Makefile b/ldn_mitm/Makefile
 index f054842..0ff72f9 100644
 --- a/ldn_mitm/Makefile
@@ -464,7 +276,7 @@ index 5838ff6..7c810be 100644
      return rc;
  }
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..f7ba367 100644
+index 8e07c19..def5304 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,8 @@
@@ -993,7 +805,7 @@ index 8e07c19..f7ba367 100644
  class ConfigToggleListItem : public tsl::elm::ToggleListItem {
  public:
      ConfigToggleListItem(const char *label,
-@@ -66,8 +551,109 @@ static void detectLanguage()
+@@ -66,8 +551,116 @@ static void detectLanguage()
      char code[9] = {};
      memcpy(code, &langCode, 8);
      g_isTraditional = (strncmp(code, "zh-Hant", 7) == 0);
@@ -1006,8 +818,7 @@ index 8e07c19..f7ba367 100644
 +{
 +    if (!g_list || !g_roomHeader || g_roomHeaderIndex < 0)
 +        return;
- 
--    strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
++
 +    char header[80];
 +    if (snap.server[0])
 +        snprintf(header, sizeof(header), "%s · %s", T("游戏房间", "遊戲房間"), snap.server);
@@ -1057,19 +868,27 @@ index 8e07c19..f7ba367 100644
 +    static MonitorServerStat stats[MONITOR_MAX_SERVERS];
 +
 +    u32 n = MonitorListServerStats(stats, MONITOR_MAX_SERVERS);
-+
+ 
+-    strcpy(g_brand, g_isTraditional ? "阿東版" : "阿东版");
 +    char onlineBuf[16], roomsBuf[16], latBuf[16];
 +    for (size_t k = 0; k < g_serverRows.size(); k++) {
 +        ServerRow *row = g_serverRows[k];
-+        if (k >= n) {
++        /* 按 addr 匹配,避免 g_serverRows(按 ldnMitm 索引)与
++           stats(按 relay.cfg 顺序)顺序不一致导致数据错位 */
++        const MonitorServerStat *st = nullptr;
++        for (u32 i = 0; i < n; i++) {
++            if (strcmp(stats[i].addr, row->m_addr) == 0) {
++                st = &stats[i];
++                break;
++            }
++        }
++        if (st == nullptr) {
 +            row->setStats(nullptr, nullptr, nullptr);
 +            continue;
 +        }
-+        const MonitorServerStat &st = stats[k];
-+
 +        /* 在线:选中的服务器优先用监视器快照(刚查过),否则用后台探测值 */
-+        s32 online = st.online;
-+        s32 rooms = st.rooms;
++        s32 online = st->online;
++        s32 rooms = st->rooms;
 +        if (row->selected()) {
 +            if (snap.online >= 0)
 +                online = snap.online;
@@ -1087,7 +906,7 @@ index 8e07c19..f7ba367 100644
 +
 +        /* 延迟:选中的服务器用 sysmodule 实测的 relay 延迟(比 TCP 连接耗时
 +           更贴近真实联机),拿不到再退回后台探测值 */
-+        s32 lat = st.latencyMs;
++        s32 lat = st->latencyMs;
 +        if (row->selected()) {
 +            u32 ms = 0;
 +            if (R_SUCCEEDED(ldnMitmGetRelayLatency(&g_ldnConfig, &ms)) && ms > 0)
@@ -1104,7 +923,7 @@ index 8e07c19..f7ba367 100644
  }
  
  class MainGui : public tsl::Gui {
-@@ -75,199 +661,448 @@ public:
+@@ -75,199 +668,448 @@ public:
      MainGui() { }
  
      virtual tsl::elm::Element* createUI() override {
@@ -1259,7 +1078,7 @@ index 8e07c19..f7ba367 100644
 +            if (nowNs - g_lastPollNs >= 3000000000ull) {
 +                g_lastPollNs = nowNs;
 +                MonitorRequestPoll();
-+            }
+             }
 +        }
 +        // 服务器行右侧三列「在线 / 房间 / 延迟」:每一行都显示。
 +        // 后台线程每空闲一次就探测一台(MonitorListServerStats),没测过的
@@ -1269,7 +1088,7 @@ index 8e07c19..f7ba367 100644
 +            if (g_lastStatsNs == 0 || nowNs - g_lastStatsNs >= 500000000ull) {
 +                g_lastStatsNs = nowNs;
 +                refreshServerRowStats(snap);
-             }
++            }
 +        }
 +    }
  
@@ -1359,9 +1178,6 @@ index 8e07c19..f7ba367 100644
 +            item->setClickListener([item, info, added, count](u64 keys) {
 +                if (!(keys & HidNpadButton_A)) {
 +                    return false;
-+                }
-+                if (*added) {
-+                    return true;
                  }
 -                if (src == 1) {
 -                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("硬件派生", "硬體衍生")));
@@ -1369,6 +1185,9 @@ index 8e07c19..f7ba367 100644
 -                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("启动随机", "啟動隨機")));
 -                } else if (src == 3) {
 -                    list->addItem(new tsl::elm::ListItem(T("地址固定", "位址固定"), T("已自动更换", "已自動更換")));
++                if (*added) {
++                    return true;
++                }
 +                if (*count >= LDN_MAX_SERVERS) {
 +                    item->setValue(T("先删一台", "先刪一台"), true);
 +                    return true;
@@ -1422,13 +1241,13 @@ index 8e07c19..f7ba367 100644
 +        g_selectedName[0] = 0;
 +        MonitorRequestSwitch(nullptr);
 +        return;
-     }
++    }
 +    char name[32] = {};
 +    if (R_FAILED(ldnMitmGetRelayServerName(&g_ldnConfig, selected, name))) {
 +        g_selectedName[0] = 0;
 +        MonitorRequestSwitch(nullptr);
 +        return;
-+    }
+     }
 +    snprintf(g_selectedName, sizeof(g_selectedName), "%s", name);
 +    MonitorRequestSwitch(g_selectedName);
 +}
@@ -1707,7 +1526,7 @@ index 8e07c19..f7ba367 100644
              rc = smGetService(&g_ldnSrv, "ldn:u");
              if (R_FAILED(rc)) {
                  g_state = State::Error;
-@@ -288,14 +1123,34 @@ public:
+@@ -288,14 +1130,34 @@ public:
              g_state = State::Loaded;
          });
  
@@ -1746,7 +1565,7 @@ index 8e07c19..f7ba367 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..529778e
+index 0000000..51f1ae7
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
 @@ -0,0 +1,2839 @@
@@ -4306,7 +4125,7 @@ index 0000000..529778e
 +        }
 +    }
 +    close(fd);
-+    return ms > 0 ? ms : 1;
++    return ms > 0 ? ms : 0;
 +}
 +
 +/* 只有 serverInfo 的轻查询;服务器不支持时退回 /info(与 DoRefresh 同逻辑)。 */
@@ -4685,341 +4504,3 @@ index 0000000..95ab8f7
 +
 +/* 诊断日志:写 sdmc:/config/ldn_mitm/monitor.log(UI 侧打点用)。 */
 +void MonitorLog(const char *msg);
-diff --git a/overlay/source/monitor_player_filter.hpp b/overlay/source/monitor_player_filter.hpp
-new file mode 100644
-index 0000000..a96f729
---- /dev/null
-+++ b/overlay/source/monitor_player_filter.hpp
-@@ -0,0 +1,32 @@
-+#pragma once
-+
-+#include <cstddef>
-+#include <cstring>
-+
-+namespace MonitorPlayerFilter {
-+
-+/* Missing connection flags mean an older schema/REST shape: preserve its
-+ * previous behavior. If the field is present, only an explicit JSON true is
-+ * considered an occupied node; false/null/invalid values are stale slots. */
-+inline bool IncludeNode(bool hasConnectionFlag, const char *value) {
-+    if (!hasConnectionFlag)
-+        return true;
-+    if (!value)
-+        return false;
-+    while (*value == ' ' || *value == '\t' || *value == '\r' || *value == '\n')
-+        ++value;
-+    if (std::strncmp(value, "true", 4) != 0)
-+        return false;
-+    const char next = value[4];
-+    return next == '\0' || next == ',' || next == '}' || next == ']' ||
-+           next == ' ' || next == '\t' || next == '\r' || next == '\n';
-+}
-+
-+/* NetworkInfo has a fixed eight-slot array, but only indices below nodeCount
-+ * belong to the current room. Later slots can retain names/flags from old peers. */
-+inline bool IncludeConnectedSlot(std::size_t index, std::size_t nodeCount,
-+                                 bool isConnected) {
-+    return index < nodeCount && isConnected;
-+}
-+
-+} // namespace MonitorPlayerFilter
-diff --git a/overlay/source/monitor_target_generation.hpp b/overlay/source/monitor_target_generation.hpp
-new file mode 100644
-index 0000000..a0a3d78
---- /dev/null
-+++ b/overlay/source/monitor_target_generation.hpp
-@@ -0,0 +1,22 @@
-+#pragma once
-+
-+#include <atomic>
-+#include <cstdint>
-+
-+/* A refresh request owns a generation token. Once a newer request is queued,
-+ * older blocking network responses must not publish into the shared snapshot. */
-+namespace MonitorTargetGeneration {
-+
-+using Value = std::uint32_t;
-+
-+class Gate {
-+public:
-+    Value Advance() { return generation_.fetch_add(1) + 1; }
-+    Value Capture() const { return generation_.load(); }
-+    bool IsCurrent(Value captured) const { return Capture() == captured; }
-+
-+private:
-+    std::atomic<Value> generation_{0};
-+};
-+
-+} // namespace MonitorTargetGeneration
-diff --git a/overlay/source/monitor_title_resolver.hpp b/overlay/source/monitor_title_resolver.hpp
-new file mode 100644
-index 0000000..d0ac8cc
---- /dev/null
-+++ b/overlay/source/monitor_title_resolver.hpp
-@@ -0,0 +1,148 @@
-+#pragma once
-+
-+#include <stddef.h>
-+#include <string.h>
-+
-+/* Resolve title IDs for games whose LDN contentId is the all-F sentinel.
-+ * advertiseData is the room's own hexadecimal LDN payload; no local process
-+ * state is used, so rooms from different games cannot inherit the foreground
-+ * application's title by accident. */
-+namespace MonitorTitleResolver {
-+
-+static constexpr size_t kAdvertiseDataMaxBytes = 384;
-+static constexpr size_t kAdvertiseDataMaxHex = kAdvertiseDataMaxBytes * 2;
-+
-+inline int HexDigit(char c) {
-+    if (c >= '0' && c <= '9')
-+        return c - '0';
-+    if (c >= 'a' && c <= 'f')
-+        return c - 'a' + 10;
-+    if (c >= 'A' && c <= 'F')
-+        return c - 'A' + 10;
-+    return -1;
-+}
-+
-+inline bool NormalizeAdvertiseHex(const char *src, char *out, size_t outN,
-+                                  size_t *outLen) {
-+    if (outLen)
-+        *outLen = 0;
-+    if (!src || !out || outN == 0)
-+        return false;
-+
-+    size_t len = 0;
-+    for (const char *p = src; *p; ++p) {
-+        const int digit = HexDigit(*p);
-+        if (digit >= 0) {
-+            if (len + 1 >= outN) {
-+                out[0] = 0;
-+                return false;
-+            }
-+            out[len++] = "0123456789abcdef"[digit];
-+        } else if (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' ||
-+                   *p == ':' || *p == '-') {
-+            continue;
-+        } else {
-+            out[0] = 0;
-+            return false;
-+        }
-+    }
-+    out[len] = 0;
-+    if (outLen)
-+        *outLen = len;
-+    return len != 0 && (len & 1) == 0;
-+}
-+
-+inline bool HexSpanContains(const char *begin, const char *end,
-+                            const char *needle) {
-+    if (!begin || !end || !needle || end < begin)
-+        return false;
-+    const size_t needleLen = strlen(needle);
-+    const size_t spanLen = (size_t)(end - begin);
-+    if (needleLen == 0)
-+        return true;
-+    if (needleLen > spanLen)
-+        return false;
-+    for (size_t i = 0; i + needleLen <= spanLen; ++i) {
-+        if (memcmp(begin + i, needle, needleLen) == 0)
-+            return true;
-+    }
-+    return false;
-+}
-+
-+inline bool CopyTitleId(const char *titleId, char *out, size_t outN) {
-+    if (!titleId || !out || outN < 17)
-+        return false;
-+    memcpy(out, titleId, 17);
-+    return true;
-+}
-+
-+/* Returns false when the advertisement is absent or does not match a known
-+ * signature. The caller must then show the safe unknown-game fallback. */
-+inline bool ResolveAdvertisedTitleId(const char *advertiseData,
-+                                     const char *hostPlayerName,
-+                                     char *outTitleId, size_t outN) {
-+    if (outTitleId && outN > 0)
-+        outTitleId[0] = 0;
-+    if (!outTitleId || outN < 17)
-+        return false;
-+
-+    char hex[kAdvertiseDataMaxHex + 1] = {};
-+    size_t hexLen = 0;
-+    if (!NormalizeAdvertiseHex(advertiseData, hex, sizeof(hex), &hexLen))
-+        return false;
-+
-+    /* DRAGON BALL FighterZ: advertiseData == ffff0000. */
-+    if (hexLen == 8 && strcmp(hex, "ffff0000") == 0)
-+        return CopyTitleId("0100A250097F0000", outTitleId, outN);
-+
-+    /* Rocket League advertises a JSON object (7b = '{', 7d = '}'). */
-+    if (hexLen >= 4 && hex[0] == '7' && hex[1] == 'b' &&
-+        hex[hexLen - 2] == '7' && hex[hexLen - 1] == 'd')
-+        return CopyTitleId("01005EE0036EC000", outTitleId, outN);
-+
-+    static const char kDelimiter[] = "00000004";
-+    const size_t delimiterLen = sizeof(kDelimiter) - 1;
-+    size_t delimiterCount = 0;
-+    for (const char *p = hex; (p = strstr(p, kDelimiter)) != nullptr;
-+         p += delimiterLen)
-+        ++delimiterCount;
-+    const char *firstDelimiter = strstr(hex, kDelimiter);
-+    const char *firstPartEnd = firstDelimiter ? firstDelimiter : hex + hexLen;
-+
-+    /* MONSTER HUNTER RISE has player/rank sections after two delimiters. */
-+    if (delimiterCount >= 2 &&
-+        HexSpanContains(hex, firstPartEnd, "0000000008100000") &&
-+        HexSpanContains(hex, firstPartEnd, "8b9000"))
-+        return CopyTitleId("0100B04011742000", outTitleId, outN);
-+
-+    /* Monster Hunter Stories 2 shares the common prefix, but has 0a0000. */
-+    if (HexSpanContains(hex, firstPartEnd, "0000000008100000") &&
-+        HexSpanContains(hex, firstPartEnd, "0a0000"))
-+        return CopyTitleId("0100E21011446000", outTitleId, outN);
-+
-+    /* Minecraft stores the host name as UTF-8 starting at hex offset 32. */
-+    if (hostPlayerName && hostPlayerName[0] && hexLen > 32 &&
-+        ((hexLen - 32) & 1) == 0) {
-+        char decoded[96] = {};
-+        size_t decodedLen = 0;
-+        for (size_t i = 32; i + 1 < hexLen; i += 2) {
-+            const int hi = HexDigit(hex[i]);
-+            const int lo = HexDigit(hex[i + 1]);
-+            if (hi < 0 || lo < 0)
-+                return false;
-+            const unsigned char byte = (unsigned char)((hi << 4) | lo);
-+            if (byte == 0)
-+                break;
-+            if (decodedLen + 1 >= sizeof(decoded))
-+                return false;
-+            decoded[decodedLen++] = (char)byte;
-+        }
-+        decoded[decodedLen] = 0;
-+        if (decodedLen != 0 && strcmp(decoded, hostPlayerName) == 0)
-+            return CopyTitleId("0100D71004694000", outTitleId, outN);
-+    }
-+
-+    return false;
-+}
-+
-+} // namespace MonitorTitleResolver
-diff --git a/overlay/tests/monitor_player_filter_test.cpp b/overlay/tests/monitor_player_filter_test.cpp
-new file mode 100644
-index 0000000..bd1fe8d
---- /dev/null
-+++ b/overlay/tests/monitor_player_filter_test.cpp
-@@ -0,0 +1,29 @@
-+#include "../source/monitor_player_filter.hpp"
-+
-+#include <cassert>
-+
-+int main() {
-+    using MonitorPlayerFilter::IncludeNode;
-+
-+    /* Older schemas without the optional field retain their name list. */
-+    assert(IncludeNode(false, nullptr));
-+    assert(IncludeNode(false, "false"));
-+
-+    /* Current GraphQL/REST schemas include only live nodes. */
-+    assert(IncludeNode(true, "true"));
-+    assert(IncludeNode(true, " true ,"));
-+    assert(!IncludeNode(true, "false"));
-+    assert(!IncludeNode(true, "false}"));
-+    assert(!IncludeNode(true, "null"));
-+    assert(!IncludeNode(true, nullptr));
-+    assert(!IncludeNode(true, "trueish"));
-+
-+    /* UDP NetworkInfo is a fixed-size node array; stale entries at indices
-+     * beyond nodeCount must not leak names from earlier room occupants. */
-+    using MonitorPlayerFilter::IncludeConnectedSlot;
-+    assert(IncludeConnectedSlot(0, 1, true));
-+    assert(!IncludeConnectedSlot(1, 1, true));
-+    assert(!IncludeConnectedSlot(0, 1, false));
-+    assert(!IncludeConnectedSlot(0, 0, true));
-+    return 0;
-+}
-diff --git a/overlay/tests/monitor_target_generation_test.cpp b/overlay/tests/monitor_target_generation_test.cpp
-new file mode 100644
-index 0000000..a0e003f
---- /dev/null
-+++ b/overlay/tests/monitor_target_generation_test.cpp
-@@ -0,0 +1,22 @@
-+#include "../source/monitor_target_generation.hpp"
-+
-+#include <cassert>
-+
-+int main() {
-+    MonitorTargetGeneration::Gate gate;
-+
-+    /* A response may publish only while it still owns the latest request. */
-+    const auto shanghaiRequest = gate.Advance();
-+    assert(gate.IsCurrent(shanghaiRequest));
-+
-+    /* Switching to another server invalidates the in-flight old response. */
-+    const auto denmarkRequest = gate.Advance();
-+    assert(!gate.IsCurrent(shanghaiRequest));
-+    assert(gate.IsCurrent(denmarkRequest));
-+
-+    /* A later refresh supersedes even a same-target response. */
-+    const auto newerRefresh = gate.Advance();
-+    assert(!gate.IsCurrent(denmarkRequest));
-+    assert(gate.IsCurrent(newerRefresh));
-+    return 0;
-+}
-diff --git a/overlay/tests/monitor_title_resolver_test.cpp b/overlay/tests/monitor_title_resolver_test.cpp
-new file mode 100644
-index 0000000..f716702
---- /dev/null
-+++ b/overlay/tests/monitor_title_resolver_test.cpp
-@@ -0,0 +1,49 @@
-+#include "../source/monitor_title_resolver.hpp"
-+
-+#include <assert.h>
-+#include <string.h>
-+
-+using MonitorTitleResolver::ResolveAdvertisedTitleId;
-+
-+static void ExpectResolved(const char *advertiseData, const char *hostName,
-+                          const char *expectedTitleId) {
-+    char titleId[17] = {};
-+    assert(ResolveAdvertisedTitleId(advertiseData, hostName,
-+                                    titleId, sizeof(titleId)));
-+    assert(strcmp(titleId, expectedTitleId) == 0);
-+}
-+
-+static void ExpectUnresolved(const char *advertiseData, const char *hostName) {
-+    char titleId[17] = "not-a-title-id";
-+    assert(!ResolveAdvertisedTitleId(advertiseData, hostName,
-+                                     titleId, sizeof(titleId)));
-+    assert(titleId[0] == 0);
-+}
-+
-+int main() {
-+    ExpectResolved("ffff0000", nullptr, "0100A250097F0000");
-+    ExpectResolved("7b7d", nullptr, "01005EE0036EC000");
-+    ExpectResolved("00000000081000008b9000"
-+                   "00000004"
-+                   "1234"
-+                   "00000004"
-+                   "5678",
-+                   nullptr, "0100B04011742000");
-+    ExpectResolved("00000000081000000a0000"
-+                   "00000004"
-+                   "1234",
-+                   nullptr, "0100E21011446000");
-+    ExpectResolved("00112233445566778899aabbccddeeff4d6961", "Mia",
-+                   "0100D71004694000");
-+
-+    /* Case/spacing normalization is harmless, while partial signatures are
-+     * not promoted to a title. Unknown sentinels must remain unknown. */
-+    ExpectResolved("FF FF 00 00", nullptr, "0100A250097F0000");
-+    ExpectUnresolved("00000000081000008b9000"
-+                     "00000004"
-+                     "1234",
-+                     nullptr); // Rise signature is missing its second delimiter.
-+    ExpectUnresolved("00112233445566778899aabbccddeeff4d6961", "Not-Mia");
-+    ExpectUnresolved("11223344", nullptr);
-+    return 0;
-+}
