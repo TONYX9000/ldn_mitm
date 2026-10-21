@@ -1,4 +1,4 @@
-From 38ba9b79ec3eafb4949f8a9351f41cd14a3b3b87 Mon Sep 17 00:00:00 2001
+From dab47171500a6630b96db7119b138b76f72aa308 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH] overlay: online counts/room list and relay management
@@ -396,7 +396,7 @@ index da2bd21..a08980f 100644
  #---------------------------------------------------------------------------------
  # list of directories containing libraries, this must be the top level containing
 diff --git a/overlay/source/main.cpp b/overlay/source/main.cpp
-index 8e07c19..a063b4c 100644
+index 8e07c19..698fb91 100644
 --- a/overlay/source/main.cpp
 +++ b/overlay/source/main.cpp
 @@ -1,6 +1,8 @@
@@ -1217,12 +1217,12 @@ index 8e07c19..a063b4c 100644
 -                         (vaddr >> 24) & 0xff, (vaddr >> 16) & 0xff,
 -                         (vaddr >> 8) & 0xff, vaddr & 0xff, vaddr & 0xffff);
 -                list->addItem(new tsl::elm::ListItem(T("虚拟地址", "虛擬位址"), buf));
-+        // 所有服务器的在线/房间/延迟在每次刷新完成后间隔 3 秒同步批量刷新下一轮。
++        // 所有服务器的在线/房间/延迟每 1 秒与当前选中服务器同步批量刷新一轮。
 +        if (g_visible && g_state == State::Loaded) {
 +            u64 nowNs = armTicksToNs(armGetSystemTick());
-+            if (g_lastPollNs == 0 || snap.busy)
++            if (g_lastPollNs == 0)
 +                g_lastPollNs = nowNs;
-+            if (nowNs - g_lastPollNs >= 3000000000ull) {
++            if (nowNs - g_lastPollNs >= 1000000000ull) {
 +                g_lastPollNs = nowNs;
 +                MonitorRequestPoll();
 +            }
