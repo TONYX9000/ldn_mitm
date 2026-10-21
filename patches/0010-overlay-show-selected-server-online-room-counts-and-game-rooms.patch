@@ -1,4 +1,4 @@
-From 835557db1e7e630d81ea3751b336389bf558bf0f Mon Sep 17 00:00:00 2001
+From 38ba9b79ec3eafb4949f8a9351f41cd14a3b3b87 Mon Sep 17 00:00:00 2001
 From: Patch Port <port@local>
 Date: Mon, 19 Oct 2026 13:36:38 +0000
 Subject: [PATCH] overlay: online counts/room list and relay management
@@ -1716,7 +1716,7 @@ index 8e07c19..a063b4c 100644
          return initially<MainGui>();  // Initial Gui to load. It's possible to pass arguments to it's constructor like this
 diff --git a/overlay/source/monitor.cpp b/overlay/source/monitor.cpp
 new file mode 100644
-index 0000000..52e1963
+index 0000000..62a5e73
 --- /dev/null
 +++ b/overlay/source/monitor.cpp
 @@ -0,0 +1,3998 @@
@@ -3894,18 +3894,18 @@ index 0000000..52e1963
 +}
 +
 +/* ------------------------------------------------------------------ */
-+/* 房间过期缓存 (未扫到后保留 3 秒以上,彻底消除偶发丢包导致房间闪隐)     */
++/* 房间过期缓存 (未扫到后保留 10 秒,彻底消除偶发丢包导致房间闪隐)       */
 +/* ------------------------------------------------------------------ */
 +
 +/* 查询/UDP 扫描都有偶发丢包与瞬间空列表(日志里 scan rooms=0/1 交替),
 + * 直接把当次结果写进快照会让房间列表一会儿消失一会儿出现。
 + * 缓存以 sessionId 为键:
 + *   - 命中即刷新 lastSeen 并清空 missingSince;
-+ *   - 某轮未扫到时先记录首次缺失时刻 missingSince,从缺失时刻起再保留 3 秒
-+ *     (kRoomExpireGrace = 3s),若下一轮重新扫到则无缝恢复,彻底消除单次丢包闪退;
-+ *   - 当服务器在线人数已归零(online == 0 且无房间)或切换服务器时清空。 */
-+static constexpr auto kRoomTtl         = std::chrono::seconds(8);
-+static constexpr auto kRoomExpireGrace = std::chrono::seconds(3);
++ *   - 某轮未扫到时先记录首次缺失时刻 missingSince,从缺失时刻起再保留 10 秒
++ *     (kRoomExpireGrace = 10s),若期间重新扫到则无缝恢复,彻底消除偶发丢包闪退;
++ *   - 切换服务器时清空。 */
++static constexpr auto kRoomTtl         = std::chrono::seconds(12);
++static constexpr auto kRoomExpireGrace = std::chrono::seconds(10);
 +
 +struct RoomCacheEnt {
 +    bool used = false;
@@ -4357,8 +4357,8 @@ index 0000000..52e1963
 +static constexpr int  kBatchHttpSlots    = 6;
 +static constexpr int  kBatchHttpMs       = 1200;
 +static constexpr int  kBatchScanMs       = 850;
-+static constexpr u64  kStatKeepOnFailMs  = 8000;
-+static constexpr u64  kRoomExpireGraceMs = 3000;
++static constexpr u64  kStatKeepOnFailMs  = 10000;
++static constexpr u64  kRoomExpireGraceMs = 10000;
 +
 +struct ServerStat {
 +    char name[32];
@@ -4368,7 +4368,7 @@ index 0000000..52e1963
 +    s32  latencyMs;     /* 0 = 未知 */
 +    u64  stampMs;       /* 上次测量时刻;0 = 从未测过 */
 +    u64  lastScanMs;    /* 上次向该服发送 UDP kScanFrame 的时刻(用于扣除自身扫描器占用的 1 个在线名额) */
-+    u64  roomMissingSinceMs; /* 房间首次未扫到的时刻;保留 3 秒过期缓存防闪烁 */
++    u64  roomMissingSinceMs; /* 房间首次未扫到的时刻;保留 10 秒过期缓存防闪烁 */
 +    u8   proto;         /* ServerProto: 缓存 graphql/rest 类型 */
 +    u8   failCount;     /* 连续失败次数 */
 +};
