@@ -2623,7 +2623,7 @@ static void DoRefresh(const char *nameOverride, bool reloadSubs,
                              T_STR("网络初始化失败", "網絡初始化失敗"));
                 else
                     snprintf(g_snap.status, sizeof(g_snap.status), "%s",
-                             T_STR("该服务器无房间信息", "該伺服器無房間資訊"));
+                             T_STR("暂无房间", "暫無房間"));
             } else if (n == 0) {
                 snprintf(g_snap.status, sizeof(g_snap.status), "%s",
                          T_STR("暂无房间", "暫無房間"));
@@ -2654,9 +2654,9 @@ static void DoRefresh(const char *nameOverride, bool reloadSubs,
 /* ------------------------------------------------------------------ */
 
 static constexpr u32  kStatMaxServers    = MONITOR_MAX_SERVERS;
-static constexpr int  kBatchHttpSlots    = 6;
-static constexpr int  kBatchHttpMs       = 1200;
-static constexpr int  kBatchScanMs       = 850;
+static constexpr int  kBatchHttpSlots    = 8;
+static constexpr int  kBatchHttpMs       = 700;
+static constexpr int  kBatchScanMs       = 650;
 static constexpr u64  kStatKeepOnFailMs  = 10000;
 static constexpr u64  kRoomExpireGraceMs = 10000;
 
@@ -3776,7 +3776,7 @@ static void StatsCommitBatchLocked(const char *selHost, u16 selPort,
                 st.online = selOnline;
                 st.rooms = selRooms;
                 st.roomMissingSinceMs = 0;
-                if (selLat > 0)
+                if (selLat > 0 && (st.latencyMs <= 0 || selLat <= st.latencyMs * 2))
                     st.latencyMs = selLat;
                 st.stampMs = nowMs;
             } else if (b.httpOk || (b.didScan && b.rooms > 0)) {
@@ -3803,7 +3803,7 @@ static void StatsCommitBatchLocked(const char *selHost, u16 selPort,
                     st.roomMissingSinceMs = 0;
                     st.online = b.online;
                 }
-                if (b.latMs > 0)
+                if (b.latMs > 0 && (st.latencyMs <= 0 || b.latMs <= st.latencyMs * 2))
                     st.latencyMs = b.latMs;
                 st.stampMs = nowMs;
             } else {

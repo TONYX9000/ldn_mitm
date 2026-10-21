@@ -879,6 +879,17 @@ public:
  * 已经维护好的统计表(MonitorListServerStats),不额外开扫描线程。 */
 /* 单台服务器的房间明细页:数据来自 MonitorCopyServerRooms(每 3 秒的批量
  * 刷新顺带存下来的房间表),和主界面同源,不用为它单独发一轮查询。 */
+/* 子页面(全部服务器 / 房间明细)自己也要触发刷新:
+ * 主界面的 update() 在上面盖着的时候不会跑,不主动轮询的话页面上的数字会冻结。 */
+static void PollThrottled() {
+    static u64 last = 0;
+    u64 now = armTicksToNs(armGetSystemTick());
+    if (last == 0 || now - last >= 1000000000ull) {
+        last = now;
+        MonitorRequestPoll();
+    }
+}
+
 class ServerRoomsGui : public tsl::Gui {
 public:
     explicit ServerRoomsGui(std::string name, std::string addr)
@@ -900,6 +911,7 @@ public:
     }
 
     virtual void update() override {
+        PollThrottled();
         s32 online = -1;
         const u32 n = MonitorCopyServerRooms(m_addr.c_str(), m_rooms, MONITOR_ALL_ROOMS_MAX, &online);
         const bool changed = (n != m_prevN) || (online != m_prevOnline) ||
@@ -919,8 +931,7 @@ public:
         for (u32 i = 0; i < m_rows.size(); i++) {
             if (n == 0) {
                 if (i == 0)
-                    m_rows[i]->setHint(online < 0 ? T("该服务器无房间信息", "該伺服器無房間資訊")
-                                                  : T("暂无房间", "暫無房間"));
+                    m_rows[i]->setHint(T("暂无房间", "暫無房間"));
                 else
                     m_rows[i]->clearRow();
             } else if (i < n) {
@@ -1000,6 +1011,7 @@ public:
     virtual void update() override {
         if (m_rows.empty())
             return;
+        PollThrottled();
         static MonitorServerStat stats[MONITOR_MAX_SERVERS];
         const u32 n = MonitorListServerStats(stats, MONITOR_MAX_SERVERS);
         for (auto *row : m_rows) {
