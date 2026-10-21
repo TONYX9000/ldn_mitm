@@ -241,6 +241,22 @@ static bool  g_pendingQuiet = false;
 /* 后台线程是否正在跑一次查询:界面据此跳过一次轮询,避免请求连成串。 */
 static std::atomic<bool> g_queryBusy{false};
 
+/* --- 全部服务器总览（阿东版新增；一次只跑一个扫描，不常驻） --- */
+static MonitorAllSnapshot g_all;
+static std::atomic<bool> g_allMode{false};    /* 当前请求是否为“全部扫描” */
+static std::atomic<bool> g_allForce{false};   /* 忽略负缓存 */
+static std::atomic<u32>  g_allLimit{0};       /* 0 = relay.cfg 全部 */
+static std::atomic<bool> g_allCancel{false};
+static std::atomic<u32>  g_allGen{0};         /* 每次 RequestAll +1，识别“扫描中被新请求顶掉” */
+/* 单台查询超时：总览扫描时缩短到 1.8 秒，避免 17 台拖到一两分钟。 */
+static int g_queryTimeoutMs = 6000;
+
+/* 负缓存：某台本次超时，10 分钟内不再查（force 刷新会忽略）。 */
+static constexpr int kNegMax = 32;
+static constexpr u64 kNegTtlTicks = 19200000ull * 600;  /* 10 分钟 */
+static char g_negAddr[kNegMax][64];
+static u64  g_negTick[kNegMax];
+
 #define T_STR(hans, hant) (g_traditional.load() ? (hant) : (hans))
 
 /* 服务器列表:servers.json 已彻底移除,只读 relay.cfg(见 MonitorListRelayServers)。 */
@@ -1821,7 +1837,7 @@ static bool QueryGraphqlRequest(const char *host, u16 port,
     payload += query;                    /* 查询串无引号/反斜杠,可直接拼接 */
     payload += "\"}";
     std::string resp;
-    const bool httpOk = HttpPostJson(url, payload.c_str(), &resp, 6000, kMaxHttpBody);
+    const bool httpOk = HttpPostJson(url, payload.c_str(), &resp, g_queryTimeoutMs, kMaxHttpBody);
     GraphqlFieldFailure failure = GraphqlResponseFailure(resp.c_str(), fields);
     if (!httpOk) {
         /* A JSON GraphQL validation body can identify missing schema fields.
@@ -2053,7 +2069,7 @@ static bool QueryRest(const char *host, u16 port, QueryResult *qr) {
     char url[160];
     snprintf(url, sizeof(url), "http://%s:%u/info", host, (unsigned)port);
     std::string resp;
-    if (!HttpGet(url, &resp, 6000, kMaxHttpBody))
+    if (!HttpGet(url, &resp, g_queryTimeoutMs, kMaxHttpBody))
         return false;
     const char *root = JsWs(SkipBom(resp.c_str()));
     u32 v = 0;
@@ -2721,6 +2737,208 @@ static void DoRefresh(const char *nameOverride, bool reloadSubs,
 }
 
 /* ------------------------------------------------------------------ */
+/* 全部服务器扫描（阿东版新增）                                       */
+/* ------------------------------------------------------------------ */
+
+static bool NegSkipped(const char *addr) {
+    const u64 now = svcGetSystemTick();
+    for (int i = 0; i < kNegMax; i++) {
+        if (g_negAddr[i][0] != 0 && strcmp(g_negAddr[i], addr) == 0) {
+            return (now - g_negTick[i]) < kNegTtlTicks;
+        }
+    }
+    return false;
+}
+
+static void NegMark(const char *addr, bool ok) {
+    for (int i = 0; i < kNegMax; i++) {
+        if (g_negAddr[i][0] != 0 && strcmp(g_negAddr[i], addr) == 0) {
+            if (ok) {
+                g_negAddr[i][0] = 0;
+            }
+            return;
+        }
+    }
+    if (ok) {
+        return;
+    }
+    int slot = -1;
+    for (int i = 0; i < kNegMax; i++) {
+        if (g_negAddr[i][0] == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        slot = 0;
+        for (int i = 1; i < kNegMax; i++) {
+            if (g_negTick[i] < g_negTick[slot]) {
+                slot = i;
+            }
+        }
+    }
+    snprintf(g_negAddr[slot], sizeof(g_negAddr[slot]), "%s", addr);
+    g_negTick[slot] = svcGetSystemTick();
+}
+
+static void SplitAddr(const char *addr, char *host, size_t hostN, u16 *port) {
+    snprintf(host, hostN, "%s", addr ? addr : "");
+    *port = 11451;
+    char *colon = strrchr(host, ':');
+    if (colon != nullptr) {
+        *colon = '\0';
+        const int p = atoi(colon + 1);
+        if (p > 0 && p <= 65535) {
+            *port = static_cast<u16>(p);
+        }
+    }
+}
+
+static void DoAllScan() {
+    const u32 myGen = g_allGen.load();
+    MonitorServer list[MONITOR_ALL_MAX] = {};
+    const u32 available = MonitorListRelayServers(list, MONITOR_ALL_MAX);
+    u32 limit = g_allLimit.load();
+    if (limit == 0 || limit > available) {
+        limit = available;
+    }
+
+    {
+        std::scoped_lock lk(g_mutex);
+        g_all.limit = limit;
+        g_all.done = 0;
+        g_all.busy = true;
+        for (u32 i = 0; i < MONITOR_ALL_MAX; i++) {
+            MonitorAllServer &s = g_all.servers[i];
+            memset(&s, 0, sizeof(s));
+            s.online = -1;
+            s.roomCount = -1;
+            s.state = 0;
+            if (i < limit) {
+                snprintf(s.name, sizeof(s.name), "%s", list[i].name);
+                snprintf(s.addr, sizeof(s.addr), "%s", list[i].addr);
+            }
+        }
+        g_all.version++;
+    }
+
+    const bool force = g_allForce.load();
+    g_queryTimeoutMs = 2000;
+
+    for (u32 i = 0; i < limit; i++) {
+        if (g_exit.load() || g_allCancel.load() || !g_allMode.load() ||
+            g_allGen.load() != myGen) {
+            break;
+        }
+
+        char addr[64] = {};
+        {
+            std::scoped_lock lk(g_mutex);
+            snprintf(addr, sizeof(addr), "%s", g_all.servers[i].addr);
+        }
+        char host[64] = {};
+        u16 port = 11451;
+        SplitAddr(addr, host, sizeof(host), &port);
+
+        if (!force && NegSkipped(addr)) {
+            std::scoped_lock lk(g_mutex);
+            g_all.servers[i].state = 4;
+            g_all.done++;
+            g_all.version++;
+            continue;
+        }
+
+        {
+            std::scoped_lock lk(g_mutex);
+            g_all.servers[i].state = 1;
+            g_all.version++;
+        }
+
+        static QueryResult qr;      /* 约 10KB，别压在 worker 栈上 */
+        qr = QueryResult{};
+        bool ok = QueryGraphql(host, port, &qr);
+        if (!ok) {
+            ok = QueryRest(host, port, &qr);
+        }
+        if (!ok || qr.roomN == 0) {
+            const u32 roomsBefore = qr.roomN;
+            UdpRoomScan(host, port, &qr);
+            if (ok || qr.roomN > 0 || qr.online >= 0) {
+                ok = true;
+                if (qr.roomN == 0) {
+                    qr.roomN = roomsBefore;
+                }
+            }
+        }
+
+        {
+            std::scoped_lock lk(g_mutex);
+            MonitorAllServer &s = g_all.servers[i];
+            s.online = ok ? qr.online : -1;
+            s.roomCount = ok ? static_cast<s32>(qr.roomN) : -1;
+            s.roomN = qr.roomN < MONITOR_ALL_ROOMS_MAX ? qr.roomN : MONITOR_ALL_ROOMS_MAX;
+            for (u32 k = 0; k < s.roomN; k++) {
+                s.rooms[k] = qr.rooms[k];
+            }
+            s.state = ok ? 2 : 3;
+            g_all.done++;
+            g_all.version++;
+        }
+        NegMark(addr, ok);
+        svcSleepThread(0);
+    }
+
+    g_queryTimeoutMs = 6000;
+    {
+        std::scoped_lock lk(g_mutex);
+        g_all.busy = false;
+        g_all.version++;
+    }
+    /* 只有没有更新的请求时才关掉 allMode；否则新请求会被误当成普通刷新。 */
+    if (g_allGen.load() == myGen) {
+        g_allMode.store(false);
+    }
+    MonLog("allscan-done");
+}
+
+void MonitorRequestAll(u32 limit, bool force) {
+    /* 先把“这次要查几台”算出来，UI 一打开就能建出正确行数（0 = 全部）。 */
+    MonitorServer list[MONITOR_ALL_MAX] = {};
+    const u32 available = MonitorListRelayServers(list, MONITOR_ALL_MAX);
+    const u32 shown = (limit == 0 || limit > available) ? available : limit;
+    {
+        std::scoped_lock lk(g_mutex);
+        g_all.limit = shown;
+        g_all.done = 0;
+        g_all.busy = true;
+        g_all.version++;
+        for (u32 i = 0; i < MONITOR_ALL_MAX; i++) {
+            MonitorAllServer &s = g_all.servers[i];
+            s.online = -1;
+            s.roomCount = -1;
+            s.roomN = 0;
+            s.state = 0;
+        }
+    }
+    g_allLimit.store(limit);
+    g_allForce.store(force);
+    g_allCancel.store(false);
+    g_allGen.fetch_add(1);
+    g_allMode.store(true);
+    g_reqGen.fetch_add(1);
+}
+
+void MonitorAllCancel() {
+    g_allCancel.store(true);
+    g_allMode.store(false);
+}
+
+void MonitorCopyAllSnapshot(MonitorAllSnapshot *out) {
+    std::scoped_lock lk(g_mutex);
+    *out = g_all;
+}
+
+/* ------------------------------------------------------------------ */
 /* 后台线程(libnx 线程,风格同 libtesla)                               */
 /* ------------------------------------------------------------------ */
 
@@ -2742,8 +2960,12 @@ static void MonitorWorker(void *) {
                 g_pendingQuiet = false;
                 targetGen = g_targetGen.Capture();
             }
-            DoRefresh(name[0] ? name : nullptr, subs, targetGen, quiet);
-            MonLog("refresh-done");
+            if (g_allMode.load()) {
+                DoAllScan();
+            } else {
+                DoRefresh(name[0] ? name : nullptr, subs, targetGen, quiet);
+                MonLog("refresh-done");
+            }
         } else {
             svcSleepThread(50'000'000);      /* 50ms */
         }
@@ -2824,6 +3046,8 @@ void MonitorRequestRefresh(const char *serverName) {
     g_targetGen.Advance();
     ResetSnapshotForRequestLocked(
         serverName, T_STR("正在刷新服务器…", "正在刷新伺服器…"));
+    g_allCancel.store(true);
+    g_allMode.store(false);
     g_reqGen.fetch_add(1);
 }
 
@@ -2834,6 +3058,8 @@ void MonitorRequestSwitch(const char *serverName) {
     g_targetGen.Advance();
     ResetSnapshotForRequestLocked(
         serverName, T_STR("正在切换服务器…", "正在切換伺服器…"));
+    g_allCancel.store(true);
+    g_allMode.store(false);
     g_reqGen.fetch_add(1);
 }
 
@@ -2841,6 +3067,8 @@ void MonitorRequestPoll() {
     /* 周期刷新(与延迟 ping 同节奏):不动目标、不拉订阅,也不覆盖快照 */
     std::scoped_lock lk(g_mutex);
     g_pendingQuiet = true;
+    g_allCancel.store(true);
+    g_allMode.store(false);
     g_reqGen.fetch_add(1);
 }
 
