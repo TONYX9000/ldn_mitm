@@ -877,6 +877,72 @@ public:
 /* 「全部服务器」页:一屏看完全部中继的在线/房间/延迟,按 A 切到那一台
  * 再回主界面看它的房间。行直接复用主界面的 ServerRow,数值取 sysmodule
  * 已经维护好的统计表(MonitorListServerStats),不额外开扫描线程。 */
+/* 单台服务器的房间明细页:数据来自 MonitorCopyServerRooms(每 3 秒的批量
+ * 刷新顺带存下来的房间表),和主界面同源,不用为它单独发一轮查询。 */
+class ServerRoomsGui : public tsl::Gui {
+public:
+    explicit ServerRoomsGui(std::string name, std::string addr)
+        : m_name(std::move(name)), m_addr(std::move(addr)) {}
+
+    virtual tsl::elm::Element *createUI() override {
+        auto frame = new MonitorFrame(m_name);
+        auto *list = new RebuildList();
+        m_header = new tsl::elm::CategoryHeader("");
+        list->addItem(m_header);
+        for (u32 i = 0; i < MONITOR_ALL_ROOMS_MAX; i++) {
+            auto *row = new RoomRow();
+            row->clearRow();
+            m_rows.push_back(row);
+            list->addItem(row);
+        }
+        frame->setContent(list);
+        return frame;
+    }
+
+    virtual void update() override {
+        static MonitorRoom rooms[MONITOR_ALL_ROOMS_MAX];
+        static MonitorRoom prev[MONITOR_ALL_ROOMS_MAX];
+        static u32 prevN = 0xFFFFFFFFu;
+        static s32 prevOnline = -2;
+
+        s32 online = -1;
+        const u32 n = MonitorCopyServerRooms(m_addr.c_str(), rooms, MONITOR_ALL_ROOMS_MAX, &online);
+        const bool changed = (n != prevN) || (online != prevOnline) ||
+                             (n > 0 && memcmp(rooms, prev, n * sizeof(MonitorRoom)) != 0);
+        if (!changed)
+            return;
+        prevN = n;
+        prevOnline = online;
+        if (n > 0)
+            memcpy(prev, rooms, n * sizeof(MonitorRoom));
+
+        char hdr[80];
+        snprintf(hdr, sizeof(hdr), T("在线 %d · 房间 %u", "線上 %d · 房間 %u"),
+                 online < 0 ? 0 : (int)online, (unsigned)n);
+        m_header->setText(hdr);
+
+        for (u32 i = 0; i < m_rows.size(); i++) {
+            if (n == 0) {
+                if (i == 0)
+                    m_rows[i]->setHint(online < 0 ? T("该服务器无房间信息", "該伺服器無房間資訊")
+                                                  : T("暂无房间", "暫無房間"));
+                else
+                    m_rows[i]->clearRow();
+            } else if (i < n) {
+                m_rows[i]->setRoom(rooms[i]);
+            } else {
+                m_rows[i]->clearRow();
+            }
+        }
+    }
+
+private:
+    std::string m_name;
+    std::string m_addr;
+    tsl::elm::CategoryHeader *m_header = nullptr;
+    std::vector<RoomRow *> m_rows;
+};
+
 class AllServersGui : public tsl::Gui {
 public:
     virtual tsl::elm::Element* createUI() override {
@@ -884,7 +950,7 @@ public:
         auto *list = new RebuildList();
 
         list->addItem(new tsl::elm::CategoryHeader(
-            T("按 A 切换到该服务器 · B 返回", "按 A 切換到該伺服器 · B 返回")));
+            T("A 看房间 · X 切到此服 · B 返回", "A 看房間 · X 切到此服 · B 返回")));
 
         u32 count = 0;
         if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count)))
@@ -914,7 +980,10 @@ public:
             auto *row = new ServerRow();
             row->setServer(i, name, addr);
             row->setSelected(i == selected);
-            row->setActivateListener([i, name = std::string(name)]() {
+            row->setActivateListener([name = std::string(name), addr = std::string(addr)]() {
+                tsl::changeTo<ServerRoomsGui>(name, addr);
+            });
+            row->setDeleteListener([i, name = std::string(name)]() {
                 if (R_SUCCEEDED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
                     g_main_list_dirty = true;
                     MonitorRequestSwitch(name.c_str());
@@ -1202,10 +1271,10 @@ static void buildList(tsl::elm::List *list) {
         // Release signature. Kept at the very bottom so it never gets in
         // the way of the settings, but every user scrolling down sees it.
         list->addItem(new tsl::elm::CategoryHeader(T("关于", "關於")));
-        list->addItem(new tsl::elm::ListItem(T("制作", "製作"), T("阿东 & 大肥鱼", "阿東 & 大肥魚")));
+        list->addItem(new tsl::elm::ListItem(T("整合", "整合"), T("阿东 & 大肥鱼", "阿東 & 大肥魚")));
         list->addItem(new tsl::elm::ListItem(T("版本", "版本"), g_version));
-        list->addItem(new tsl::elm::ListItem(T("房间监控", "房間監控"),
-                                             T("Zero（jieluojun）", "Zero（jieluojun）")));
+        list->addItem(new tsl::elm::ListItem(T("基于", "基於"),
+                                     T("Zero（jieluojun）", "Zero（jieluojun）")));
         list->addItem(new tsl::elm::ListItem(T("声明", "聲明"), T("免费分享 禁止倒卖", "免費分享 禁止轉賣")));
     }
 

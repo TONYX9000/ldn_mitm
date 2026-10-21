@@ -2673,6 +2673,10 @@ struct ServerStat {
 
 static ServerStat g_stats[kStatMaxServers];
 static u32 g_statCount = 0;
+/* 每台服务器最近一次查询到的房间明细(最多 MONITOR_ALL_ROOMS_MAX 间),
+   给「全部服务器」页的看房间用;批量刷新成功就覆盖,失败保留上一次。 */
+static MonitorRoom g_srvRooms[kStatMaxServers][MONITOR_ALL_ROOMS_MAX];
+static u8          g_srvRoomN[kStatMaxServers];
 static char g_statCfgKey[64];        /* 服务器列表指纹,仅在条目增删改时更新表 */
 static int g_scanUdpFd = -1;         /* 持久化复用同一个 UDP 扫描端口,避免每次扫描在服务端新增临时客户端 */
 static int g_selScanUdpFd = -1;      /* 选中服务器专用持久 connect() UDP 扫描端口 */
@@ -3077,6 +3081,17 @@ static void BatchUdpRoomScan(BatchServerItem *items, const u32 *scanIdxs, u32 sc
     if (scanN == 0 || IoAbort())
         return;
 
+    /* 扫描结果是新的:先清掉本轮要扫的服务器(选中服除外,它走 selQr)的旧房间表。 */
+    {
+        std::scoped_lock lk(g_mutex);
+        for (u32 s = 0; s < scanN; s++) {
+            u32 idx = scanIdxs[s];
+            if ((s32)idx == selIdx || idx >= kStatMaxServers)
+                continue;
+            g_srvRoomN[idx] = 0;
+        }
+    }
+
     s32 selScanSlot = -1;
     for (u32 s = 0; s < scanN; s++) {
         if ((s32)scanIdxs[s] == selIdx) {
@@ -3178,8 +3193,14 @@ static void BatchUdpRoomScan(BatchServerItem *items, const u32 *scanIdxs, u32 sc
 
         items[idx].rooms++;
         udpOnline[matchS] += (room.players > 0) ? (s32)room.players : 1;
-        if ((s32)idx == selIdx && selQr && selQr->roomN < MONITOR_MAX_ROOMS)
+        if ((s32)idx == selIdx && selQr && selQr->roomN < MONITOR_MAX_ROOMS) {
             selQr->rooms[selQr->roomN++] = room;
+        } else if ((s32)idx != selIdx && idx < kStatMaxServers) {
+            std::scoped_lock lk(g_mutex);
+            u8 &rn = g_srvRoomN[idx];
+            if (rn < MONITOR_ALL_ROOMS_MAX)
+                g_srvRooms[idx][rn++] = room;
+        }
     };
 
     while (std::chrono::steady_clock::now() < deadline && !IoAbort()) {
@@ -3502,6 +3523,17 @@ static void RefreshAllServersBatch(const char *selHost, u16 selPort,
             g_batch[idx].httpErr = 0;
             g_batch[idx].online = targetQr->online;
             g_batch[idx].rooms = (s32)targetQr->roomN;
+            /* 顺手把这台的房间明细存下来,给「全部服务器 → 看房间」用。 */
+            {
+                std::scoped_lock lk(g_mutex);
+                u32 rn = targetQr->roomN;
+                if (rn > MONITOR_ALL_ROOMS_MAX)
+                    rn = MONITOR_ALL_ROOMS_MAX;
+                for (u32 r = 0; r < rn; r++)
+                    g_srvRooms[idx][r] = targetQr->rooms[r];
+                if (idx < kStatMaxServers)
+                    g_srvRoomN[idx] = (u8)rn;
+            }
             g_batch[idx].proto = sl.restMode ? ProtoRest : ProtoGraphql;
         } else {
             g_batch[idx].httpErr = parseErr;
@@ -3862,6 +3894,27 @@ u32 MonitorListServerStats(MonitorServerStat *out, u32 max) {
         n++;
     }
     return n;
+}
+
+u32 MonitorCopyServerRooms(const char *addr, MonitorRoom *out, u32 max, s32 *onlineOut) {
+    if (onlineOut)
+        *onlineOut = -1;
+    if (!addr || !out || max == 0)
+        return 0;
+    std::scoped_lock lk(g_mutex);
+    for (u32 k = 0; k < g_statCount && k < kStatMaxServers; k++) {
+        if (strcmp(g_stats[k].addr, addr) != 0)
+            continue;
+        if (onlineOut)
+            *onlineOut = g_stats[k].online;
+        u32 n = g_srvRoomN[k];
+        if (n > max)
+            n = max;
+        for (u32 r = 0; r < n; r++)
+            out[r] = g_srvRooms[k][r];
+        return n;
+    }
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */

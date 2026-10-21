@@ -17,6 +17,7 @@
 #define MONITOR_MAX_ROOMS  32
 #define MONITOR_MAX_SERVERS 32
 #define MONITOR_MAX_PLAYERS 8
+#define MONITOR_ALL_ROOMS_MAX 8
 #define MONITOR_PLAYER_LEN  32
 
 struct MonitorRoom {
@@ -76,6 +77,10 @@ struct MonitorServerStat {
 
 /* 读当前统计表(按 relay.cfg 顺序,与服务器行一一对应)。 */
 u32 MonitorListServerStats(MonitorServerStat *out, u32 max);
+
+/* 指定服务器(按 addr 匹配)最近一次批量查询得到的房间明细。
+   返回写入 out 的房间数;onlineOut 回传该服在线数(未知为 -1)。 */
+u32 MonitorCopyServerRooms(const char *addr, MonitorRoom *out, u32 max, s32 *onlineOut);
 
 /* 请求一次后台刷新(每次打开 overlay / 切换服务器时调用)。
  * serverName:选中的服务器名(可空,空则读 relay.cfg 的 selected=)。
