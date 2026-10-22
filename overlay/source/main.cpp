@@ -884,7 +884,7 @@ public:
 static void PollThrottled() {
     static u64 last = 0;
     u64 now = armTicksToNs(armGetSystemTick());
-    if (last == 0 || now - last >= 1000000000ull) {
+    if (last == 0 || now - last >= 2000000000ull) {
         last = now;
         MonitorRequestPoll();
     }

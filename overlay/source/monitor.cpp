@@ -2200,10 +2200,10 @@ static void UdpRoomScan(const char *host, u16 port, QueryResult *qr,
  * 缓存以 sessionId 为键:
  *   - 命中即刷新 lastSeen 并清空 missingSince;
  *   - 某轮未扫到时先记录首次缺失时刻 missingSince,从缺失时刻起再保留 10 秒
- *     (kRoomExpireGrace = 10s),若期间重新扫到则无缝恢复,彻底消除偶发丢包闪退;
+ *     (kRoomExpireGrace = 15s),若期间重新扫到则无缝恢复,彻底消除偶发丢包闪退;
  *   - 切换服务器时清空。 */
 static constexpr auto kRoomTtl         = std::chrono::seconds(12);
-static constexpr auto kRoomExpireGrace = std::chrono::seconds(10);
+static constexpr auto kRoomExpireGrace = std::chrono::seconds(15);
 
 struct RoomCacheEnt {
     bool used = false;
@@ -3785,7 +3785,7 @@ static void StatsCommitBatchLocked(const char *selHost, u16 selPort,
                     st.rooms = b.rooms;
                     st.roomMissingSinceMs = 0;
                     st.online = b.online >= b.rooms ? b.online : b.rooms;
-                } else if (st.rooms > 0 && b.rawOnline > 0) {
+                } else if (st.rooms > 0) {
                     /* 其它服务器房间同样享受 3 秒过期缓存,避免偶发 UDP 丢包让房间数闪烁 */
                     if (st.roomMissingSinceMs == 0) {
                         st.roomMissingSinceMs = nowMs;
@@ -3810,9 +3810,10 @@ static void StatsCommitBatchLocked(const char *selHost, u16 selPort,
                 if (b.latMs > 0)
                     st.latencyMs = b.latMs;
                 st.failCount++;
+                /* 偶发超时(海外服 700ms 批量窗口)不要把整行清成『--』:
+                 * 只要 10 秒内有过成功数据就继续显示上一轮的值，UI 不再闪。 */
                 const bool keepRecent = (st.stampMs != 0 && nowMs >= st.stampMs &&
-                                         (nowMs - st.stampMs) <= kStatKeepOnFailMs &&
-                                         st.failCount < 2);
+                                         (nowMs - st.stampMs) <= kStatKeepOnFailMs);
                 if (!keepRecent) {
                     st.online = -1;
                     st.rooms = -1;
