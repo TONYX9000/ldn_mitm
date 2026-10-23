@@ -44,6 +44,11 @@ static bool g_isTraditional = false;
 
 #define T(hans, hant) (g_isTraditional ? (hant) : (hans))
 
+/* 分页菜单（v8.5）：0 = 联机, 1 = 服务器, 2 = 关于。L / R 肩键切换。
+   三页共用同一个 List，切页时整表重建（行都是每页现建的，不会留旧元素）。 */
+static int g_tab = 0;
+static constexpr int kTabCount = 3;
+
 /* The list currently on screen, plus the "restore defaults" row. Both are
    needed after a server is added/removed: libtesla has no per-item refresh,
    so the whole list is rebuilt in place (see rebuildUi()). */
@@ -467,12 +472,17 @@ private:
  *    既裁掉列表滚动时的越界像素,又不会在标题下方或底部叠出纯黑条块。 */
 class MonitorFrame : public tsl::elm::OverlayFrame {
 public:
-    static constexpr u16 kContentY = 75;
+    static constexpr u16 kContentY = 75;      /* 无分页条时的内容起点 */
+    static constexpr u16 kTabContentY = 112;  /* 带分页条时内容下移 */
     static constexpr u16 kTitleBaseline = 50;
     static constexpr float kTitleFont = 30;
 
-    explicit MonitorFrame(const std::string &title)
-        : tsl::elm::OverlayFrame(title, std::string()) {}
+    explicit MonitorFrame(const std::string &title, bool tabs = false)
+        : tsl::elm::OverlayFrame(title, std::string()),
+          m_tabs(tabs), m_contentY(tabs ? kTabContentY : kContentY) {}
+
+    bool m_tabs = false;
+    u16  m_contentY = kContentY;
 
     virtual void draw(tsl::gfx::Renderer *renderer) override {
         using R = tsl::gfx::Renderer;
@@ -486,7 +496,7 @@ public:
 
         /* 抹除列表滚动越界到顶栏/底栏的像素:用 setPixel 直接写底色,
            避免 drawRect(setPixelBlendDst)把 0xD 半透明底色叠成 0xF 纯黑。 */
-        for (s32 y = 0; y < (s32)kContentY - 5; y++) {
+        for (s32 y = 0; y < (s32)this->m_contentY - 5; y++) {
             for (s32 x = 0; x < (s32)tsl::cfg::FramebufferWidth - 1; x++)
                 renderer->setPixel(x, y, bg);
         }
@@ -511,6 +521,26 @@ public:
                                "\uE0E1  返回     \uE0E0  確定"),
                              false, 30, 693, 23,
                              R::a(tsl::style::color::ColorText));
+
+        /* 分页条：联机 / 服务器 / 关于 */
+        if (this->m_tabs) {
+            const char *labels[kTabCount] = {
+                T("联机", "連線"), T("服务器", "伺服器"), T("关于", "關於") };
+            u16 x = 22;
+            for (int i = 0; i < kTabCount; i++) {
+                const bool sel = (i == g_tab);
+                const tsl::Color col = sel ? R::a(tsl::style::color::ColorText)
+                                           : R::a(tsl::style::color::ColorDescription);
+                auto [w, h] = renderer->drawString(labels[i], false, x, 100, 21, col);
+                (void)h;
+                if (sel)
+                    renderer->drawRect(x, 104, w, 2, R::a(tsl::style::color::ColorText));
+                x = (u16)(x + (u16)w + 30);
+            }
+            renderer->drawString(T("L / R 切页", "L / R 切頁"), false,
+                                 tsl::cfg::FramebufferWidth - 150, 100, 18,
+                                 R::a(tsl::style::color::ColorDescription));
+        }
     }
 
     /* 内容区上移:标题下面不再留给副标题行。 */
@@ -518,9 +548,9 @@ public:
                         u16 parentHeight) override {
         this->setBoundaries(parentX, parentY, parentWidth, parentHeight);
         if (this->m_contentElement != nullptr) {
-            this->m_contentElement->setBoundaries(parentX + 35, parentY + kContentY,
+            this->m_contentElement->setBoundaries(parentX + 35, parentY + this->m_contentY,
                                                   parentWidth - 85,
-                                                  parentHeight - 73 - kContentY);
+                                                  parentHeight - 73 - this->m_contentY);
             this->m_contentElement->invalidate();
         }
     }
@@ -687,7 +717,7 @@ public:
         // bundled font has CJK glyphs, so the UI is localised in place.
         // 标题下面不再显示「阿东版 · 版本号」副标题(整行区域已删除),
         // 版本号仍保留在列表底部的「关于」区块里。
-        auto frame = new MonitorFrame(T("联机插件", "連線插件"));
+        auto frame = new MonitorFrame(T("联机插件", "連線插件"), true);
 
         g_list = new RebuildList();
         buildList(g_list);
@@ -779,6 +809,15 @@ public:
     virtual bool handleInput(u64 keysDown, u64 keysHeld, const HidTouchState &touchPos,
                              HidAnalogStickState joyStickPosLeft,
                              HidAnalogStickState joyStickPosRight) override {
+        if (keysDown & (HidNpadButton_L | HidNpadButton_R)) {
+            if (keysDown & HidNpadButton_L)
+                g_tab = (g_tab + kTabCount - 1) % kTabCount;
+            else
+                g_tab = (g_tab + 1) % kTabCount;
+            g_main_list_dirty = false;
+            rebuildUi();
+            return true;
+        }
         if (keysDown & HidNpadButton_B) {
             /* 按 B 返回特斯拉菜单时第一时间通知后台中断网络等待 */
             g_visible = false;
@@ -1084,6 +1123,7 @@ static void buildList(tsl::elm::List *list) {
     } else if (g_state == State::Uninit) {
         list->addItem(new tsl::elm::ListItem(T("错误的状态", "錯誤的狀態")));
     } else {
+        if (g_tab == 0) {
         list->addItem(new ConfigToggleListItem(T("启用", "啟用"), ldnMitmGetEnabled, ldnMitmSetEnabled));
         list->addItem(new ConfigToggleListItem(T("广播转发", "廣播轉發"), ldnMitmGetBroadcastRelay, ldnMitmSetBroadcastRelay));
         list->addItem(new ConfigToggleListItem(T("日志", "日誌"), ldnMitmGetLogging, ldnMitmSetLogging));
@@ -1096,6 +1136,9 @@ static void buildList(tsl::elm::List *list) {
         g_roomHeaderIndex = 5;  // 3 toggles + 2 internet-relay entries
         g_roomHeader = new tsl::elm::CategoryHeader(T("游戏房间", "遊戲房間"));
         list->addItem(g_roomHeader);
+        }   /* 联机页结束 */
+
+        if (g_tab == 1) {
         list->addItem(new tsl::elm::CategoryHeader(
             T("中继服务器（按 A 切换，按 X 删除）", "中繼伺服器（按 A 切換，按 X 刪除）")));
 
@@ -1219,6 +1262,9 @@ static void buildList(tsl::elm::List *list) {
         });
         list->addItem(g_restoreItem);
 
+        }   /* 服务器页结束 */
+
+        if (g_tab == 2) {
         // Show this console's relay identity. relay.cfg only stores the
         // low 16 bits (`id=`), and the plugin assigns one on first use if
         // the line is absent, so this is the only place to read it back.
@@ -1287,6 +1333,7 @@ static void buildList(tsl::elm::List *list) {
         list->addItem(new tsl::elm::ListItem(T("基于", "基於"),
                                      T("Zero（jieluojun）", "Zero（jieluojun）")));
         list->addItem(new tsl::elm::ListItem(T("声明", "聲明"), T("免费分享 禁止倒卖", "免費分享 禁止轉賣")));
+        }   /* 关于页结束 */
     }
 
     // Rebuilt rows start as "-- / -- / --"; force update() to paint them.
