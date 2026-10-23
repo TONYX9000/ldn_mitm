@@ -12,6 +12,7 @@
 #include "monitor_target_generation.hpp"
 
 #include <switch.h>
+#include <malloc.h>
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -2654,7 +2655,7 @@ static void DoRefresh(const char *nameOverride, bool reloadSubs,
 /* ------------------------------------------------------------------ */
 
 static constexpr u32  kStatMaxServers    = MONITOR_MAX_SERVERS;
-static constexpr int  kBatchHttpSlots    = 8;
+static constexpr int  kBatchHttpSlots    = 4;
 static constexpr int  kBatchHttpMs       = 700;
 static constexpr int  kBatchScanMs       = 650;
 static constexpr u64  kStatKeepOnFailMs  = 10000;
@@ -3722,9 +3723,10 @@ static void RefreshAllServersBatch(const char *selHost, u16 selPort,
     /* 收集需要 UDP 房间扫描的服务器:
      *   - 选中服务器:只要 HTTP 未给出房间且(rawOnline > 0 或已有缓存房间或 HTTP 偶发失败),一律做 UDP 扫描;
      *   - 其余服务器:HTTP 成功且未返回房间,同时(online > 0 或上一轮存在房间 prevRooms > 0)时做 UDP 扫描。 */
-    u32 scanIdxs[kStatMaxServers];
+    u32 scanIdxs[kStatMaxServers + 1];
     u32 scanN = 0;
-    if (selIdx >= 0 && g_batch[selIdx].resolved && g_batch[selIdx].rooms <= 0 &&
+    if (selIdx >= 0 && scanN < kStatMaxServers + 1 &&
+        g_batch[selIdx].resolved && g_batch[selIdx].rooms <= 0 &&
         (!g_batch[selIdx].httpOk || g_batch[selIdx].rawOnline > 0 ||
          g_batch[selIdx].online > 0 || g_batch[selIdx].prevRooms > 0)) {
         scanIdxs[scanN++] = (u32)selIdx;
@@ -3732,7 +3734,8 @@ static void RefreshAllServersBatch(const char *selHost, u16 selPort,
     for (u32 i = 0; i < count; i++) {
         /* HTTP 接口不通(不少中继只开 UDP 转发,connect 直接被拒)时也照样扫一遍:
          * LDN 房间信息本来就走 UDP,这是纯增量兜底。 */
-        if ((s32)i != selIdx && g_batch[i].resolved && g_batch[i].rooms <= 0 &&
+        if (scanN < kStatMaxServers + 1 && (s32)i != selIdx &&
+            g_batch[i].resolved && g_batch[i].rooms <= 0 &&
             (!g_batch[i].httpOk || g_batch[i].online > 0 || g_batch[i].prevRooms > 0)) {
             scanIdxs[scanN++] = i;
         }
@@ -3960,6 +3963,16 @@ static void MonitorWorker(void *) {
             }
             DoRefresh(name[0] ? name : nullptr, subs, targetGen);
             MonLog("refresh-done");
+            {
+                /* 每 10 轮记一次堆余量:如果崩溃前它一路下滑,就是内存被吃光/泄漏。 */
+                static u32 s_cycles = 0;
+                if ((++s_cycles % 10u) == 0) {
+                    char hb[64];
+                    snprintf(hb, sizeof(hb), "heap free=%uK",
+                             (unsigned)(mallinfo().fordblks >> 10));
+                    MonLog(hb);
+                }
+            }
         } else {
             svcSleepThread(10'000'000);      /* 10ms:按返回退出时无需等 50ms */
         }

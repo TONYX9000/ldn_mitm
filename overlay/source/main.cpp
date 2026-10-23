@@ -137,7 +137,7 @@ public:
     u16 rowHeight() const {
         if (!m_used)
             return 0;
-        return m_hint ? 44 : kHeight;
+        return kHeight;
     }
 
     virtual void layout(u16, u16, u16, u16) override {
@@ -790,7 +790,7 @@ public:
             u64 nowNs = armTicksToNs(armGetSystemTick());
             if (g_lastPollNs == 0)
                 g_lastPollNs = nowNs;
-            if (nowNs - g_lastPollNs >= 1000000000ull) {
+            if (nowNs - g_lastPollNs >= 3000000000ull) {
                 g_lastPollNs = nowNs;
                 MonitorRequestPoll();
             }
@@ -923,7 +923,7 @@ public:
 static void PollThrottled() {
     static u64 last = 0;
     u64 now = armTicksToNs(armGetSystemTick());
-    if (last == 0 || now - last >= 2000000000ull) {
+    if (last == 0 || now - last >= 3000000000ull) {
         last = now;
         MonitorRequestPoll();
     }
