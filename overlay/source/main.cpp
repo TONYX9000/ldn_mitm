@@ -999,7 +999,8 @@ public:
         auto *list = new RebuildList();
 
         list->addItem(new tsl::elm::CategoryHeader(
-            T("A 看房间 · X 切到此服 · B 返回", "A 看房間 · X 切到此服 · B 返回")));
+            T("A 看房间 · B 返回（切换服务器请回主页面）",
+              "A 看房間 · B 返回（切換伺服器請回主頁面）")));
 
         u32 count = 0;
         if (R_FAILED(ldnMitmGetRelayServerCount(&g_ldnConfig, &count)))
@@ -1031,13 +1032,6 @@ public:
             row->setSelected(i == selected);
             row->setActivateListener([name = std::string(name), addr = std::string(addr)]() {
                 tsl::changeTo<ServerRoomsGui>(name, addr);
-            });
-            row->setDeleteListener([i, name = std::string(name)]() {
-                if (R_SUCCEEDED(ldnMitmSetSelectedRelayServer(&g_ldnConfig, i))) {
-                    g_main_list_dirty = true;
-                    MonitorRequestSwitch(name.c_str());
-                }
-                tsl::goBack();
             });
             m_rows.push_back(row);
             list->addItem(row);
@@ -1348,6 +1342,12 @@ static void rebuildUi() {
     if (g_list == nullptr) {
         return;
     }
+    static bool s_rebuilding = false;
+    if (s_rebuilding) {
+        return;   /* 同一帧二次重建会把 clear/addItem 队列打乱,直接跳过 */
+    }
+    s_rebuilding = true;
+
     auto &gui = tsl::Overlay::get()->getCurrentGui();
     if (gui == nullptr) {
         return;
@@ -1356,6 +1356,7 @@ static void rebuildUi() {
     g_list->clear();
     buildList(g_list);
     gui->restoreFocus();
+    s_rebuilding = false;
 }
 
 class Overlay : public tsl::Overlay {
