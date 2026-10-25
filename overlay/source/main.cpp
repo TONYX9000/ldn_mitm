@@ -122,22 +122,32 @@ public:
         m_used = true;
         m_hint = false;
         m_measured = false;
+        syncHeight();
     }
     void setHint(const char *text) {
         memset(&m_room, 0, sizeof(m_room));
         snprintf(m_hintText, sizeof(m_hintText), "%s", text);
         m_used = true;
         m_hint = true;
+        syncHeight();
     }
     void clearRow() {
         m_used = false;
         m_hint = false;
+        syncHeight();
     }
 
     u16 rowHeight() const {
         if (!m_used)
             return 0;
         return kHeight;
+    }
+
+    /* 行高必须在 List::layout 之前就落到 boundaries 上:
+     * libtesla 的 List::layout 用 entry->getHeight() 累加 y,
+     * 晚一帧改高度会让相邻房间行画在同一个 y 上(叠字/房间不显示)。 */
+    void syncHeight() {
+        this->setBoundaries(this->getX(), this->getY(), this->getWidth(), rowHeight());
     }
 
     virtual void layout(u16, u16, u16, u16) override {
@@ -609,7 +619,7 @@ static void rebuildRoomSection(const MonitorSnapshot &snap)
     while (g_roomRows.size() < need) {
         auto *row = new RoomRow();
         g_roomRows.push_back(row);
-        g_list->addItem(row, 0, g_roomHeaderIndex + 1 + (int)g_roomRows.size() - 1);
+        g_list->addItem(row, RoomRow::kHeight, g_roomHeaderIndex + 1 + (int)g_roomRows.size() - 1);
     }
 
     for (u32 i = 0; i < g_roomRows.size(); i++) {
