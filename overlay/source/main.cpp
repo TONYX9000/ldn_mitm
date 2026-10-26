@@ -401,7 +401,7 @@ public:
         /* 上排:列名;下排:数值(同字号、同行内居中排列) */
         centerDraw(T("在线", "線上"), onlCx, this->getY() + 30,
                    tsl::style::color::ColorDescription);
-        centerDraw(T("房间", "房間"), roomCx, this->getY() + 30,
+        centerDraw(T("有房", "有房"), roomCx, this->getY() + 30,
                    tsl::style::color::ColorDescription);
         centerDraw(T("延迟", "延遲"), latCx, this->getY() + 30,
                    tsl::style::color::ColorDescription);
@@ -687,8 +687,12 @@ static void refreshServerRowStats(const MonitorSnapshot &snap)
             snprintf(onlineBuf, sizeof(onlineBuf), "%d", (int)online);
         else
             snprintf(onlineBuf, sizeof(onlineBuf), "--");
-        if (rooms >= 0)
-            snprintf(roomsBuf, sizeof(roomsBuf), "%d", (int)rooms);
+        /* 中继接口的房间数极不稳定(实测同一台 13 人在线会报 0 间),
+         * 这里只标「有没有房」,精确间数去房间页看(那是 UDP 扫出来的)。 */
+        if (rooms > 0)
+            snprintf(roomsBuf, sizeof(roomsBuf), "%s", T("有", "有"));
+        else if (rooms == 0)
+            snprintf(roomsBuf, sizeof(roomsBuf), "%s", T("无", "無"));
         else
             snprintf(roomsBuf, sizeof(roomsBuf), "--");
 
@@ -800,7 +804,7 @@ public:
             u64 nowNs = armTicksToNs(armGetSystemTick());
             if (g_lastPollNs == 0)
                 g_lastPollNs = nowNs;
-            if (nowNs - g_lastPollNs >= 3000000000ull) {
+            if (nowNs - g_lastPollNs >= 5000000000ull) {
                 g_lastPollNs = nowNs;
                 MonitorRequestPoll();
             }
@@ -933,7 +937,7 @@ public:
 static void PollThrottled() {
     static u64 last = 0;
     u64 now = armTicksToNs(armGetSystemTick());
-    if (last == 0 || now - last >= 3000000000ull) {
+    if (last == 0 || now - last >= 5000000000ull) {
         last = now;
         MonitorRequestPoll();
     }

@@ -258,7 +258,7 @@ void MonitorLog(const char *msg) {
 }
 
 static constexpr size_t kMaxDownload  = 3u * 1024 * 1024;  /* 订阅文件上限 */
-static constexpr size_t kMaxHttpBody  = 512u * 1024;       /* 查询响应上限 */
+static constexpr size_t kMaxHttpBody  = 64u * 1024;        /* 查询响应上限(实测响应只有几 KB) */
 static constexpr u32   kTitleHashSize = 16384;             /* 标题映射哈希桶(2 的幂;须 ≥ 条目数,10521 条) */
 static constexpr size_t kTitleArena   = 288u * 1024;       /* 标题名字符串池(实测 10521 条约 216KB) */
 static constexpr u32   kMaxScanRooms  = 24;
@@ -2203,7 +2203,7 @@ static void UdpRoomScan(const char *host, u16 port, QueryResult *qr,
  *   - 某轮未扫到时先记录首次缺失时刻 missingSince,从缺失时刻起再保留 10 秒
  *     (kRoomExpireGrace = 15s),若期间重新扫到则无缝恢复,彻底消除偶发丢包闪退;
  *   - 切换服务器时清空。 */
-static constexpr auto kRoomTtl         = std::chrono::seconds(12);
+static constexpr auto kRoomTtl         = std::chrono::seconds(60);
 static constexpr auto kRoomExpireGrace = std::chrono::seconds(15);
 
 struct RoomCacheEnt {
@@ -2218,6 +2218,8 @@ static RoomCacheEnt g_roomCache[MONITOR_MAX_ROOMS];
 static char g_cacheServer[128] = {};    /* 缓存归属的服务器 host:port */
 static Deadline g_lastOk{};             /* 最近一次查询成功时刻 */
 static bool  g_haveLastOk = false;
+/* 选中服务器连续报 0 间房的次数:接口会偶发报空,连续两轮才真清空 */
+static u32   g_zeroPolls  = 0;
 static s32   g_lastOnline = -1;
 static s32   g_lastRoomCount = -1;
 
@@ -2587,6 +2589,17 @@ static void DoRefresh(const char *nameOverride, bool reloadSubs,
                     RoomCacheUpsert(qr.rooms[i], now);
                 g_lastOk = now;
                 g_haveLastOk = true;
+            }
+            if (ok) {
+                if (qr.roomN == 0)
+                    g_zeroPolls++;
+                else
+                    g_zeroPolls = 0;
+                /* 接口偶发报空(实测 106/224 轮):第一轮 0 不清,连续两轮才清 */
+                if (qr.roomN == 0 && g_zeroPolls >= 2) {
+                    for (auto &e : g_roomCache)
+                        e.used = false;
+                }
             }
             RoomCacheExpire(now, ok);
 
@@ -4076,6 +4089,26 @@ void MonitorRequestSwitch(const char *serverName) {
     g_targetGen.Advance();
     ResetSnapshotForRequestLocked(
         serverName, T_STR("正在切换服务器…", "正在切換伺服器…"));
+    g_zeroPolls = 0;
+    /* 切服预填:先把这一台上次看到的房间塞进快照,等新查询回来再覆盖,
+     * 免得切过去先空 2~3 秒显示「暂无房间」。 */
+    for (u32 i = 0; i < g_statCount; i++) {
+        if (strcmp(g_stats[i].name, g_pendingName) != 0)
+            continue;
+        const u32 n = g_srvRoomN[i];
+        if (n == 0)
+            break;
+        s32 on = g_stats[i].online;
+        g_snap.roomN = n;
+        for (u32 k = 0; k < n; k++)
+            g_snap.rooms[k] = g_srvRooms[i][k];
+        g_snap.roomCount = (s32)n;
+        g_snap.online = (on >= (s32)n) ? on : (s32)n;
+        g_snap.status[0] = 0;
+        g_snap.busy = false;
+        g_snap.version++;
+        break;
+    }
     g_reqGen.fetch_add(1);
 }
 
